@@ -1,0 +1,59 @@
+{
+  "fill" : {
+    "automatic-gradient" : "display-p3:0.01569,0.27843,0.96078,1.00000"
+  },
+  "fill-specializations" : [
+    {
+      "appearance" : "dark",
+      "value" : {
+        "automatic-gradient" : "display-p3:0.01176,0.10588,0.38039,1.00000"
+      }
+    },
+    {
+      "appearance" : "tinted",
+      "value" : "automatic"
+    }
+  ],
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "01-clock-face.svg",
+          "name" : "Clock Face"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.32
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.22
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "02-clock-hands.svg",
+          "name" : "Clock Hands"
+        }
+      ],
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.24
+      },
+      "specular" : true,
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.08
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}
