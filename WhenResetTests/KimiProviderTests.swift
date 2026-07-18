@@ -141,6 +141,7 @@ final class KimiProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.secondary?.usedPercent, 25)
         XCTAssertEqual(snapshot.secondary?.windowMinutes, 10_080)
         XCTAssertEqual(snapshot.extraWindows?.first?.displayTitle, "Daily cap")
+        XCTAssertEqual(snapshot.extraWindows?.first?.metricID, "kimi:daily_cap:1440")
         XCTAssertEqual(snapshot.extraWindows?.first?.usedPercent, 20)
         XCTAssertEqual(snapshot.extraWindows?.first?.resetsAt, now.addingTimeInterval(3_600))
 

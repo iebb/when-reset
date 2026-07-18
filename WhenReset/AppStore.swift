@@ -2,6 +2,7 @@
 import Foundation
 import Observation
 import Security
+@preconcurrency import UserNotifications
 import WidgetKit
 
 struct DeviceLinkPresentation: Sendable {
@@ -123,6 +124,8 @@ final class AppStore {
     var monitorSettings: [UUID: AccountMonitorSettings] = [:]
     var liveActivitySettings = GlobalLiveActivitySettings()
     private(set) var hasLiveActivity = false
+    private(set) var usageHistory: [UsageHistoryPoint] = []
+    private(set) var historyStorageError: String?
 
     private let accountsKey = "accounts.v1"
     private let provider = ChatGPTProvider()
@@ -136,6 +139,8 @@ final class AppStore {
     private var copilotLink: CopilotDeviceLink?
     private let settingsKey = "monitorSettings.v1"
     private let liveActivitySettingsKey = "globalLiveActivitySettings.v1"
+    private let historyStore = UsageHistoryStore()
+    private var hasStarted = false
     private static let globalActivityID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
 
     init() {
@@ -152,8 +157,23 @@ final class AppStore {
     }
 
     func start() async {
+        guard !hasStarted else { return }
+        hasStarted = true
+        var pendingNotifications: [UsageNotificationEvent] = []
+        do {
+            let loaded = try await historyStore.load()
+            usageHistory = loaded.points
+            pendingNotifications = loaded.pendingNotifications
+            historyStorageError = nil
+        } catch {
+            historyStorageError = error.localizedDescription
+        }
+        if accounts.contains(where: { !$0.isDemo && settings(for: $0).notifyAboutResets }) {
+            await UsageNotificationService.prepareProvisionalAuthorization()
+        }
+        await deliverUsageNotifications(pendingNotifications)
         guard !accounts.isEmpty else { return }
-        await refreshAll()
+        await refreshAll(source: .launch)
     }
 
     @discardableResult
@@ -172,7 +192,7 @@ final class AppStore {
         )
         accounts.append(account)
         persistAccounts()
-        await refresh(account)
+        await refresh(account, source: .demo)
         return account
     }
 
@@ -225,8 +245,9 @@ final class AppStore {
             }
             let account = try saveLinkedAccount(identity, providerID: deviceLink.providerID,
                                                 replacing: relinkingAccount)
+            await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             clearPendingLinks(); isLinking = false
-            await refresh(account)
+            await refresh(account, source: .accountLink)
             return true
         } catch is CancellationError {
             clearPendingLinks(); isLinking = false
@@ -250,8 +271,9 @@ final class AppStore {
         do {
             let identity = try await claudeProvider.finishLink(claudeLink, pastedCode: code)
             let account = try saveLinkedAccount(identity, providerID: .claude, replacing: relinkingAccount)
+            await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             self.claudeLink = nil; isLinking = false
-            await refresh(account)
+            await refresh(account, source: .accountLink)
             return true
         } catch {
             errorMessage = error.localizedDescription; isLinking = false
@@ -265,8 +287,9 @@ final class AppStore {
         do {
             let identity = try await zaiProvider.link(apiKey: apiKey)
             let account = try saveLinkedAccount(identity, providerID: .zai, replacing: relinkingAccount)
+            await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             isLinking = false
-            await refresh(account)
+            await refresh(account, source: .accountLink)
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -281,8 +304,9 @@ final class AppStore {
         do {
             let identity = try await miniMaxProvider.link(apiKey: apiKey)
             let account = try saveLinkedAccount(identity, providerID: .miniMax, replacing: relinkingAccount)
+            await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             isLinking = false
-            await refresh(account)
+            await refresh(account, source: .accountLink)
             return true
         } catch {
             errorMessage = error.localizedDescription
@@ -296,24 +320,60 @@ final class AppStore {
         isLinking = false
     }
 
-    func refreshAll() async {
-        guard !isRefreshing else { return }
+    @discardableResult
+    func refreshAll(source: UsageRefreshSource = .manual) async -> Bool {
+        guard !isRefreshing else { return false }
         isRefreshing = true; errorMessage = nil
-        for account in accounts { await refresh(account) }
-        isRefreshing = false
+        defer { isRefreshing = false }
+        if source == .manual,
+           accounts.contains(where: { !$0.isDemo && settings(for: $0).notifyAboutResets }) {
+            await UsageNotificationService.prepareProvisionalAuthorization()
+        }
+        let refreshAccounts = accounts
+        let tasks = refreshAccounts.map { account in
+            Task { @MainActor in
+                await self.refresh(account, source: source, publishChanges: false)
+            }
+        }
+        let succeeded = await withTaskCancellationHandler {
+            var allSucceeded = true
+            for task in tasks {
+                if !(await task.value) { allSucceeded = false }
+            }
+            return allSucceeded
+        } onCancel: {
+            for task in tasks { task.cancel() }
+        }
+        guard !Task.isCancelled else { return false }
+        await deliverPendingUsageNotifications()
+        publishSnapshots()
+        await updateLiveActivity()
+        await reconcileLiveActivity()
+        return succeeded
     }
 
-    func refresh(_ account: MonitoredAccount) async {
+    @discardableResult
+    func refresh(_ account: MonitoredAccount,
+                 source: UsageRefreshSource = .manual,
+                 publishChanges: Bool = true) async -> Bool {
         if account.isDemo {
-            guard accounts.contains(where: { $0.id == account.id }) else { return }
+            guard accounts.contains(where: { $0.id == account.id }) else { return false }
             let snapshot = DemoUsageFactory.snapshot(for: account)
             mergeLatestPlan(snapshot.plan, for: account.id)
+            await recordSuccessfulSnapshot(
+                snapshot,
+                for: account,
+                source: source,
+                deliverNotifications: publishChanges
+            )
             snapshots[account.id] = snapshot
             refreshFailures.removeValue(forKey: account.id)
-            publishSnapshots()
-            await updateLiveActivity()
-            await reconcileLiveActivity()
-            return
+            if publishChanges {
+                publishSnapshots()
+                await updateLiveActivity()
+                await reconcileLiveActivity()
+            }
+            return true
         }
         do {
             var credentials = try KeychainStore.load(for: account.id)
@@ -372,20 +432,30 @@ final class AppStore {
             case .miniMax:
                 snapshot = try await miniMaxProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
             }
-            guard accounts.contains(where: { $0.id == account.id }) else { return }
+            guard accounts.contains(where: { $0.id == account.id }) else { return false }
             mergeLatestPlan(snapshot.plan, for: account.id)
+            await recordSuccessfulSnapshot(
+                snapshot,
+                for: effectiveAccount,
+                source: source,
+                deliverNotifications: publishChanges
+            )
             snapshots[account.id] = snapshot
             refreshFailures.removeValue(forKey: account.id)
-            publishSnapshots()
-            await updateLiveActivity()
-            await reconcileLiveActivity()
+            if publishChanges {
+                publishSnapshots()
+                await updateLiveActivity()
+                await reconcileLiveActivity()
+            }
+            return true
         } catch is CancellationError {
-            return
+            return false
         } catch {
-            guard accounts.contains(where: { $0.id == account.id }) else { return }
+            guard accounts.contains(where: { $0.id == account.id }) else { return false }
             // Keep the most recent snapshot in memory and in SharedSnapshotStore.
             // The account-scoped failure lets the UI label that data as cached.
             refreshFailures[account.id] = AccountRefreshFailure(error: error)
+            return false
         }
     }
 
@@ -432,7 +502,16 @@ final class AppStore {
         monitorSettings.removeValue(forKey: account.id)
         if !account.isDemo { KeychainStore.delete(for: account.id) }
         persistAccounts(); persistMonitorSettings(); publishSnapshots()
-        Task { await updateLiveActivity(); await reconcileLiveActivity() }
+        Task {
+            do {
+                usageHistory = try await historyStore.remove(accountID: account.id)
+                historyStorageError = nil
+            } catch {
+                historyStorageError = error.localizedDescription
+            }
+            await updateLiveActivity()
+            await reconcileLiveActivity()
+        }
     }
 
     func setAppearance(displayName: String, symbolName: String?, for account: MonitoredAccount) {
@@ -478,10 +557,26 @@ final class AppStore {
     func settings(for account: MonitoredAccount) -> AccountMonitorSettings { monitorSettings[account.id] ?? .init() }
 
     func setSettings(_ settings: AccountMonitorSettings, for account: MonitoredAccount) {
+        let previouslyEnabled = self.settings(for: account).notifyAboutResets
         monitorSettings[account.id] = settings
         persistMonitorSettings()
         publishSnapshots()
-        Task { await updateLiveActivity(); await reconcileLiveActivity() }
+        Task {
+            if previouslyEnabled != settings.notifyAboutResets {
+                if settings.notifyAboutResets, !account.isDemo {
+                    await UsageNotificationService.requestProminentAuthorization()
+                } else {
+                    do {
+                        try await historyStore.discardPendingNotifications(accountID: account.id)
+                        historyStorageError = nil
+                    } catch {
+                        historyStorageError = error.localizedDescription
+                    }
+                }
+            }
+            await updateLiveActivity()
+            await reconcileLiveActivity()
+        }
     }
 
     func setLiveActivitySettings(_ settings: GlobalLiveActivitySettings) {
@@ -638,6 +733,62 @@ final class AppStore {
     private func persistMonitorSettings() {
         UserDefaults.standard.set(try? JSONEncoder().encode(monitorSettings), forKey: settingsKey)
     }
+
+    private func recordSuccessfulSnapshot(_ snapshot: UsageSnapshot, for account: MonitoredAccount,
+                                          source: UsageRefreshSource,
+                                          deliverNotifications: Bool) async {
+        let notificationsEnabled = settings(for: account).notifyAboutResets
+        if !account.isDemo, notificationsEnabled, source == .accountLink {
+            await UsageNotificationService.requestProminentAuthorization()
+        }
+        do {
+            let result = try await historyStore.record(
+                snapshot: snapshot,
+                account: account,
+                source: source,
+                notificationsEnabled: notificationsEnabled
+            )
+            usageHistory = result.points
+            historyStorageError = nil
+            if deliverNotifications {
+                await deliverUsageNotifications(result.pendingNotifications)
+            }
+        } catch {
+            // History is supplementary: a storage problem must not turn a successful provider
+            // refresh into an authentication or update failure.
+            historyStorageError = error.localizedDescription
+        }
+    }
+
+    private func deliverPendingUsageNotifications() async {
+        do {
+            let loaded = try await historyStore.load()
+            usageHistory = loaded.points
+            historyStorageError = nil
+            await deliverUsageNotifications(loaded.pendingNotifications)
+        } catch {
+            historyStorageError = error.localizedDescription
+        }
+    }
+
+    private func deliverUsageNotifications(_ events: [UsageNotificationEvent]) async {
+        let deliverable = events.filter { event in
+            guard let account = accounts.first(where: { $0.id == event.accountID }) else { return false }
+            return !account.isDemo && settings(for: account).notifyAboutResets
+        }
+        let deliverableIDs = Set(deliverable.map(\.id))
+        let suppressed = Set(events.map(\.id)).subtracting(deliverableIDs)
+        let delivered = await UsageNotificationService.deliver(deliverable)
+        let handled = delivered.union(suppressed)
+        guard !handled.isEmpty else { return }
+        do {
+            try await historyStore.markNotificationsDelivered(handled)
+            historyStorageError = nil
+        } catch {
+            historyStorageError = error.localizedDescription
+        }
+    }
+
     private func publishSnapshots() {
         SharedSnapshotStore.save(accounts.compactMap { account in
             snapshots[account.id].map {
@@ -653,5 +804,69 @@ final class AppStore {
         result.accountProviderID = account.providerID
         result.accountSymbolName = account.customSymbolName
         return result
+    }
+
+    private func clearHistoryIfIdentityChanged(from previous: MonitoredAccount?,
+                                               to current: MonitoredAccount) async {
+        guard let previous, previous.workspaceID != current.workspaceID else { return }
+        do {
+            usageHistory = try await historyStore.remove(accountID: current.id)
+            historyStorageError = nil
+        } catch {
+            historyStorageError = error.localizedDescription
+        }
+    }
+}
+
+@MainActor
+private enum UsageNotificationService {
+    static func prepareProvisionalAuthorization() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .notDetermined else { return }
+        _ = try? await center.requestAuthorization(options: [.alert, .sound, .provisional])
+    }
+
+    static func requestProminentAuthorization() async {
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        guard settings.authorizationStatus == .notDetermined
+                || settings.authorizationStatus == .provisional else { return }
+        _ = try? await center.requestAuthorization(options: [.alert, .sound])
+    }
+
+    static func deliver(_ events: [UsageNotificationEvent]) async -> Set<String> {
+        guard !events.isEmpty else { return [] }
+        let center = UNUserNotificationCenter.current()
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            break
+        case .denied, .notDetermined:
+            return []
+        @unknown default:
+            return []
+        }
+
+        var delivered: Set<String> = []
+        for event in events.sorted(by: { $0.createdAt < $1.createdAt }) {
+            let content = UNMutableNotificationContent()
+            content.title = event.title
+            content.body = event.body
+            content.threadIdentifier = "usage-\(event.accountID.uuidString)"
+            if settings.soundSetting == .enabled { content.sound = .default }
+            let request = UNNotificationRequest(
+                identifier: "when-reset.\(event.id)",
+                content: content,
+                trigger: nil
+            )
+            do {
+                try await center.add(request)
+                delivered.insert(event.id)
+            } catch {
+                continue
+            }
+        }
+        return delivered
     }
 }

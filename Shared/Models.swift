@@ -166,6 +166,7 @@ struct LiveActivityQuotaRule: Codable, Hashable, Sendable {
 struct AccountMonitorSettings: Codable, Hashable, Sendable {
     static let bankedResetMetricID = "banked-resets"
 
+    var notifyAboutResets = true
     var showBankedResets = true
     var hiddenMetricIDs: Set<String> = []
     var showBankedResetsInLiveActivity = true
@@ -175,12 +176,14 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     var liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:]
     var bankedResetLiveActivityRule = LiveActivityQuotaRule()
 
-    init(showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
+    init(notifyAboutResets: Bool = true,
+         showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
          showBankedResetsInLiveActivity: Bool = true, hiddenLiveActivityMetricIDs: Set<String> = [],
          pinnedLiveActivityMetricIDs: Set<String> = [],
          defaultLiveActivityRule: LiveActivityQuotaRule = .init(),
          liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:],
          bankedResetLiveActivityRule: LiveActivityQuotaRule = .init()) {
+        self.notifyAboutResets = notifyAboutResets
         self.showBankedResets = showBankedResets
         self.hiddenMetricIDs = hiddenMetricIDs
         self.showBankedResetsInLiveActivity = showBankedResetsInLiveActivity
@@ -193,6 +196,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
+        notifyAboutResets = try values.decodeIfPresent(Bool.self, forKey: .notifyAboutResets) ?? true
         showBankedResets = try values.decodeIfPresent(Bool.self, forKey: .showBankedResets) ?? true
         hiddenMetricIDs = try values.decodeIfPresent(Set<String>.self, forKey: .hiddenMetricIDs) ?? []
         showBankedResetsInLiveActivity = try values.decodeIfPresent(Bool.self, forKey: .showBankedResetsInLiveActivity) ?? true
@@ -220,6 +224,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
+        case notifyAboutResets
         case showBankedResets, hiddenMetricIDs, showBankedResetsInLiveActivity, hiddenLiveActivityMetricIDs
         case pinnedLiveActivityMetricIDs
         case defaultLiveActivityRule, liveActivityQuotaRules, bankedResetLiveActivityRule

@@ -312,6 +312,7 @@ final class ParsingTests: XCTestCase {
     func testLegacyAccountSettingsDecodeWithNewVisibilityDefaults() throws {
         let data = Data(#"{"liveActivityMode":"nearReset","nearResetMinutes":60}"#.utf8)
         let settings = try JSONDecoder().decode(AccountMonitorSettings.self, from: data)
+        XCTAssertTrue(settings.notifyAboutResets)
         XCTAssertTrue(settings.showBankedResets)
         XCTAssertTrue(settings.showBankedResetsInLiveActivity)
         XCTAssertTrue(settings.hiddenMetricIDs.isEmpty)
@@ -320,6 +321,15 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(settings.defaultLiveActivityRule.trigger, .remainingHours)
         XCTAssertEqual(settings.defaultLiveActivityRule.remainingHours, 4)
         XCTAssertTrue(settings.liveActivityQuotaRules.isEmpty)
+    }
+
+    func testAccountResetNotificationSettingRoundTripsDisabled() throws {
+        let original = AccountMonitorSettings(notifyAboutResets: false)
+        let decoded = try JSONDecoder().decode(
+            AccountMonitorSettings.self,
+            from: JSONEncoder().encode(original)
+        )
+        XCTAssertFalse(decoded.notifyAboutResets)
     }
 
     func testLegacyGlobalLiveActivityModesDecodeToAutomaticAndDisabled() throws {
@@ -520,5 +530,596 @@ final class ParsingTests: XCTestCase {
         XCTAssertTrue(failure.requiresRelink)
         XCTAssertEqual(failure.title, "Sign-in failed")
         XCTAssertFalse(failure.message.contains("provider response"))
+    }
+}
+
+final class UsageHistoryTests: XCTestCase {
+    func testHistoryRecordsEveryMetricAndWeeklyRemainingTime() async throws {
+        let store = try makeStore()
+        let observedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let snapshot = UsageSnapshot(
+            accountID: account.id,
+            providerName: "Claude",
+            accountName: "Work",
+            accountProviderID: .claude,
+            plan: "Max",
+            primary: UsageWindow(title: "Session", usedPercent: 30,
+                                 resetsAt: observedAt.addingTimeInterval(3_600), windowMinutes: 300,
+                                 kind: .fiveHour, identifier: "five_hour"),
+            secondary: UsageWindow(title: "Weekly", usedPercent: 20,
+                                   resetsAt: observedAt.addingTimeInterval(6 * 86_400 + 1_234),
+                                   windowMinutes: 10_080, kind: .weekly, identifier: "weekly"),
+            availableResetCount: 0,
+            resetCredits: [],
+            fetchedAt: observedAt,
+            extraWindows: [
+                UsageWindow(title: "Extra", usedPercent: 55,
+                            resetsAt: observedAt.addingTimeInterval(10_000), windowMinutes: 60,
+                            kind: .additional, identifier: "extra")
+            ]
+        )
+
+        let first = try await store.record(snapshot: snapshot, account: account,
+                                           source: .background, now: observedAt)
+        XCTAssertEqual(first.points.count, 3)
+        XCTAssertTrue(first.points.allSatisfy { $0.source == .background })
+        XCTAssertTrue(first.points.allSatisfy { $0.plan == "Max" })
+        let weekly = try XCTUnwrap(first.points.first(where: { $0.metricID == "weekly" }))
+        XCTAssertEqual(weekly.remainingPercent, 80)
+        XCTAssertEqual(weekly.secondsUntilReset, 6 * 86_400 + 1_234, accuracy: 0.001)
+
+        let duplicate = try await store.record(snapshot: snapshot, account: account,
+                                               source: .manual, now: observedAt)
+        XCTAssertEqual(duplicate.points.count, 3)
+    }
+
+    func testHistoryRetainsThirtyDaysAndPrunesBeyondThirtyFive() async throws {
+        let store = try makeStore()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .kimi)
+
+        for ageInDays in [36.0, 30.0, 0.0] {
+            let observedAt = now.addingTimeInterval(-ageInDays * 86_400)
+            let snapshot = makeSnapshot(account: account, at: observedAt,
+                                        weeklyRemaining: 70 - ageInDays / 2,
+                                        weeklyResetAt: observedAt.addingTimeInterval(4 * 86_400))
+            _ = try await store.record(snapshot: snapshot, account: account,
+                                       source: .background, now: now)
+        }
+
+        let loaded = try await store.load(now: now)
+        XCTAssertEqual(loaded.points.map(\.recordedAt), [
+            now.addingTimeInterval(-30 * 86_400), now
+        ])
+        XCTAssertTrue(loaded.points.allSatisfy {
+            $0.recordedAt >= now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
+        })
+    }
+
+    func testHistoryFallsBackToAccountPlanWhenSnapshotOmitsPlan() async throws {
+        let store = try makeStore()
+        let observedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .miniMax)
+        var snapshot = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 50,
+                                    weeklyResetAt: observedAt.addingTimeInterval(5 * 86_400))
+        snapshot.plan = nil
+
+        let result = try await store.record(snapshot: snapshot, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertEqual(result.points.map(\.plan), ["Pro"])
+    }
+
+    func testDuplicateProviderMetricIDsAreDeduplicated() async throws {
+        let store = try makeStore()
+        let observedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let duplicateID = "same-metric"
+        let snapshot = UsageSnapshot(
+            accountID: account.id, providerName: "Claude", accountName: "Work",
+            accountProviderID: .claude, plan: "Pro",
+            primary: UsageWindow(title: "First", usedPercent: 60,
+                                 resetsAt: observedAt.addingTimeInterval(3_600),
+                                 windowMinutes: 300, identifier: duplicateID),
+            secondary: nil, availableResetCount: 0, resetCredits: [], fetchedAt: observedAt,
+            extraWindows: [
+                UsageWindow(title: "Replacement", usedPercent: 40,
+                            resetsAt: observedAt.addingTimeInterval(7_200),
+                            windowMinutes: 300, identifier: duplicateID)
+            ]
+        )
+
+        let result = try await store.record(snapshot: snapshot, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertEqual(result.points.count, 1)
+        XCTAssertEqual(result.points.first?.remainingPercent, 60)
+        XCTAssertEqual(result.points.first?.secondsUntilReset, 7_200)
+    }
+
+    func testDuplicateBankedCreditIDsDoNotCrashOrDoubleCount() async throws {
+        let store = try makeStore()
+        let observedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        let duplicateCredits = [
+            ResetCredit(id: "same-credit", expiresAt: observedAt.addingTimeInterval(5 * 86_400),
+                        status: "available"),
+            ResetCredit(id: "same-credit", expiresAt: observedAt.addingTimeInterval(10 * 86_400),
+                        status: "available")
+        ]
+        let snapshot = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 50,
+                                    weeklyResetAt: observedAt.addingTimeInterval(5 * 86_400),
+                                    credits: duplicateCredits)
+
+        let result = try await store.record(snapshot: snapshot, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertTrue(result.pendingNotifications.isEmpty)
+    }
+
+    func testSchemaOneArchiveIsPersistentlyUpgraded() async throws {
+        let fileURL = try makeStoreFileURL()
+        let observedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let snapshot = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 50,
+                                    weeklyResetAt: observedAt.addingTimeInterval(5 * 86_400))
+        _ = try await UsageHistoryStore(fileURL: fileURL).record(
+            snapshot: snapshot, account: account, source: .background, now: observedAt
+        )
+
+        var legacy = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any]
+        )
+        legacy["schemaVersion"] = 1
+        try JSONSerialization.data(withJSONObject: legacy).write(to: fileURL, options: .atomic)
+
+        _ = try await UsageHistoryStore(fileURL: fileURL).load(now: observedAt)
+        let upgraded = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any]
+        )
+        XCTAssertEqual((upgraded["schemaVersion"] as? NSNumber)?.intValue, 2)
+    }
+
+    func testStaleDetectorObservationBecomesANewBaseline() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 10,
+                                    weeklyResetAt: start.addingTimeInterval(2 * 86_400))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(40 * 86_400)
+        let current = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 100,
+                                   weeklyResetAt: observedAt.addingTimeInterval(7 * 86_400))
+        let result = try await store.record(snapshot: current, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertTrue(result.pendingNotifications.isEmpty)
+    }
+
+    func testEarlyWeeklyRecoveryWithConsumedCreditNotifiesOnce() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        let oldCredit = ResetCredit(id: "credit-old", expiresAt: start.addingTimeInterval(10 * 86_400),
+                                    status: "available", grantedAt: start.addingTimeInterval(-86_400))
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 20,
+                                    weeklyResetAt: start.addingTimeInterval(4 * 86_400),
+                                    credits: [oldCredit])
+        let baselineResult = try await store.record(snapshot: baseline, account: account,
+                                                    source: .background, now: start)
+        XCTAssertTrue(baselineResult.pendingNotifications.isEmpty)
+
+        let recoveredAt = start.addingTimeInterval(3_600)
+        let recovered = makeSnapshot(account: account, at: recoveredAt, weeklyRemaining: 100,
+                                     weeklyResetAt: recoveredAt.addingTimeInterval(7 * 86_400))
+        let result = try await store.record(snapshot: recovered, account: account,
+                                            source: .background, now: recoveredAt)
+        let event = try XCTUnwrap(result.pendingNotifications.first)
+        XCTAssertEqual(event.kind, .probableEarlyWeeklyReset)
+        XCTAssertTrue(event.body.contains("20% to 100%"))
+
+        try await store.markNotificationsDelivered([event.id], now: recoveredAt)
+        let later = makeSnapshot(account: account, at: recoveredAt.addingTimeInterval(600),
+                                 weeklyRemaining: 99,
+                                 weeklyResetAt: recoveredAt.addingTimeInterval(7 * 86_400))
+        let repeated = try await store.record(snapshot: later, account: account,
+                                              source: .background,
+                                              now: recoveredAt.addingTimeInterval(600))
+        XCTAssertTrue(repeated.pendingNotifications.isEmpty)
+    }
+
+    func testChatGPTEarlyWeeklyRecoveryWithoutCreditDetailsStillNotifies() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 20,
+                                    weeklyResetAt: start.addingTimeInterval(4 * 86_400))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(60 * 60)
+        let recovered = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 80,
+                                     weeklyResetAt: observedAt.addingTimeInterval(7 * 86_400))
+        let result = try await store.record(snapshot: recovered, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertEqual(result.pendingNotifications.filter {
+            $0.kind == .probableEarlyWeeklyReset
+        }.count, 1)
+        XCTAssertFalse(result.pendingNotifications.contains { $0.kind == .probableEarlyReset })
+    }
+
+    func testScheduledWeeklyRolloverDoesNotNotify() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        let credit = ResetCredit(id: "credit", expiresAt: start.addingTimeInterval(5 * 86_400),
+                                 status: "available")
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 10,
+                                    weeklyResetAt: start.addingTimeInterval(30 * 60), credits: [credit])
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let afterReset = start.addingTimeInterval(60 * 60)
+        let rolledOver = makeSnapshot(account: account, at: afterReset, weeklyRemaining: 100,
+                                      weeklyResetAt: afterReset.addingTimeInterval(7 * 86_400))
+        let result = try await store.record(snapshot: rolledOver, account: account,
+                                            source: .background, now: afterReset)
+        XCTAssertFalse(result.pendingNotifications.contains { $0.kind == .probableEarlyWeeklyReset })
+    }
+
+    func testClaudeScheduledResetNotifies() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 10,
+                                    weeklyResetAt: start.addingTimeInterval(30 * 60))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(60 * 60)
+        let reset = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 100,
+                                 weeklyResetAt: observedAt.addingTimeInterval(7 * 86_400))
+        let result = try await store.record(snapshot: reset, account: account,
+                                            source: .background, now: observedAt)
+
+        let events = result.pendingNotifications.filter { $0.kind == .quotaReset }
+        XCTAssertEqual(events.count, 1)
+        XCTAssertTrue(try XCTUnwrap(events.first).title.contains("Weekly"))
+    }
+
+    func testUnusedQuotaCycleAdvanceStillNotifies() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 100,
+                                    weeklyResetAt: start.addingTimeInterval(30 * 60))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(60 * 60)
+        let reset = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 100,
+                                 weeklyResetAt: observedAt.addingTimeInterval(7 * 86_400))
+        let result = try await store.record(snapshot: reset, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertEqual(result.pendingNotifications.filter { $0.kind == .quotaReset }.count, 1)
+    }
+
+    func testClaudeProbableEarlyResetNotifies() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 20,
+                                    weeklyResetAt: start.addingTimeInterval(4 * 86_400))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(60 * 60)
+        let reset = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 80,
+                                 weeklyResetAt: observedAt.addingTimeInterval(7 * 86_400))
+        let result = try await store.record(snapshot: reset, account: account,
+                                            source: .background, now: observedAt)
+
+        let event = try XCTUnwrap(result.pendingNotifications.first {
+            $0.kind == .probableEarlyReset
+        })
+        XCTAssertTrue(event.body.contains("20%→80%"))
+    }
+
+    func testProviderMetricsResettingTogetherProduceOneNotification() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .githubCopilot)
+        let initialReset = start.addingTimeInterval(30 * 60)
+        let baseline = UsageSnapshot(
+            accountID: account.id, providerName: "GitHub Copilot", accountName: "Work",
+            accountProviderID: .githubCopilot, plan: "Pro",
+            primary: UsageWindow(title: "Chat", usedPercent: 90, resetsAt: initialReset,
+                                 windowMinutes: 1_440, identifier: "chat"),
+            secondary: UsageWindow(title: "Premium requests", usedPercent: 80,
+                                   resetsAt: initialReset, windowMinutes: 1_440,
+                                   identifier: "premium"),
+            availableResetCount: 0, resetCredits: [], fetchedAt: start
+        )
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(60 * 60)
+        let nextReset = observedAt.addingTimeInterval(30 * 86_400)
+        var reset = baseline
+        reset.primary!.usedPercent = 0
+        reset.primary!.resetsAt = nextReset
+        reset.secondary!.usedPercent = 0
+        reset.secondary!.resetsAt = nextReset
+        reset.fetchedAt = observedAt
+        let result = try await store.record(snapshot: reset, account: account,
+                                            source: .background, now: observedAt)
+
+        let events = result.pendingNotifications.filter { $0.kind == .quotaReset }
+        XCTAssertEqual(events.count, 1)
+        XCTAssertTrue(try XCTUnwrap(events.first).body.contains("Chat 100%"))
+        XCTAssertTrue(try XCTUnwrap(events.first).body.contains("Premium requests 100%"))
+    }
+
+    func testShortTTLResetTargetJitterDoesNotNotify() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .kimi)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 50,
+                                    weeklyResetAt: start.addingTimeInterval(7 * 86_400))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(10 * 60)
+        let jittered = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 50,
+                                    weeklyResetAt: baseline.secondary!.resetsAt.addingTimeInterval(10 * 60))
+        let result = try await store.record(snapshot: jittered, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertTrue(result.pendingNotifications.isEmpty)
+    }
+
+    func testResetNotificationsCanBeDisabledWithoutReplayingChanges() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 10,
+                                    weeklyResetAt: start.addingTimeInterval(30 * 60))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, notificationsEnabled: false, now: start)
+
+        let firstResetAt = start.addingTimeInterval(60 * 60)
+        let firstReset = makeSnapshot(account: account, at: firstResetAt, weeklyRemaining: 100,
+                                      weeklyResetAt: firstResetAt.addingTimeInterval(7 * 86_400))
+        let disabled = try await store.record(snapshot: firstReset, account: account,
+                                              source: .background, notificationsEnabled: false,
+                                              now: firstResetAt)
+        XCTAssertTrue(disabled.pendingNotifications.isEmpty)
+
+        var unchanged = firstReset
+        unchanged.fetchedAt = firstResetAt.addingTimeInterval(10 * 60)
+        let enabled = try await store.record(snapshot: unchanged, account: account,
+                                             source: .background, notificationsEnabled: true,
+                                             now: unchanged.fetchedAt)
+        XCTAssertTrue(enabled.pendingNotifications.isEmpty)
+
+        let secondResetAt = firstReset.secondary!.resetsAt.addingTimeInterval(60 * 60)
+        let secondReset = makeSnapshot(account: account, at: secondResetAt, weeklyRemaining: 100,
+                                       weeklyResetAt: secondResetAt.addingTimeInterval(7 * 86_400))
+        let later = try await store.record(snapshot: secondReset, account: account,
+                                           source: .background, notificationsEnabled: true,
+                                           now: secondResetAt)
+        XCTAssertEqual(later.pendingNotifications.filter { $0.kind == .quotaReset }.count, 1)
+    }
+
+    func testChatGPTCountOnlyBankedResetIncreaseNotifies() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        var baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 50,
+                                    weeklyResetAt: start.addingTimeInterval(5 * 86_400))
+        baseline.availableResetCount = 2
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        var increased = baseline
+        increased.fetchedAt = start.addingTimeInterval(10 * 60)
+        increased.availableResetCount = 3
+        let result = try await store.record(snapshot: increased, account: account,
+                                            source: .background, now: increased.fetchedAt)
+        XCTAssertEqual(result.pendingNotifications.filter { $0.kind == .newBankedReset }.count, 1)
+        try await store.discardPendingNotifications(accountID: account.id, now: increased.fetchedAt)
+        let afterDiscard = try await store.load(now: increased.fetchedAt)
+        XCTAssertTrue(afterDiscard.pendingNotifications.isEmpty)
+    }
+
+    func testPlanChangeRebaselinesResetDetector() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 20,
+                                    weeklyResetAt: start.addingTimeInterval(4 * 86_400))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(60 * 60)
+        var changedPlan = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 100,
+                                       weeklyResetAt: observedAt.addingTimeInterval(7 * 86_400))
+        changedPlan.plan = "Team"
+        let result = try await store.record(snapshot: changedPlan, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertTrue(result.pendingNotifications.isEmpty)
+        XCTAssertEqual(result.points.last?.plan, "Team")
+    }
+
+    func testPlanCasingChangeDoesNotRebaselineResetDetector() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 10,
+                                    weeklyResetAt: start.addingTimeInterval(30 * 60))
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(60 * 60)
+        var reset = makeSnapshot(account: account, at: observedAt, weeklyRemaining: 100,
+                                 weeklyResetAt: observedAt.addingTimeInterval(7 * 86_400))
+        reset.plan = "pro"
+        let result = try await store.record(snapshot: reset, account: account,
+                                            source: .background, now: observedAt)
+        XCTAssertEqual(result.pendingNotifications.filter { $0.kind == .quotaReset }.count, 1)
+    }
+
+    func testNewBankedCreditWithUnchangedCountNotifiesAndDoesNotRepeat() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        let old = ResetCredit(id: "old", expiresAt: start.addingTimeInterval(10 * 86_400),
+                              status: "available")
+        let new = ResetCredit(id: "new", expiresAt: start.addingTimeInterval(20 * 86_400),
+                              status: "available")
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 60,
+                                    weeklyResetAt: start.addingTimeInterval(5 * 86_400), credits: [old])
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let nextDate = start.addingTimeInterval(3_600)
+        let replacement = makeSnapshot(account: account, at: nextDate, weeklyRemaining: 59,
+                                       weeklyResetAt: start.addingTimeInterval(5 * 86_400), credits: [new])
+        let result = try await store.record(snapshot: replacement, account: account,
+                                            source: .background, now: nextDate)
+        let event = try XCTUnwrap(result.pendingNotifications.first(where: { $0.kind == .newBankedReset }))
+        XCTAssertTrue(event.body.contains("new banked reset"))
+        try await store.markNotificationsDelivered([event.id], now: nextDate)
+
+        let againDate = nextDate.addingTimeInterval(600)
+        let again = makeSnapshot(account: account, at: againDate, weeklyRemaining: 58,
+                                 weeklyResetAt: start.addingTimeInterval(5 * 86_400), credits: [new])
+        let repeated = try await store.record(snapshot: again, account: account,
+                                              source: .background, now: againDate)
+        XCTAssertTrue(repeated.pendingNotifications.isEmpty)
+    }
+
+    func testChatGPTCreditWithoutServerIDUsesDeterministicIdentity() throws {
+        let account = makeAccount(provider: .chatGPT)
+        let usage = try JSONSerialization.data(withJSONObject: [
+            "rate_limit": [
+                "secondary_window": [
+                    "used_percent": 25,
+                    "limit_window_seconds": 604_800,
+                    "reset_at": 2_100_000_000
+                ]
+            ]
+        ])
+        let credits = try JSONSerialization.data(withJSONObject: [
+            "available_count": 1,
+            "credits": [[
+                "status": "available",
+                "granted_at": "2030-01-01T00:00:00Z",
+                "expires_at": "2030-01-31T00:00:00Z"
+            ]]
+        ])
+
+        let first = try ChatGPTProvider().parse(account: account, usage: usage, credits: credits)
+        let second = try ChatGPTProvider().parse(account: account, usage: usage, credits: credits)
+        XCTAssertEqual(first.resetCredits.map(\.id), second.resetCredits.map(\.id))
+        XCTAssertTrue(try XCTUnwrap(first.resetCredits.first?.id).hasPrefix("generated:"))
+    }
+
+    func testBankedResetAlertStateSurvivesStoreRestart() async throws {
+        let fileURL = try makeStoreFileURL()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        let old = ResetCredit(id: "old", expiresAt: start.addingTimeInterval(10 * 86_400),
+                              status: "available")
+        let baseline = makeSnapshot(account: account, at: start, weeklyRemaining: 50,
+                                    weeklyResetAt: start.addingTimeInterval(5 * 86_400), credits: [old])
+        _ = try await UsageHistoryStore(fileURL: fileURL).record(
+            snapshot: baseline, account: account, source: .background, now: start
+        )
+
+        let nextDate = start.addingTimeInterval(3_600)
+        let new = ResetCredit(id: "new", expiresAt: start.addingTimeInterval(20 * 86_400),
+                              status: "available")
+        let updated = makeSnapshot(account: account, at: nextDate, weeklyRemaining: 49,
+                                   weeklyResetAt: start.addingTimeInterval(5 * 86_400), credits: [old, new])
+        let restartedStore = UsageHistoryStore(fileURL: fileURL)
+        let result = try await restartedStore.record(
+            snapshot: updated, account: account, source: .background, now: nextDate
+        )
+        let event = try XCTUnwrap(result.pendingNotifications.first(where: { $0.kind == .newBankedReset }))
+        try await restartedStore.markNotificationsDelivered([event.id], now: nextDate)
+
+        let thirdDate = nextDate.addingTimeInterval(600)
+        var repeatedSnapshot = updated
+        repeatedSnapshot.fetchedAt = thirdDate
+        let afterSecondRestart = try await UsageHistoryStore(fileURL: fileURL).record(
+            snapshot: repeatedSnapshot, account: account, source: .background, now: thirdDate
+        )
+        XCTAssertTrue(afterSecondRestart.pendingNotifications.isEmpty)
+    }
+
+    func testCreditDetailsAppearingAfterCountOnlyBaselineDoNotLookNew() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .chatGPT)
+        var countOnly = makeSnapshot(account: account, at: start, weeklyRemaining: 50,
+                                     weeklyResetAt: start.addingTimeInterval(5 * 86_400))
+        countOnly.availableResetCount = 2
+        _ = try await store.record(snapshot: countOnly, account: account,
+                                   source: .background, now: start)
+
+        let nextDate = start.addingTimeInterval(600)
+        let credits = [
+            ResetCredit(id: "existing-1", expiresAt: start.addingTimeInterval(10 * 86_400),
+                        status: "available"),
+            ResetCredit(id: "existing-2", expiresAt: start.addingTimeInterval(20 * 86_400),
+                        status: "available")
+        ]
+        let detailed = makeSnapshot(account: account, at: nextDate, weeklyRemaining: 49,
+                                    weeklyResetAt: start.addingTimeInterval(5 * 86_400), credits: credits)
+        let result = try await store.record(snapshot: detailed, account: account,
+                                            source: .background, now: nextDate)
+        XCTAssertFalse(result.pendingNotifications.contains { $0.kind == .newBankedReset })
+    }
+
+    private func makeStore() throws -> UsageHistoryStore {
+        UsageHistoryStore(fileURL: try makeStoreFileURL())
+    }
+
+    private func makeStoreFileURL() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("when-reset-history-tests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return directory.appendingPathComponent("history.json")
+    }
+
+    private func makeAccount(provider: ProviderID) -> MonitoredAccount {
+        MonitoredAccount(
+            id: UUID(), providerID: provider, displayName: "Work account",
+            workspaceID: "workspace", plan: "Pro", addedAt: .now
+        )
+    }
+
+    private func makeSnapshot(account: MonitoredAccount, at date: Date,
+                              weeklyRemaining: Double, weeklyResetAt: Date,
+                              credits: [ResetCredit] = []) -> UsageSnapshot {
+        UsageSnapshot(
+            accountID: account.id,
+            providerName: account.providerID.displayName,
+            accountName: account.displayName,
+            accountProviderID: account.providerID,
+            plan: account.plan,
+            primary: nil,
+            secondary: UsageWindow(
+                title: "Weekly limit",
+                usedPercent: 100 - weeklyRemaining,
+                resetsAt: weeklyResetAt,
+                windowMinutes: 10_080,
+                kind: .weekly,
+                identifier: "weekly"
+            ),
+            availableResetCount: credits.count,
+            resetCredits: credits,
+            fetchedAt: date
+        )
     }
 }

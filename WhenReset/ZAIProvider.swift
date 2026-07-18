@@ -84,8 +84,8 @@ struct ZAIProvider {
         var weekly: UsageWindow?
         var additional: [UsageWindow] = []
 
-        for (index, rawLimit) in rawLimits.enumerated() {
-            guard let window = usageWindow(rawLimit, index: index, now: now) else { continue }
+        for rawLimit in rawLimits {
+            guard let window = usageWindow(rawLimit, now: now) else { continue }
             switch window.windowMinutes {
             case 300 where fiveHour == nil:
                 fiveHour = window
@@ -138,7 +138,7 @@ struct ZAIProvider {
         }
     }
 
-    private static func usageWindow(_ raw: [String: Any], index: Int, now: Date) -> UsageWindow? {
+    private static func usageWindow(_ raw: [String: Any], now: Date) -> UsageWindow? {
         guard let type = string(raw["type"])?.uppercased(),
               type == "TOKENS_LIMIT" || type == "TIME_LIMIT",
               let reset = resetDate(raw["nextResetTime"] ?? raw["next_reset_time"]),
@@ -161,7 +161,7 @@ struct ZAIProvider {
                 let title = windowTitle(unit: unit, number: number) ?? "Coding limit"
                 return UsageWindow(title: title, usedPercent: usedPercent, resetsAt: reset,
                                    windowMinutes: minutes, kind: .additional,
-                                   identifier: "zai:coding:\(index)")
+                                   identifier: "zai:coding:\(unit ?? -1):\(number)")
             }
         }
 
@@ -171,7 +171,7 @@ struct ZAIProvider {
             resetsAt: reset,
             windowMinutes: minutes,
             kind: .additional,
-            identifier: "zai:mcp:\(index)"
+            identifier: "zai:mcp:\(unit ?? -1):\(number)"
         )
     }
 

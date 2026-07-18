@@ -182,11 +182,34 @@ struct ChatGPTProvider {
         let limit = root["rate_limit"] as? [String: Any] ?? root
         let details = (try? JSONSerialization.jsonObject(with: credits)) as? [String: Any] ?? [:]
         let creditObjects = details["credits"] as? [[String: Any]] ?? []
+        var fallbackOrdinals: [String: Int] = [:]
         let parsedCredits = creditObjects.map { item in
-            ResetCredit(id: (item["id"] as? String) ?? UUID().uuidString,
-                        expiresAt: Self.date(item["expires_at"] ?? item["expiresAt"]),
-                        status: item["status"] as? String,
-                        grantedAt: Self.date(item["granted_at"] ?? item["grantedAt"]))
+            let expiresAt = Self.date(item["expires_at"] ?? item["expiresAt"])
+            let grantedAt = Self.date(item["granted_at"] ?? item["grantedAt"])
+            let status = item["status"] as? String
+            let id: String
+            if let serverID = Self.nonEmptyString(item["id"]) {
+                id = serverID
+            } else {
+                let fallbackBase = Self.fallbackResetCreditID(
+                    expiresAt: expiresAt,
+                    grantedAt: grantedAt,
+                    status: status,
+                    ordinal: 0
+                )
+                let ordinal = fallbackOrdinals[fallbackBase, default: 0]
+                fallbackOrdinals[fallbackBase] = ordinal + 1
+                id = Self.fallbackResetCreditID(
+                    expiresAt: expiresAt,
+                    grantedAt: grantedAt,
+                    status: status,
+                    ordinal: ordinal
+                )
+            }
+            return ResetCredit(id: id,
+                        expiresAt: expiresAt,
+                        status: status,
+                        grantedAt: grantedAt)
         }.filter(\.isAvailable)
             .sorted { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
         let usageCredit = root["rate_limit_reset_credits"] as? [String: Any]
@@ -231,6 +254,17 @@ struct ChatGPTProvider {
             return linked
         }
         return reported
+    }
+
+    static func fallbackResetCreditID(expiresAt: Date?, grantedAt: Date?,
+                                      status: String?, ordinal: Int) -> String {
+        func milliseconds(_ date: Date?) -> String {
+            guard let date else { return "unknown" }
+            return String(Int64((date.timeIntervalSince1970 * 1_000).rounded()))
+        }
+        let normalizedStatus = status?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            ?? "available"
+        return "generated:\(milliseconds(grantedAt)):\(milliseconds(expiresAt)):\(normalizedStatus):\(ordinal)"
     }
 
     static func window(_ value: Any?, title fallbackTitle: String = "Usage limit",

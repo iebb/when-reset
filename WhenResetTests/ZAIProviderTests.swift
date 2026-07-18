@@ -56,6 +56,7 @@ final class ZAIProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.secondary?.windowMinutes, 10_080)
         XCTAssertEqual(snapshot.secondary?.usedPercent, 25)
         XCTAssertEqual(snapshot.extraWindows?.first?.displayTitle, "Monthly MCP limit")
+        XCTAssertEqual(snapshot.extraWindows?.first?.metricID, "zai:mcp:5:1")
         XCTAssertEqual(snapshot.extraWindows?.first?.usedPercent, 40)
     }
 

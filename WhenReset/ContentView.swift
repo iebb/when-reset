@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 import UIKit
 
@@ -56,7 +57,7 @@ private struct UsageTabView: View {
                 }
                 Button("Cancel", role: .cancel) { accountPendingRemoval = nil }
             } message: {
-                Text("This deletes its saved credentials, cached usage, and monitor settings from this device.")
+                Text("This deletes its saved credentials, cached usage, recorded history, and monitor settings from this device.")
             }
             .alert("Couldn’t update", isPresented: .init(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
@@ -198,6 +199,11 @@ private struct AccountFailureView: View {
     }
 }
 
+private enum AccountSettingsPage: String, CaseIterable {
+    case account = "Account"
+    case usage = "Usage"
+}
+
 struct AccountSettingsView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -209,6 +215,8 @@ struct AccountSettingsView: View {
     @State private var savedSymbolName: String?
     @State private var showingRelink = false
     @State private var confirmingRemoval = false
+    @State private var selectedPage = AccountSettingsPage.account
+    @State private var historyRange = UsageHistoryRange.day
 
     private var currentAccount: MonitoredAccount {
         store.accounts.first(where: { $0.id == account.id }) ?? account
@@ -222,6 +230,18 @@ struct AccountSettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Account page", selection: $selectedPage) {
+                    ForEach(AccountSettingsPage.allCases, id: \.self) { page in
+                        Text(page.rawValue).tag(page)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+            .listRowBackground(Color.clear)
+
+            if selectedPage == .account {
             if let failure = store.refreshFailures[account.id] {
                 Section {
                     Label(failure.title, systemImage: failure.systemImageName)
@@ -262,6 +282,17 @@ struct AccountSettingsView: View {
                 }
             } footer: {
                 Text("Provider-reported account details, updated during account refresh when available.")
+            }
+            if !account.isDemo {
+                Section {
+                    Toggle("Notify Me About Resets", isOn: $settings.notifyAboutResets)
+                } header: {
+                    Text("Notifications")
+                } footer: {
+                    Text(currentAccount.providerID == .chatGPT
+                         ? "Notifies after detected quota resets. ChatGPT also reports probable banked-reset applications and newly granted banked resets."
+                         : "Notifies after a refresh detects a scheduled or probable early quota reset.")
+                }
             }
             Section("Appearance") {
                 TextField("Display name", text: $draftDisplayName)
@@ -354,6 +385,9 @@ struct AccountSettingsView: View {
                     confirmingRemoval = true
                 }
             }
+            } else {
+                AccountUsageHistorySections(account: currentAccount, range: $historyRange)
+            }
         }
         .navigationTitle(currentAccount.resolvedDisplayName)
         .onAppear {
@@ -364,6 +398,9 @@ struct AccountSettingsView: View {
             savedSymbolName = draftSymbolName
         }
         .onDisappear(perform: saveAppearance)
+        .onChange(of: selectedPage) { oldValue, _ in
+            if oldValue == .account { saveAppearance() }
+        }
         .onChange(of: settings) { _, newValue in store.setSettings(newValue, for: account) }
         .sheet(isPresented: $showingRelink) {
             AddAccountView(relinkingAccount: account)
@@ -381,7 +418,7 @@ struct AccountSettingsView: View {
         } message: {
             Text(account.isDemo
                  ? "This deletes the demo and its generated usage from this device."
-                 : "This deletes its saved credentials, cached usage, and monitor settings from this device.")
+                 : "This deletes its saved credentials, cached usage, recorded history, and monitor settings from this device.")
         }
     }
 
@@ -507,6 +544,284 @@ struct AccountSettingsView: View {
     }
 }
 
+private enum UsageHistoryRange: String, CaseIterable, Identifiable {
+    case day = "24 Hours"
+    case week = "7 Days"
+
+    var id: Self { self }
+    var duration: TimeInterval {
+        switch self {
+        case .day: 24 * 60 * 60
+        case .week: 7 * 24 * 60 * 60
+        }
+    }
+}
+
+private struct UsageHistorySeries: Identifiable {
+    var id: String { metricID }
+    var metricID: String
+    var title: String
+    var points: [UsageHistoryPoint]
+
+    var latest: UsageHistoryPoint { points[points.count - 1] }
+
+    var planSummary: String {
+        var plans: [String] = []
+        var previousKey: String?
+        var hasPrevious = false
+        for point in points {
+            let key = canonicalPlan(point.plan)
+            let display = point.providerID.planDisplayName(point.plan) ?? "Not recorded"
+            if !hasPrevious || key != previousKey {
+                plans.append(display)
+            } else {
+                plans[plans.count - 1] = display
+            }
+            previousKey = key
+            hasPrevious = true
+        }
+        return plans.joined(separator: " → ")
+    }
+
+    var planChangePoints: [UsageHistoryPoint] {
+        guard points.count > 1 else { return [] }
+        var result: [UsageHistoryPoint] = []
+        var previousPlan = canonicalPlan(points[0].plan)
+        for point in points.dropFirst() {
+            let plan = canonicalPlan(point.plan)
+            if plan != previousPlan { result.append(point) }
+            previousPlan = plan
+        }
+        return result
+    }
+
+    var chartPoints: [UsageHistoryChartPoint] {
+        var segment = 0
+        var previousPlan: String?
+        return points.enumerated().map { index, point in
+            let plan = canonicalPlan(point.plan)
+            if index > 0, plan != previousPlan { segment += 1 }
+            previousPlan = plan
+            return UsageHistoryChartPoint(point: point, segmentID: "\(metricID):\(segment)")
+        }
+    }
+
+    var singletonChartPoints: [UsageHistoryChartPoint] {
+        Dictionary(grouping: chartPoints, by: \.segmentID).values.compactMap { segment in
+            segment.count == 1 ? segment[0] : nil
+        }
+    }
+
+    private func canonicalPlan(_ plan: String?) -> String? {
+        guard let normalized = plan?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !normalized.isEmpty else { return nil }
+        return normalized.folding(
+            options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+    }
+}
+
+private struct UsageHistoryChartPoint: Identifiable {
+    var id: String { point.id }
+    var point: UsageHistoryPoint
+    var segmentID: String
+}
+
+private struct AccountUsageHistorySections: View {
+    @Environment(AppStore.self) private var store
+    let account: MonitoredAccount
+    @Binding var range: UsageHistoryRange
+
+    var body: some View {
+        let end = Date.now
+        let start = end.addingTimeInterval(-range.duration)
+        let allAccountPoints = store.usageHistory.filter { $0.accountID == account.id }
+        let visiblePoints = allAccountPoints.filter { $0.recordedAt >= start && $0.recordedAt <= end }
+        let series = makeSeries(from: visiblePoints)
+
+        Section("History range") {
+            Picker("History range", selection: $range) {
+                ForEach(UsageHistoryRange.allCases) { option in
+                    Text(option.rawValue).tag(option)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+        }
+
+        if let error = store.historyStorageError {
+            Section {
+                Label("History couldn’t be saved", systemImage: "externaldrive.badge.exclamationmark")
+                    .foregroundStyle(.red)
+                Text(error)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+
+        if series.isEmpty {
+            Section {
+                ContentUnavailableView {
+                    Label(emptyTitle(hasAnyHistory: !allAccountPoints.isEmpty),
+                          systemImage: "chart.xyaxis.line")
+                } description: {
+                    Text(emptyMessage(hasAnyHistory: !allAccountPoints.isEmpty))
+                }
+            }
+        } else {
+            ForEach(series) { item in
+                Section {
+                    LabeledContent("Plan") {
+                        Text(item.planSummary)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .font(.caption)
+                    UsageHistoryChart(series: item, range: range, start: start, end: end)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Last recorded")
+                        Spacer(minLength: 12)
+                        Text(item.latest.recordedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                } header: {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(item.title)
+                        Spacer(minLength: 8)
+                        Text("\(Int(item.latest.remainingPercent.rounded()))% left")
+                            .monospacedDigit()
+                    }
+                } footer: {
+                    if item.latest.kind == .weekly || item.latest.windowMinutes == 10_080 {
+                        Text("At that refresh, \(CountdownDisplay.string(until: item.latest.resetsAt, from: item.latest.recordedAt)) remained in the weekly period.")
+                    }
+                }
+            }
+        }
+
+        Section("Recording") {
+            Label("35-day on-device history", systemImage: "internaldrive")
+        }
+    }
+
+    private func makeSeries(from points: [UsageHistoryPoint]) -> [UsageHistorySeries] {
+        Dictionary(grouping: points, by: \.metricID).map { metricID, values in
+            let sorted = values.sorted { $0.recordedAt < $1.recordedAt }
+            return UsageHistorySeries(
+                metricID: metricID,
+                title: sorted.last?.metricTitle ?? "Usage limit",
+                points: sorted
+            )
+        }.sorted { lhs, rhs in
+            let left = lhs.latest
+            let right = rhs.latest
+            if displayOrder(left) != displayOrder(right) {
+                return displayOrder(left) < displayOrder(right)
+            }
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+    }
+
+    private func displayOrder(_ point: UsageHistoryPoint) -> Int {
+        if point.kind == .additional { return 2 }
+        return switch point.windowMinutes {
+        case 300: 0
+        case 10_080: 1
+        default: 2
+        }
+    }
+
+    private func emptyTitle(hasAnyHistory: Bool) -> String {
+        hasAnyHistory ? "No samples in the last \(range.rawValue.lowercased())" : "No usage history yet"
+    }
+
+    private func emptyMessage(hasAnyHistory: Bool) -> String {
+        if hasAnyHistory, range == .day {
+            return "Choose 7 Days to see older samples, or refresh this account to record a new one."
+        }
+        return "A point is added after the next successful account refresh."
+    }
+
+}
+
+private struct UsageHistoryChart: View {
+    let series: UsageHistorySeries
+    let range: UsageHistoryRange
+    let start: Date
+    let end: Date
+
+    private var color: Color {
+        switch series.latest.windowMinutes {
+        case 300: .blue
+        case 10_080: .purple
+        default: .indigo
+        }
+    }
+
+    var body: some View {
+        Chart {
+            ForEach(series.chartPoints) { chartPoint in
+                let point = chartPoint.point
+                LineMark(
+                    x: .value("Refresh", point.recordedAt),
+                    y: .value("Percent remaining", point.remainingPercent),
+                    series: .value("Plan period", chartPoint.segmentID)
+                )
+                .interpolationMethod(.stepEnd)
+                .foregroundStyle(color)
+                .accessibilityLabel(point.recordedAt.formatted(date: .abbreviated, time: .shortened))
+                .accessibilityValue("\(Int(point.remainingPercent.rounded())) percent remaining")
+            }
+            ForEach(series.singletonChartPoints) { chartPoint in
+                let point = chartPoint.point
+                PointMark(
+                    x: .value("Refresh", point.recordedAt),
+                    y: .value("Percent remaining", point.remainingPercent)
+                )
+                .foregroundStyle(color)
+                .symbolSize(70)
+            }
+            ForEach(series.planChangePoints) { point in
+                RuleMark(x: .value("Plan changed", point.recordedAt))
+                    .foregroundStyle(.secondary)
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+            }
+        }
+        .chartXScale(domain: start...end)
+        .chartYScale(domain: 0...100)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [0, 25, 50, 75, 100]) { value in
+                AxisGridLine()
+                AxisTick()
+                AxisValueLabel {
+                    if let percentage = value.as(Int.self) { Text("\(percentage)%") }
+                }
+            }
+        }
+        .chartXAxis {
+            if range == .day {
+                AxisMarks(values: .stride(by: .hour, count: 6)) {
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.hour())
+                }
+            } else {
+                AxisMarks(values: .stride(by: .day, count: 1)) {
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.weekday(.abbreviated).day())
+                }
+            }
+        }
+        .padding(.horizontal, 4)
+        .frame(height: 190)
+        .accessibilityLabel("\(series.title) remaining percentage history")
+        .accessibilityValue("\(series.points.count) samples. Latest value \(Int(series.latest.remainingPercent.rounded())) percent remaining. Plan \(series.latest.providerID.planDisplayName(series.latest.plan) ?? "not recorded"). \(series.planChangePoints.count) plan changes.")
+    }
+}
+
 private struct LiveActivityPinButton: View {
     let title: String
     let isPinned: Bool
@@ -626,18 +941,6 @@ struct GlobalLiveActivitySettingsView: View {
                     Toggle("Show percentage remaining", isOn: $settings.showRemainingPercentage)
                     Toggle("Show banked resets", isOn: $settings.showBankedResets)
                 }
-                if settings.mode == .automatic {
-                    Section {
-                        Text("Each included quota appears only after its own percentage, time, or exhaustion rule matches.")
-                    } header: {
-                        Text("Automatic rules")
-                    }
-                }
-                Section {
-                    Text("The Live Activity orders matching resets from nearest to farthest, with the nearest target in the large panel and up to three more below. Open an account’s settings from Usage to configure each quota.")
-                }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
             }
             .navigationTitle("Live Activity")
             .onAppear { settings = store.liveActivitySettings }

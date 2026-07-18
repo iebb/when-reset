@@ -202,7 +202,7 @@ struct KimiProvider {
                 title: fallbackTitle,
                 minutes: minutes,
                 kind: .additional,
-                identifier: "kimi:\(Self.identifier(fallbackTitle)):\(index)",
+                identifier: "kimi:\(Self.identifier(fallbackTitle)):\(minutes ?? 0)",
                 now: now
             ) {
                 extraWindows.append(additional)

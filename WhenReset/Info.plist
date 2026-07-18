@@ -9,6 +9,12 @@
   <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
   <key>ITSAppUsesNonExemptEncryption</key><false/>
+  <key>BGTaskSchedulerPermittedIdentifiers</key><array>
+    <string>ad.neko.when.refresh</string>
+  </array>
+  <key>UIBackgroundModes</key><array>
+    <string>fetch</string>
+  </array>
   <key>UILaunchScreen</key><dict/>
   <key>UISupportedInterfaceOrientations</key><array>
     <string>UIInterfaceOrientationPortrait</string>
