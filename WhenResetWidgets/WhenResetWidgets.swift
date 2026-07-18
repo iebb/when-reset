@@ -272,7 +272,7 @@ private struct CompactBankedStack: View {
     let state: UsageActivityAttributes.ContentState
 
     var body: some View {
-        VStack(spacing: 0) {
+        VStack(alignment: .leading, spacing: 0) {
             if let expiry = state.nextBankedResetExpiresAt {
                 Text("Banked")
                 LiveActivityCountdown(expiry: expiry)
