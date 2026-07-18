@@ -14,6 +14,8 @@ struct ContentView: View {
 private struct UsageTabView: View {
     @Environment(AppStore.self) private var store
     @State private var showingAddAccount = false
+    @State private var relinkingAccount: MonitoredAccount?
+    @State private var accountPendingRemoval: MonitoredAccount?
 
     var body: some View {
         NavigationStack {
@@ -34,6 +36,27 @@ private struct UsageTabView: View {
             }
             .refreshable { await store.refreshAll() }
             .sheet(isPresented: $showingAddAccount) { AddAccountView() }
+            .sheet(item: $relinkingAccount) { account in
+                AddAccountView(relinkingAccount: account)
+            }
+            .confirmationDialog(
+                "Remove account?",
+                isPresented: Binding(
+                    get: { accountPendingRemoval != nil },
+                    set: { if !$0 { accountPendingRemoval = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                if let account = accountPendingRemoval {
+                    Button("Remove \(account.providerID.displayName) account", role: .destructive) {
+                        store.remove(account)
+                        accountPendingRemoval = nil
+                    }
+                }
+                Button("Cancel", role: .cancel) { accountPendingRemoval = nil }
+            } message: {
+                Text("This deletes its saved credentials, cached usage, and monitor settings from this device.")
+            }
             .alert("Couldn’t update", isPresented: .init(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: { Text(store.errorMessage ?? "Unknown error") }
@@ -44,25 +67,54 @@ private struct UsageTabView: View {
         ContentUnavailableView {
             Label("Monitor your limits", systemImage: "gauge.with.dots.needle.33percent")
         } description: {
-            Text("Link a ChatGPT account to see usage windows, countdowns, and banked resets.")
+            Text("Link a provider account to see usage windows and reset countdowns.")
         } actions: {
-            Button("Link account") { showingAddAccount = true }.buttonStyle(.borderedProminent)
+            Button {
+                showingAddAccount = true
+            } label: {
+                Text("Link account")
+                    .font(.headline)
+                    .frame(minWidth: 160)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
         }
     }
 
     private var accountList: some View {
         List {
             ForEach(store.accounts) { account in
+                let snapshot = store.snapshots[account.id]
+                let failure = store.refreshFailures[account.id]
                 Section {
-                    if let snapshot = store.snapshots[account.id] {
+                    if let failure {
+                        AccountFailureView(
+                            account: account,
+                            failure: failure,
+                            cachedAt: snapshot?.fetchedAt,
+                            retry: { Task { await store.refresh(account) } },
+                            relink: { relinkingAccount = account },
+                            remove: { accountPendingRemoval = account }
+                        )
+                    }
+                    if let snapshot {
                         UsageCard(snapshot: snapshot.filtered(using: store.settings(for: account)))
-                    } else {
+                    } else if failure == nil {
                         HStack { ProgressView(); Text("Loading usage…").foregroundStyle(.secondary) }
+                    } else {
+                        Label("No cached usage is available", systemImage: "tray")
+                            .foregroundStyle(.secondary)
                     }
                 } header: {
-                    ProviderSectionHeader(account: account)
+                    ProviderSectionHeader(
+                        account: account,
+                        plan: snapshot?.plan ?? account.plan,
+                        failure: failure
+                    )
                 }
-                .swipeActions { Button("Remove", role: .destructive) { store.remove(account) } }
+                .swipeActions {
+                    Button("Remove", role: .destructive) { accountPendingRemoval = account }
+                }
             }
         }.listStyle(.insetGrouped)
     }
@@ -70,16 +122,21 @@ private struct UsageTabView: View {
 
 private struct ProviderSectionHeader: View {
     let account: MonitoredAccount
+    let plan: String?
+    let failure: AccountRefreshFailure?
 
     var body: some View {
         HStack(spacing: 7) {
-            Image(account.providerID == .chatGPT ? "ChatGPTLogo" : "ClaudeLogo")
-                .resizable()
-                .scaledToFit()
+            ProviderIcon(providerID: account.providerID)
                 .frame(width: 18, height: 18)
-            Text(account.providerID.displayName)
+            Text(account.providerID.sectionTitle(plan: plan))
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
+            if let failure {
+                Image(systemName: failure.systemImageName)
+                    .foregroundStyle(.red)
+                    .accessibilityLabel(failure.title)
+            }
             Spacer(minLength: 10)
             Text(account.displayName)
                 .font(.caption)
@@ -100,13 +157,64 @@ private struct ProviderSectionHeader: View {
     }
 }
 
+private struct AccountFailureView: View {
+    let account: MonitoredAccount
+    let failure: AccountRefreshFailure
+    let cachedAt: Date?
+    let retry: () -> Void
+    let relink: () -> Void
+    let remove: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(failure.title, systemImage: failure.systemImageName)
+                .font(.headline)
+                .foregroundStyle(.red)
+            Text(failure.message)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            if let cachedAt {
+                Text("Showing the latest saved usage from \(cachedAt, style: .relative).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 10) {
+                if failure.requiresRelink {
+                    Button("Sign in again", systemImage: "arrow.triangle.2.circlepath", action: relink)
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Try again", systemImage: "arrow.clockwise", action: retry)
+                        .buttonStyle(.borderedProminent)
+                }
+                Button("Remove", systemImage: "trash", role: .destructive, action: remove)
+                    .buttonStyle(.bordered)
+            }
+            .controlSize(.regular)
+        }
+        .padding(.vertical, 4)
+        .accessibilityElement(children: .contain)
+    }
+}
+
 struct AccountSettingsView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
     let account: MonitoredAccount
     @State private var settings = AccountMonitorSettings()
+    @State private var showingRelink = false
+    @State private var confirmingRemoval = false
 
     var body: some View {
         Form {
+            if let failure = store.refreshFailures[account.id] {
+                Section {
+                    Label(failure.title, systemImage: failure.systemImageName)
+                        .foregroundStyle(.red)
+                    Text(failure.message)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Section {
                 if account.providerID.supportsBankedResets {
                     Toggle("Banked resets", isOn: $settings.showBankedResets)
@@ -135,10 +243,38 @@ struct AccountSettingsView: View {
             } footer: {
                 Text("Selected limits from this account are candidates for the single global Live Activity.")
             }
+            Section("Account") {
+                if !account.isDemo {
+                    Button("Sign in again", systemImage: "arrow.triangle.2.circlepath") {
+                        showingRelink = true
+                    }
+                }
+                Button(account.isDemo ? "Remove demo" : "Remove account", systemImage: "trash", role: .destructive) {
+                    confirmingRemoval = true
+                }
+            }
         }
         .navigationTitle(account.providerID.displayName)
         .onAppear { settings = store.settings(for: account) }
         .onChange(of: settings) { _, newValue in store.setSettings(newValue, for: account) }
+        .sheet(isPresented: $showingRelink) {
+            AddAccountView(relinkingAccount: account)
+        }
+        .confirmationDialog(
+            account.isDemo ? "Remove demo?" : "Remove account?",
+            isPresented: $confirmingRemoval,
+            titleVisibility: .visible
+        ) {
+            Button(account.isDemo ? "Remove Demo" : "Remove Account", role: .destructive) {
+                store.remove(account)
+                dismiss()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(account.isDemo
+                 ? "This deletes the demo and its generated usage from this device."
+                 : "This deletes its saved credentials, cached usage, and monitor settings from this device.")
+        }
     }
 
     private func metricBinding(_ window: UsageWindow) -> Binding<Bool> {
@@ -205,8 +341,15 @@ struct UsageCard: View {
             if snapshot.availableResetCount > 0 || !snapshot.availableResetCredits.isEmpty {
                 BankedResetBar(snapshot: snapshot)
             }
-            ForEach(Array(snapshot.usageWindows.enumerated()), id: \.offset) { _, window in
-                LimitRow(window: window)
+            if snapshot.usageWindows.isEmpty {
+                Label("No resettable limits reported", systemImage: "checkmark.circle")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                ForEach(Array(snapshot.usageWindows.enumerated()), id: \.offset) { _, window in
+                    LimitRow(window: window)
+                }
             }
             HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }.font(.caption2).foregroundStyle(.tertiary)
         }.padding(.vertical, 6)

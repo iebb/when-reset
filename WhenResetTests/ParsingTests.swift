@@ -184,4 +184,45 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(restored.idToken, "id")
         XCTAssertEqual(restored.expiresAt, expiry)
     }
+
+    func testRefreshFailureClassifiesExpiredProviderCredentialsAsAuthentication() {
+        XCTAssertTrue(AccountRefreshFailure.requiresReauthentication(
+            for: ProviderError.server(401, "unauthorized")
+        ))
+        XCTAssertTrue(AccountRefreshFailure.requiresReauthentication(
+            for: ProviderError.server(400, #"{"error":"invalid_grant"}"#)
+        ))
+        XCTAssertTrue(AccountRefreshFailure.requiresReauthentication(
+            for: KimiProviderError.reauthenticationRequired
+        ))
+        XCTAssertTrue(AccountRefreshFailure.requiresReauthentication(
+            for: CopilotProviderError.relinkRequired
+        ))
+        XCTAssertTrue(AccountRefreshFailure.requiresReauthentication(
+            for: ZAIProviderError.authorizationFailed
+        ))
+    }
+
+    func testRefreshFailureKeepsTransientErrorsSeparateFromAuthentication() {
+        XCTAssertFalse(AccountRefreshFailure.requiresReauthentication(
+            for: URLError(.notConnectedToInternet)
+        ))
+
+        let failedAt = Date(timeIntervalSince1970: 2_000)
+        let failure = AccountRefreshFailure(error: URLError(.timedOut), failedAt: failedAt)
+        XCTAssertEqual(failure.kind, .update)
+        XCTAssertFalse(failure.requiresRelink)
+        XCTAssertEqual(failure.failedAt, failedAt)
+    }
+
+    func testAuthenticationFailureUsesSafeRelinkMessage() {
+        let failure = AccountRefreshFailure(
+            error: ProviderError.server(403, "provider response that should not be shown")
+        )
+
+        XCTAssertEqual(failure.kind, .authentication)
+        XCTAssertTrue(failure.requiresRelink)
+        XCTAssertEqual(failure.title, "Sign-in failed")
+        XCTAssertFalse(failure.message.contains("provider response"))
+    }
 }

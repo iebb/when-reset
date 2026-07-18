@@ -187,8 +187,8 @@ struct UsageLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: UsageActivityAttributes.self) { context in
             LiveLockView(attributes: context.attributes, state: context.state)
-                .activityBackgroundTint(Color(.secondarySystemBackground))
-                .activitySystemActionForegroundColor(.primary)
+                .activityBackgroundTint(.black)
+                .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -196,20 +196,18 @@ struct UsageLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.trailing) {
                     if let expiry = context.state.nextBankedResetExpiresAt {
-                        TimelineView(.periodic(from: .now, by: 60)) { timeline in
-                            VStack(spacing: 1) {
-                                Text("Banked")
-                                Text(CountdownDisplay.compactString(until: expiry, from: timeline.date))
-                                    .monospacedDigit()
-                            }
-                            .font(.headline)
+                        VStack(spacing: 1) {
+                            Text("Banked")
+                            LiveActivityCountdown(expiry: expiry)
                         }
+                        .font(.headline)
+                        .foregroundStyle(.white)
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(spacing: 6) {
                         if let reset = context.state.primaryResetsAt {
-                            HStack { Text(context.state.primaryTitle ?? "Usage reset"); Spacer(); UsageCountdown(reset: reset) }
+                            HStack { Text(context.state.primaryTitle ?? "Usage reset"); Spacer(); LiveActivityCountdown(expiry: reset) }
                         }
                         if let reset = context.state.secondaryResetsAt {
                             HStack(spacing: 6) {
@@ -218,13 +216,14 @@ struct UsageLiveActivity: Widget {
                                 if let used = context.state.secondaryUsedPercent {
                                     Text("\(Int(100 - used))%")
                                 }
-                                UsageCountdown(reset: reset)
+                                LiveActivityCountdown(expiry: reset)
                             }
                         }
                         if let expiry = context.state.nextBankedResetExpiresAt {
-                            HStack { Text("Next banked expiry"); Spacer(); BankedCountdown(expiry: expiry) }
+                            HStack { Text("Next banked expiry"); Spacer(); LiveActivityCountdown(expiry: expiry) }
                         }
                     }
+                    .foregroundStyle(.white)
                 }
             } compactLeading: {
                 ProviderPercentStack(state: context.state)
@@ -251,6 +250,7 @@ private struct ProviderPercentStack: View {
                     .monospacedDigit()
             }
         }
+        .foregroundStyle(.white)
     }
 }
 
@@ -259,9 +259,7 @@ private struct ProviderMark: View {
 
     var body: some View {
         if let providerID {
-            Image(providerID == .chatGPT ? "ChatGPTLogo" : "ClaudeLogo")
-                .resizable()
-                .scaledToFit()
+            ProviderIcon(providerID: providerID)
         } else {
             Image(systemName: "gauge.with.dots.needle.33percent")
                 .resizable()
@@ -277,21 +275,34 @@ private struct CompactBankedStack: View {
         VStack(spacing: 0) {
             if let expiry = state.nextBankedResetExpiresAt {
                 Text("Banked")
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    Text(CountdownDisplay.compactString(until: expiry, from: context.date))
-                        .monospacedDigit()
-                }
+                LiveActivityCountdown(expiry: expiry)
             } else if let reset = state.primaryResetsAt {
                 Text("Reset")
-                TimelineView(.periodic(from: .now, by: 60)) { context in
-                    Text(CountdownDisplay.compactString(until: reset, from: context.date))
-                        .monospacedDigit()
-                }
+                LiveActivityCountdown(expiry: reset)
             } else {
                 Text("—")
             }
         }
         .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(.white)
+    }
+}
+
+private struct LiveActivityCountdown: View {
+    let expiry: Date
+
+    var body: some View {
+        let now = Date.now
+        Group {
+            if expiry > now {
+                Text(timerInterval: now...expiry, countsDown: true, showsHours: true)
+            } else {
+                Text("0:00")
+            }
+        }
+        .monospacedDigit()
+        .lineLimit(1)
+        .minimumScaleFactor(0.6)
     }
 }
 
@@ -334,7 +345,7 @@ private struct LiveLockView: View {
                         Text("\(Int(100 - used))% left").font(.title2.bold())
                     }
                     Spacer()
-                    VStack(alignment: .trailing) { Text("Resets in").font(.caption); UsageCountdown(reset: reset) }
+                    VStack(alignment: .trailing) { Text("Resets in").font(.caption); LiveActivityCountdown(expiry: reset) }
                 }
                 ProgressView(value: 100 - used, total: 100).tint(.blue)
             }
@@ -343,20 +354,22 @@ private struct LiveLockView: View {
                     Text(state.secondaryTitle ?? "Usage limit").lineLimit(1)
                     Spacer()
                     Text("\(Int(100 - used))%")
-                    UsageCountdown(reset: reset)
+                    LiveActivityCountdown(expiry: reset)
                 }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.72))
             }
             if let expiry = state.nextBankedResetExpiresAt {
                 HStack {
                     Label("Next banked expiry", systemImage: "arrow.counterclockwise.circle")
                     Spacer()
-                    BankedCountdown(expiry: expiry)
+                    LiveActivityCountdown(expiry: expiry)
                 }
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.white.opacity(0.72))
             }
-        }.padding()
+        }
+        .padding()
+        .foregroundStyle(.white)
     }
 }

@@ -1,7 +1,7 @@
 import Foundation
 import Security
 
-struct AccountCredentials: Codable, Sendable {
+struct AccountCredentials: Codable, Equatable, Sendable {
     var accessToken: String
     var refreshToken: String
     var idToken: String

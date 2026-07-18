@@ -3,12 +3,79 @@ import Foundation
 enum ProviderID: String, Codable, CaseIterable, Sendable {
     case chatGPT = "chatgpt"
     case claude = "claude"
+    case kimi = "kimi"
+    case githubCopilot = "github_copilot"
+    case zai = "zai"
+    case miniMax = "minimax"
 
     var displayName: String {
-        switch self { case .chatGPT: "ChatGPT"; case .claude: "Claude" }
+        switch self {
+        case .chatGPT: "ChatGPT"
+        case .claude: "Claude"
+        case .kimi: "Kimi Code"
+        case .githubCopilot: "GitHub Copilot"
+        case .zai: "Z.AI Coding Plan"
+        case .miniMax: "MiniMax Token Plan"
+        }
     }
 
     var supportsBankedResets: Bool { self == .chatGPT }
+
+    func sectionTitle(plan: String?) -> String {
+        guard let plan = formattedPlan(plan) else { return displayName }
+        if plan.localizedCaseInsensitiveCompare(displayName) == .orderedSame
+            || plan.lowercased().hasPrefix("\(displayName.lowercased()) ") {
+            return plan
+        }
+        return "\(displayName) \(plan)"
+    }
+
+    private func formattedPlan(_ plan: String?) -> String? {
+        guard let plan else { return nil }
+        let trimmed = plan.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        let normalized = trimmed.lowercased()
+        if self == .chatGPT {
+            if normalized == "pro" { return "Pro 5x" }
+            if normalized == "pro · demo" || normalized == "pro demo" { return "Pro 5x · Demo" }
+        }
+
+        let readable = trimmed.replacingOccurrences(of: "_", with: " ")
+        return readable == readable.lowercased() ? readable.capitalized : readable
+    }
+
+    var accountDescription: String {
+        switch self {
+        case .chatGPT: "Usage limits and banked resets"
+        case .claude: "Session and weekly reset times"
+        case .kimi: "5-hour and weekly coding limits"
+        case .githubCopilot: "Chat and premium request quotas"
+        case .zai: "5-hour, weekly, and monthly limits"
+        case .miniMax: "5-hour and weekly coding limits"
+        }
+    }
+
+    var logoAssetName: String? {
+        switch self {
+        case .chatGPT: "ChatGPTLogo"
+        case .claude: "ClaudeLogo"
+        case .kimi: "KimiLogo"
+        case .githubCopilot: "CopilotLogo"
+        case .zai: "ZAILogo"
+        case .miniMax: "MiniMaxLogo"
+        }
+    }
+
+    var systemImageName: String {
+        switch self {
+        case .chatGPT, .claude: "circle.fill"
+        case .kimi: "moon.stars.fill"
+        case .githubCopilot: "chevron.left.forwardslash.chevron.right"
+        case .zai: "z.square.fill"
+        case .miniMax: "waveform"
+        }
+    }
 }
 
 enum LiveActivityMode: String, Codable, CaseIterable, Sendable {
@@ -52,17 +119,23 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
 }
 
 struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
-    var mode: LiveActivityMode = .manual
-    var nearResetMinutes: Int = 120
+    var mode: LiveActivityMode = .nearReset
+    var nearResetMinutes: Int = 240
 }
 
 struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
+    static let demoWorkspaceID = "when-reset.demo.chatgpt"
+
     var id: UUID
     var providerID: ProviderID
     var displayName: String
     var workspaceID: String
     var plan: String?
     var addedAt: Date
+
+    var isDemo: Bool {
+        providerID == .chatGPT && workspaceID == Self.demoWorkspaceID
+    }
 }
 
 enum UsageWindowKind: String, Codable, Hashable, Sendable {

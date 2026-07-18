@@ -19,7 +19,7 @@ enum ProviderError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidResponse: "The provider returned an unreadable response."
-        case .missingAccount: "The linked token did not include a ChatGPT workspace."
+        case .missingAccount: "The linked token did not include a usable account identity."
         case let .server(code, message): "Server error \(code): \(message)"
         }
     }
