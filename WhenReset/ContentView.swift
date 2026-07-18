@@ -511,8 +511,6 @@ struct AccountSettingsView: View {
             Text("Include this quota in the Live Activity to make it eligible for starring.")
         } else if settings.liveActivityRule(for: window).trigger == .never {
             Text("Choose a trigger other than Never to make this quota eligible for starring.")
-        } else {
-            Text("Starred eligible metrics appear first in the Live Activity. Multiple starred metrics are ordered by the nearest reset.")
         }
     }
 
@@ -522,8 +520,6 @@ struct AccountSettingsView: View {
             Text("Uses the earliest future reset for this account. Include it in the Live Activity to make it eligible for starring.")
         } else if settings.bankedResetLiveActivityRule.trigger == .never {
             Text("Uses the earliest future reset for this account. Choose a trigger other than Never to make it eligible for starring.")
-        } else {
-            Text("Uses the earliest future reset for this account. Starred eligible metrics appear first; multiple starred metrics are ordered by the nearest reset.")
         }
     }
 
