@@ -68,8 +68,8 @@ struct ClaudeProvider {
         guard let refreshToken = response.refreshToken, !refreshToken.isEmpty else {
             throw ClaudeOAuthError.missingRefreshToken
         }
-        let name = response.account?.emailAddress
-            ?? response.account?.displayName
+        let name = response.account?.displayName
+            ?? response.account?.emailAddress
             ?? response.organization?.name
             ?? "Claude account"
         let workspaceID = response.account?.uuid ?? response.organization?.uuid ?? UUID().uuidString
@@ -80,6 +80,7 @@ struct ClaudeProvider {
             expiresAt: response.expirationDate
         )
         return LinkedIdentity(workspaceID: workspaceID, displayName: name,
+                              email: response.account?.emailAddress,
                               plan: response.subscriptionType, credentials: credentials)
     }
 

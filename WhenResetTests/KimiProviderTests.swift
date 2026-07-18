@@ -45,6 +45,29 @@ final class KimiProviderTests: XCTestCase {
         XCTAssertEqual(credentials.expiresAt, now.addingTimeInterval(3_600))
     }
 
+    func testLinkedIdentityPrefersNameAndRetainsEmail() throws {
+        let payload = try JSONSerialization.data(withJSONObject: [
+            "sub": "kimi-user",
+            "name": "Kimi Person",
+            "email": "person@example.com",
+            "plan": "pro"
+        ])
+        let encoded = payload.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let credentials = AccountCredentials(accessToken: "header.\(encoded).signature",
+                                             refreshToken: "refresh", idToken: "")
+
+        let identity = KimiProvider.linkedIdentity(credentials: credentials)
+
+        XCTAssertEqual(identity.workspaceID, "kimi-user")
+        XCTAssertEqual(identity.displayName, "Kimi Person")
+        XCTAssertEqual(identity.email, "person@example.com")
+        XCTAssertEqual(identity.plan, "pro")
+        XCTAssertNil(identity.planExpiresAt)
+    }
+
     func testUsageParserBuildsFiveHourWeeklyAndAdditionalWindows() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let data = Data(#"""

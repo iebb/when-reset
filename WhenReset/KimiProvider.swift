@@ -267,21 +267,23 @@ struct KimiProvider {
         )
     }
 
-    private static func linkedIdentity(credentials: AccountCredentials) -> LinkedIdentity {
+    static func linkedIdentity(credentials: AccountCredentials) -> LinkedIdentity {
         let identityToken = credentials.idToken.isEmpty ? credentials.accessToken : credentials.idToken
         let claims = jwtClaims(identityToken)
         let workspaceID = string(claims["sub"])
             ?? string(claims["user_id"])
             ?? string(claims["uid"])
             ?? UUID().uuidString
-        let displayName = string(claims["email"])
-            ?? string(claims["name"])
+        let email = string(claims["email"])
+        let displayName = string(claims["name"])
             ?? string(claims["preferred_username"])
+            ?? string(claims["nickname"])
+            ?? email
             ?? "Kimi Code account"
         let plan = string(claims["plan"])
             ?? string(claims["subscription_type"])
             ?? string(claims["tier"])
-        return LinkedIdentity(workspaceID: workspaceID, displayName: displayName,
+        return LinkedIdentity(workspaceID: workspaceID, displayName: displayName, email: email,
                               plan: plan, credentials: credentials)
     }
 

@@ -110,7 +110,8 @@ struct CopilotProvider {
         )
         return LinkedIdentity(
             workspaceID: String(profile.id),
-            displayName: profile.login,
+            displayName: profile.preferredName,
+            email: profile.email,
             plan: Self.displayPlan(usage.copilotPlan),
             credentials: credentials
         )
@@ -246,6 +247,10 @@ struct CopilotProvider {
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
         request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
         let data = try await performAuthenticated(request)
+        return try Self.parseProfile(data)
+    }
+
+    static func parseProfile(_ data: Data) throws -> GitHubProfile {
         do {
             let profile = try JSONDecoder().decode(GitHubProfile.self, from: data)
             guard profile.id > 0, !profile.login.isEmpty else {
@@ -426,9 +431,18 @@ private struct OAuthErrorResponse: Decodable {
     }
 }
 
-private struct GitHubProfile: Decodable {
+struct GitHubProfile: Decodable {
     let id: Int64
     let login: String
+    let name: String?
+    let email: String?
+
+    var preferredName: String {
+        guard let name = name?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty else {
+            return login
+        }
+        return name
+    }
 }
 
 private struct UsageResponse: Decodable {

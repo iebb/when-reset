@@ -51,12 +51,41 @@ final class DemoModeTests: XCTestCase {
 
         account.customDisplayName = "Work account"
         account.customSymbolName = "briefcase.fill"
+        account.email = "person@example.com"
+        account.planExpiresAt = Date(timeIntervalSince1970: 2_000_000_000)
         XCTAssertEqual(account.resolvedDisplayName, "Work account")
 
         let decoded = try JSONDecoder().decode(MonitoredAccount.self,
                                                from: JSONEncoder().encode(account))
         XCTAssertEqual(decoded.customDisplayName, "Work account")
         XCTAssertEqual(decoded.customSymbolName, "briefcase.fill")
+        XCTAssertEqual(decoded.email, "person@example.com")
+        XCTAssertEqual(decoded.planExpiresAt, account.planExpiresAt)
+    }
+
+    func testLegacyAccountWithoutProfileDetailsDecodes() throws {
+        struct LegacyAccount: Encodable {
+            var id: UUID
+            var providerID: ProviderID
+            var displayName: String
+            var workspaceID: String
+            var plan: String?
+            var addedAt: Date
+            var customDisplayName: String?
+            var customSymbolName: String?
+        }
+
+        let legacy = LegacyAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Legacy Person",
+            workspaceID: "legacy", plan: "plus", addedAt: .now,
+            customDisplayName: nil, customSymbolName: nil
+        )
+        let decoded = try JSONDecoder().decode(MonitoredAccount.self,
+                                               from: JSONEncoder().encode(legacy))
+
+        XCTAssertEqual(decoded.displayName, "Legacy Person")
+        XCTAssertNil(decoded.email)
+        XCTAssertNil(decoded.planExpiresAt)
     }
 
     func testFullSFSymbolCatalogIsBundled() throws {

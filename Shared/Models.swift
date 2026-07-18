@@ -108,12 +108,14 @@ enum LiveActivityMode: String, Codable, CaseIterable, Sendable {
 enum LiveActivityTrigger: String, Codable, CaseIterable, Sendable {
     case remainingPercent
     case remainingHours
+    case exhausted
     case never
 
     var title: String {
         switch self {
         case .remainingPercent: "Percentage remaining"
         case .remainingHours: "Hours remaining"
+        case .exhausted: "When exhausted"
         case .never: "Never"
         }
     }
@@ -147,6 +149,7 @@ struct LiveActivityQuotaRule: Codable, Hashable, Sendable {
         return switch trigger {
         case .remainingPercent: window.remainingPercent <= Double(remainingPercent)
         case .remainingHours: window.resetsAt.timeIntervalSince(date) <= remainingHours * 3_600
+        case .exhausted: window.remainingPercent <= 0
         case .never: false
         }
     }
@@ -155,7 +158,7 @@ struct LiveActivityQuotaRule: Codable, Hashable, Sendable {
         guard expiry > date else { return false }
         return switch trigger {
         case .remainingHours: expiry.timeIntervalSince(date) <= remainingHours * 3_600
-        case .remainingPercent, .never: false
+        case .remainingPercent, .exhausted, .never: false
         }
     }
 }
@@ -240,6 +243,8 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     var addedAt: Date
     var customDisplayName: String? = nil
     var customSymbolName: String? = nil
+    var email: String? = nil
+    var planExpiresAt: Date? = nil
 
     var isDemo: Bool {
         providerID == .chatGPT && workspaceID == Self.demoWorkspaceID
@@ -335,15 +340,8 @@ enum CountdownDisplay {
         return days > 0 ? "\(days) day\(days == 1 ? "" : "s"), \(clock)" : clock
     }
 
-    /// A readable countdown for usage-limit rows. Long windows are intentionally
-    /// reduced to whole days so a weekly reset does not dominate compact layouts.
     static func usageString(until expiry: Date, from date: Date = .now) -> String {
-        let remaining = max(0, Int(expiry.timeIntervalSince(date).rounded(.down)))
-        if remaining > 48 * 3_600 {
-            let days = remaining / 86_400
-            return "\(days) day\(days == 1 ? "" : "s")"
-        }
-        return string(until: expiry, from: date)
+        string(until: expiry, from: date)
     }
 
     static func compactString(until expiry: Date, from date: Date = .now) -> String {

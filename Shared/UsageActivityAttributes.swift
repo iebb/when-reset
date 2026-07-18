@@ -15,12 +15,13 @@ struct UsageActivityTarget: Codable, Hashable, Identifiable, Sendable {
     var providerID: ProviderID
     var title: String
     var remainingPercent: Double?
+    var progressFraction: Double?
     var resetCount: Int?
     var expiresAt: Date
 
     init(id: String, kind: Kind, accountName: String, accountSymbolName: String?,
          providerID: ProviderID, title: String, remainingPercent: Double? = nil,
-         resetCount: Int? = nil, expiresAt: Date) {
+         progressFraction: Double? = nil, resetCount: Int? = nil, expiresAt: Date) {
         self.id = String(id.prefix(160))
         self.kind = kind
         self.accountName = String(accountName.prefix(64))
@@ -28,6 +29,7 @@ struct UsageActivityTarget: Codable, Hashable, Identifiable, Sendable {
         self.providerID = providerID
         self.title = String(title.prefix(80))
         self.remainingPercent = remainingPercent.map { min(100, max(0, $0)) }
+        self.progressFraction = progressFraction.map { min(1, max(0, $0)) }
         self.resetCount = resetCount.map { max(0, $0) }
         self.expiresAt = expiresAt
     }
@@ -73,7 +75,9 @@ struct UsageActivityAttributes: ActivityAttributes {
                     accountSymbolName: try values.decodeIfPresent(String.self, forKey: .primaryAccountSymbolName),
                     providerID: providerID,
                     title: try values.decodeIfPresent(String.self, forKey: .primaryTitle) ?? "Usage reset",
-                    remainingPercent: used.map { 100 - $0 }, expiresAt: expiry
+                    remainingPercent: used.map { 100 - $0 },
+                    progressFraction: used.map { min(1, max(0, (100 - $0) / 100)) },
+                    expiresAt: expiry
                 ))
             }
             if let expiry = try values.decodeIfPresent(Date.self, forKey: .secondaryResetsAt),
@@ -86,7 +90,9 @@ struct UsageActivityAttributes: ActivityAttributes {
                     accountSymbolName: try values.decodeIfPresent(String.self, forKey: .secondaryAccountSymbolName),
                     providerID: providerID,
                     title: try values.decodeIfPresent(String.self, forKey: .secondaryTitle) ?? "Usage reset",
-                    remainingPercent: used.map { 100 - $0 }, expiresAt: expiry
+                    remainingPercent: used.map { 100 - $0 },
+                    progressFraction: used.map { min(1, max(0, (100 - $0) / 100)) },
+                    expiresAt: expiry
                 ))
             }
             if let expiry = try values.decodeIfPresent(Date.self, forKey: .nextBankedResetExpiresAt) {

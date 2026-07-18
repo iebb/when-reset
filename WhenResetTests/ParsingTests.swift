@@ -67,7 +67,9 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(CountdownDisplay.compactString(until: now.addingTimeInterval(100 * 60), from: now), "1h")
         XCTAssertEqual(CountdownDisplay.compactString(until: now.addingTimeInterval(48 * 3_600), from: now), "48h")
         XCTAssertEqual(CountdownDisplay.compactString(until: now.addingTimeInterval(49 * 3_600), from: now), "2d")
-        XCTAssertEqual(CountdownDisplay.usageString(until: now.addingTimeInterval(6 * 86_400 + 21 * 3_600), from: now), "6 days")
+        XCTAssertEqual(CountdownDisplay.usageString(
+            until: now.addingTimeInterval(6 * 86_400 + 21 * 3_600 + 4 * 60 + 5), from: now
+        ), "6 days, 21:04:05")
     }
 
     func testLiveActivityCountdownUsesRequestedDayHourAndNativeTimerTiers() {
@@ -110,7 +112,8 @@ final class ParsingTests: XCTestCase {
                                 remainingPercent: 20, expiresAt: now.addingTimeInterval(2 * 3_600)),
             UsageActivityTarget(id: "account-b-weekly", kind: .quota, accountName: "B",
                                 accountSymbolName: nil, providerID: .claude, title: "Weekly",
-                                remainingPercent: 30, expiresAt: now.addingTimeInterval(3_600)),
+                                remainingPercent: 30, progressFraction: 0.3,
+                                expiresAt: now.addingTimeInterval(3_600)),
             UsageActivityTarget(id: "account-a-banked", kind: .bankedReset, accountName: "A",
                                 accountSymbolName: nil, providerID: .chatGPT, title: "Banked resets",
                                 resetCount: 3, expiresAt: now.addingTimeInterval(3 * 3_600)),
@@ -124,6 +127,7 @@ final class ParsingTests: XCTestCase {
             "account-b-weekly", "account-a-five-hour", "account-a-banked", "account-a-weekly"
         ])
         XCTAssertEqual(state.targets.first?.accountName, "B")
+        XCTAssertEqual(state.targets.first?.progressFraction, 0.3)
         XCTAssertEqual(state.targets[1].accountName, "A")
     }
 
@@ -256,7 +260,7 @@ final class ParsingTests: XCTestCase {
         XCTAssertTrue(automatic.showBankedResets)
     }
 
-    func testPerQuotaLiveActivityRulesMatchExactBoundaries() {
+    func testPerQuotaLiveActivityRulesMatchExactBoundaries() throws {
         let now = Date(timeIntervalSince1970: 1_000)
         let window = UsageWindow(title: "Weekly", usedPercent: 80,
                                  resetsAt: now.addingTimeInterval(4 * 3_600), windowMinutes: 10_080)
@@ -264,7 +268,22 @@ final class ParsingTests: XCTestCase {
         XCTAssertFalse(LiveActivityQuotaRule(trigger: .remainingPercent, remainingPercent: 19).matches(window, at: now))
         XCTAssertTrue(LiveActivityQuotaRule(trigger: .remainingHours, remainingHours: 4).matches(window, at: now))
         XCTAssertFalse(LiveActivityQuotaRule(trigger: .remainingHours, remainingHours: 3).matches(window, at: now))
+        XCTAssertFalse(LiveActivityQuotaRule(trigger: .exhausted).matches(window, at: now))
         XCTAssertFalse(LiveActivityQuotaRule(trigger: .never).matches(window, at: now))
+
+        var nearlyExhausted = window
+        nearlyExhausted.usedPercent = 99.999
+        XCTAssertFalse(LiveActivityQuotaRule(trigger: .exhausted).matches(nearlyExhausted, at: now))
+
+        var exhausted = window
+        exhausted.usedPercent = 100
+        XCTAssertTrue(LiveActivityQuotaRule(trigger: .exhausted).matches(exhausted, at: now))
+        exhausted.usedPercent = 120
+        XCTAssertTrue(LiveActivityQuotaRule(trigger: .exhausted).matches(exhausted, at: now))
+        XCTAssertFalse(LiveActivityQuotaRule(trigger: .exhausted).matches(expiry: window.resetsAt, at: now))
+
+        let encoded = try JSONEncoder().encode(LiveActivityQuotaRule(trigger: .exhausted))
+        XCTAssertEqual(try JSONDecoder().decode(LiveActivityQuotaRule.self, from: encoded).trigger, .exhausted)
 
         var expired = window
         expired.resetsAt = now
@@ -300,7 +319,10 @@ final class ParsingTests: XCTestCase {
     func testChatGPTWorkspaceIsReadFromNamespacedAuthClaim() throws {
         let payload: [String: Any] = [
             "email": "person@example.com",
-            "https://api.openai.com/profile": ["email": "profile@example.com"],
+            "https://api.openai.com/profile": [
+                "name": "Profile Person",
+                "email": "profile@example.com"
+            ],
             "https://api.openai.com/auth": [
                 "chatgpt_account_id": "account-123",
                 "chatgpt_plan_type": "plus"
@@ -312,7 +334,9 @@ final class ParsingTests: XCTestCase {
         let identity = try ChatGPTProvider().linkedIdentity(accessToken: "access", refreshToken: "refresh", idToken: "header.\(encoded).signature")
         XCTAssertEqual(identity.workspaceID, "account-123")
         XCTAssertEqual(identity.plan, "plus")
-        XCTAssertEqual(identity.displayName, "profile@example.com")
+        XCTAssertEqual(identity.displayName, "Profile Person")
+        XCTAssertEqual(identity.email, "profile@example.com")
+        XCTAssertNil(identity.planExpiresAt)
     }
 
     func testCredentialsRoundTripThroughKeychain() throws {

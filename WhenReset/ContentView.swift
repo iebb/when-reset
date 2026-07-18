@@ -210,6 +210,16 @@ struct AccountSettingsView: View {
     @State private var showingRelink = false
     @State private var confirmingRemoval = false
 
+    private var currentAccount: MonitoredAccount {
+        store.accounts.first(where: { $0.id == account.id }) ?? account
+    }
+
+    private var currentPlan: String? {
+        let value = store.snapshots[account.id]?.plan ?? currentAccount.plan
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
     var body: some View {
         Form {
             if let failure = store.refreshFailures[account.id] {
@@ -220,6 +230,29 @@ struct AccountSettingsView: View {
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
+            }
+            Section {
+                AccountInformationRow(title: "Provider", value: currentAccount.providerID.displayName)
+                AccountInformationRow(title: "Name", value: currentAccount.displayName)
+                AccountInformationRow(title: "Email", value: currentAccount.email ?? "Not provided",
+                                      isSensitive: currentAccount.email != nil)
+                AccountInformationRow(
+                    title: "Plan",
+                    value: currentPlan?.replacingOccurrences(of: "_", with: " ") ?? "Not provided"
+                )
+                AccountInformationRow(
+                    title: "Plan expiry",
+                    value: currentAccount.planExpiresAt?.formatted(date: .abbreviated, time: .shortened)
+                        ?? "Not provided"
+                )
+                AccountInformationRow(
+                    title: "Connected",
+                    value: currentAccount.addedAt.formatted(date: .abbreviated, time: .shortened)
+                )
+            } header: {
+                Text("Account information")
+            } footer: {
+                Text("These details are reported by the provider. Sign in again to refresh them; the display name below remains your own customization.")
             }
             Section("Appearance") {
                 TextField("Display name", text: $draftDisplayName)
@@ -236,9 +269,9 @@ struct AccountSettingsView: View {
                 }
                 Button("Save appearance", systemImage: "checkmark") { saveAppearance() }
                     .disabled(!appearanceHasChanges)
-                if draftDisplayName != account.displayName || draftSymbolName != nil {
+                if draftDisplayName != currentAccount.displayName || draftSymbolName != nil {
                     Button("Use provider defaults", systemImage: "arrow.uturn.backward") {
-                        draftDisplayName = account.displayName
+                        draftDisplayName = currentAccount.displayName
                         draftSymbolName = nil
                         saveAppearance()
                     }
@@ -292,11 +325,11 @@ struct AccountSettingsView: View {
                 }
             }
         }
-        .navigationTitle(account.resolvedDisplayName)
+        .navigationTitle(currentAccount.resolvedDisplayName)
         .onAppear {
             settings = store.settings(for: account)
-            draftDisplayName = account.resolvedDisplayName
-            draftSymbolName = account.customSymbolName
+            draftDisplayName = currentAccount.resolvedDisplayName
+            draftSymbolName = currentAccount.customSymbolName
             savedDisplayName = draftDisplayName
             savedSymbolName = draftSymbolName
         }
@@ -359,9 +392,42 @@ struct AccountSettingsView: View {
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
-        draftDisplayName = normalized.isEmpty ? account.displayName : String(normalized.prefix(64))
+        draftDisplayName = normalized.isEmpty ? currentAccount.displayName : String(normalized.prefix(64))
         savedDisplayName = draftDisplayName
         savedSymbolName = draftSymbolName
+    }
+}
+
+private struct AccountInformationRow: View {
+    let title: String
+    let value: String
+    var isSensitive = false
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Text(title)
+                Spacer(minLength: 12)
+                valueText
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                valueText
+                    .multilineTextAlignment(.leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var valueText: some View {
+        Text(value)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.trailing)
+            .textSelection(.enabled)
+            .privacySensitive(isSensitive)
     }
 }
 
@@ -395,7 +461,7 @@ private struct LiveActivityRuleRows: View {
                 Text("2 days").tag(48.0)
                 Text("1 week").tag(168.0)
             }
-        case .never:
+        case .exhausted, .never:
             EmptyView()
         }
     }
@@ -427,7 +493,7 @@ struct GlobalLiveActivitySettingsView: View {
                 }
                 if settings.mode == .automatic {
                     Section {
-                        Text("Each included quota appears only after its own percentage or time rule matches.")
+                        Text("Each included quota appears only after its own percentage, time, or exhaustion rule matches.")
                     } header: {
                         Text("Automatic rules")
                     }
@@ -678,6 +744,9 @@ struct LimitRow: View {
                     Text(CountdownDisplay.usageString(until: window.resetsAt, from: context.date))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.75)
+                        .layoutPriority(1)
                 }
                 HStack(spacing: 10) {
                     ProgressView(value: window.remainingPercent, total: 100).tint(color)

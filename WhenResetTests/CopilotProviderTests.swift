@@ -112,4 +112,29 @@ final class CopilotProviderTests: XCTestCase {
             XCTFail("Expected relinkRequired, got \(error)")
         }
     }
+
+    func testGitHubProfileUsesFullNameAndRetainsPublicEmail() throws {
+        let profile = try CopilotProvider.parseProfile(Data(#"""
+        {
+          "id": 123,
+          "login": "octocat",
+          "name": "The Octocat",
+          "email": "octocat@example.com"
+        }
+        """#.utf8))
+
+        XCTAssertEqual(profile.preferredName, "The Octocat")
+        XCTAssertEqual(profile.email, "octocat@example.com")
+
+        let fallback = try CopilotProvider.parseProfile(Data(#"""
+        {
+          "id": 123,
+          "login": "octocat",
+          "name": null,
+          "email": null
+        }
+        """#.utf8))
+        XCTAssertEqual(fallback.preferredName, "octocat")
+        XCTAssertNil(fallback.email)
+    }
 }

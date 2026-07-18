@@ -514,9 +514,8 @@ private struct LiveProviderStack: View {
                 .frame(width: expanded ? 20 : 12, height: expanded ? 20 : 12)
             if expanded {
                 Text(target.accountName).font(.caption2.weight(.semibold)).lineLimit(1)
-            } else {
-                Text(target.kind == .quota ? "\(Int(target.remainingPercent ?? 0))%"
-                     : "\(target.resetCount ?? 0)")
+            } else if let value = target.compactValueLabel {
+                Text(value)
                     .font(.system(size: 9, weight: .semibold)).monospacedDigit()
             }
         }
@@ -532,10 +531,13 @@ private struct LivePrimaryIslandDetail: View {
             HStack {
                 Text(target.title).lineLimit(1)
                 Spacer()
-                Text(target.valueLabel).monospacedDigit().lineLimit(1)
+                if let value = target.valueLabel {
+                    Text(value).monospacedDigit().lineLimit(1)
+                }
             }
-            if let remaining = target.remainingPercent {
-                ProgressView(value: remaining, total: 100).tint(.blue)
+            if let progress = target.progressFraction {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.kind == .bankedReset ? .teal : .blue)
             }
         }
         .foregroundStyle(.white)
@@ -546,10 +548,25 @@ private struct LiveIslandMiniTarget: View {
     let target: UsageActivityTarget
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(target.accountName).font(.caption2.bold()).lineLimit(1)
-            Text(target.title).font(.caption2).lineLimit(1).foregroundStyle(.secondary)
-            LiveActivityCountdown(expiry: target.expiresAt).font(.caption2.bold())
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text(target.title).font(.caption2).lineLimit(1).foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                if let value = target.valueLabel {
+                    Text(value).font(.caption2.bold()).lineLimit(1)
+                }
+            }
+            if let progress = target.progressFraction {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.kind == .bankedReset ? .teal : .blue)
+            }
+            HStack(spacing: 4) {
+                ProviderMark(providerID: target.providerID, symbolName: target.accountSymbolName)
+                    .frame(width: 12, height: 12)
+                Text(target.accountName).font(.caption2.bold()).lineLimit(1)
+                Spacer(minLength: 2)
+                LiveActivityCountdown(expiry: target.expiresAt).font(.caption2.bold())
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -585,6 +602,7 @@ private struct LiveActivityCountdown: View {
 }
 
 private struct LiveLockView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let state: UsageActivityAttributes.ContentState
 
     var body: some View {
@@ -596,7 +614,8 @@ private struct LiveLockView: View {
             } else {
                 Text("No matching resets").frame(maxWidth: .infinity, alignment: .leading)
             }
-            let secondary = Array(ordered.dropFirst().prefix(3))
+            let secondaryLimit = dynamicTypeSize.isAccessibilitySize ? 1 : 3
+            let secondary = Array(ordered.dropFirst().prefix(secondaryLimit))
             if !secondary.isEmpty {
                 HStack(alignment: .top, spacing: 8) {
                     ForEach(secondary) { target in
@@ -615,7 +634,7 @@ private struct LiveHeroTargetCard: View {
     let target: UsageActivityTarget
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 7) {
                 ProviderMark(providerID: target.providerID, symbolName: target.accountSymbolName)
                     .frame(width: 19, height: 19)
@@ -624,14 +643,20 @@ private struct LiveHeroTargetCard: View {
                 LiveActivityCountdown(expiry: target.expiresAt)
                     .font(.headline).layoutPriority(1)
             }
-            Text(target.title).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            Text(target.valueLabel).font(.title2.bold()).lineLimit(1)
-            if let remaining = target.remainingPercent {
-                ProgressView(value: remaining, total: 100).tint(.blue)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(target.title).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                Spacer(minLength: 4)
+                if let value = target.valueLabel {
+                    Text(value).font(.headline).lineLimit(1).layoutPriority(1)
+                }
+            }
+            if let progress = target.progressFraction {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.kind == .bankedReset ? .teal : .blue)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
+        .padding(8)
         .background(.white.opacity(0.08), in: .rect(cornerRadius: 12))
     }
 }
@@ -640,15 +665,26 @@ private struct LiveCompactTargetCard: View {
     let target: UsageActivityTarget
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(target.title).font(.caption2).lineLimit(1)
+                Spacer(minLength: 3)
+                if let value = target.valueLabel {
+                    Text(value).font(.caption2.bold()).lineLimit(1).layoutPriority(1)
+                }
+            }
+            if let progress = target.progressFraction {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.kind == .bankedReset ? .teal : .blue)
+            }
             HStack(spacing: 4) {
                 ProviderMark(providerID: target.providerID, symbolName: target.accountSymbolName)
                     .frame(width: 13, height: 13)
                 Text(target.accountName).font(.caption2.bold()).lineLimit(1)
+                Spacer(minLength: 3)
+                LiveActivityCountdown(expiry: target.expiresAt)
+                    .font(.caption2.bold()).layoutPriority(1)
             }
-            Text(target.title).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-            LiveActivityCountdown(expiry: target.expiresAt).font(.caption.bold())
-            Text(target.valueLabel).font(.caption2).lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(7)
@@ -681,10 +717,17 @@ private struct SnapshotAccountIcon: View {
 }
 
 private extension UsageActivityTarget {
-    var valueLabel: String {
+    var valueLabel: String? {
         switch kind {
-        case .quota: "\(Int(remainingPercent ?? 0))% left"
+        case .quota: remainingPercent.map { "\(Int($0))% left" }
         case .bankedReset: resetCountLabel(resetCount ?? 0)
+        }
+    }
+
+    var compactValueLabel: String? {
+        switch kind {
+        case .quota: remainingPercent.map { "\(Int($0))%" }
+        case .bankedReset: resetCount.map(String.init)
         }
     }
 }

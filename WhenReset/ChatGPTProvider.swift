@@ -10,7 +10,9 @@ struct DeviceLink: Sendable {
 struct LinkedIdentity: Sendable {
     let workspaceID: String
     let displayName: String
+    var email: String? = nil
     let plan: String?
+    var planExpiresAt: Date? = nil
     let credentials: AccountCredentials
 }
 
@@ -111,12 +113,17 @@ struct ChatGPTProvider {
         let auth = claims["https://api.openai.com/auth"] as? [String: Any]
         let workspace = (auth?["chatgpt_account_id"] as? String) ?? (claims["chatgpt_account_id"] as? String)
         guard let workspace, !workspace.isEmpty else { throw ProviderError.missingAccount }
-        let name = (profile?["name"] as? String)
-            ?? (profile?["email"] as? String)
-            ?? (claims["email"] as? String)
+        let email = Self.nonEmptyString(profile?["email"])
+            ?? Self.nonEmptyString(claims["email"])
+        let name = Self.nonEmptyString(profile?["name"])
+            ?? Self.nonEmptyString(claims["name"])
+            ?? email
             ?? "ChatGPT account"
-        return LinkedIdentity(workspaceID: workspace, displayName: name, plan: auth?["chatgpt_plan_type"] as? String,
-                              credentials: .init(accessToken: accessToken, refreshToken: refreshToken, idToken: idToken))
+        return LinkedIdentity(
+            workspaceID: workspace, displayName: name, email: email,
+            plan: Self.nonEmptyString(auth?["chatgpt_plan_type"]),
+            credentials: .init(accessToken: accessToken, refreshToken: refreshToken, idToken: idToken)
+        )
     }
 
     func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws -> UsageSnapshot {
@@ -215,15 +222,24 @@ struct ChatGPTProvider {
     }
 
     static func date(_ value: Any?) -> Date? {
-        if let number = value as? NSNumber { return Date(timeIntervalSince1970: number.doubleValue) }
+        if let number = value as? NSNumber {
+            let seconds = number.doubleValue
+            return Date(timeIntervalSince1970: seconds > 10_000_000_000 ? seconds / 1_000 : seconds)
+        }
         if let string = value as? String {
             let fractionalFormatter = ISO8601DateFormatter()
             fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
             return fractionalFormatter.date(from: string)
                 ?? ISO8601DateFormatter().date(from: string)
-                ?? Double(string).map(Date.init(timeIntervalSince1970:))
+                ?? Double(string).map { Date(timeIntervalSince1970: $0 > 10_000_000_000 ? $0 / 1_000 : $0) }
         }
         return nil
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let value = value as? String else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func decodeJWT(_ token: String) -> [String: Any] {

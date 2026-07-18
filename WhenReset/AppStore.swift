@@ -306,7 +306,9 @@ final class AppStore {
     func refresh(_ account: MonitoredAccount) async {
         if account.isDemo {
             guard accounts.contains(where: { $0.id == account.id }) else { return }
-            snapshots[account.id] = DemoUsageFactory.snapshot(for: account)
+            let snapshot = DemoUsageFactory.snapshot(for: account)
+            mergeLatestPlan(snapshot.plan, for: account.id)
+            snapshots[account.id] = snapshot
             refreshFailures.removeValue(forKey: account.id)
             publishSnapshots()
             await updateLiveActivity()
@@ -351,6 +353,7 @@ final class AppStore {
                 snapshot = try await miniMaxProvider.fetchUsage(account: account, credentials: credentials)
             }
             guard accounts.contains(where: { $0.id == account.id }) else { return }
+            mergeLatestPlan(snapshot.plan, for: account.id)
             snapshots[account.id] = snapshot
             refreshFailures.removeValue(forKey: account.id)
             publishSnapshots()
@@ -378,14 +381,19 @@ final class AppStore {
             account.displayName = identity.displayName
             account.workspaceID = identity.workspaceID
             account.plan = identity.plan
+            account.email = identity.email
+            account.planExpiresAt = identity.planExpiresAt
             accounts[index] = account
             refreshFailures.removeValue(forKey: account.id)
             persistAccounts()
             return account
         }
 
-        let account = MonitoredAccount(id: UUID(), providerID: providerID, displayName: identity.displayName,
-                                       workspaceID: identity.workspaceID, plan: identity.plan, addedAt: .now)
+        let account = MonitoredAccount(
+            id: UUID(), providerID: providerID, displayName: identity.displayName,
+            workspaceID: identity.workspaceID, plan: identity.plan, addedAt: .now,
+            email: identity.email, planExpiresAt: identity.planExpiresAt
+        )
         try KeychainStore.save(identity.credentials, for: account.id)
         accounts.append(account)
         persistAccounts()
@@ -496,6 +504,7 @@ final class AppStore {
         var metricID: String
         var title: String
         var remainingPercent: Double?
+        var progressFraction: Double?
         var resetCount: Int?
         var date: Date
         var fetchedAt: Date
@@ -506,7 +515,7 @@ final class AppStore {
                 accountName: account.resolvedDisplayName, accountSymbolName: account.customSymbolName,
                 providerID: account.providerID, title: title,
                 remainingPercent: showRemainingPercentage ? remainingPercent : nil,
-                resetCount: resetCount, expiresAt: date
+                progressFraction: progressFraction, resetCount: resetCount, expiresAt: date
             )
         }
     }
@@ -525,6 +534,7 @@ final class AppStore {
                 events.append(.init(
                     account: account, kind: .quota, metricID: window.metricID,
                     title: window.displayTitle, remainingPercent: window.remainingPercent,
+                    progressFraction: window.remainingPercent / 100,
                     resetCount: nil, date: window.resetsAt, fetchedAt: snapshot.fetchedAt
                 ))
             }
@@ -533,11 +543,13 @@ final class AppStore {
             if liveActivitySettings.showBankedResets,
                accountSettings.showBankedResetsInLiveActivity,
                bankedRule.trigger != .never,
-               let expiry = snapshot.nextBankedResetExpiry(after: date),
+               let credit = snapshot.nextBankedResetCredit(after: date),
+               let expiry = credit.expiresAt,
                !matchingRules || bankedRule.matches(expiry: expiry, at: date) {
                 events.append(.init(
                     account: account, kind: .bankedReset, metricID: "banked-resets",
                     title: "Banked resets", remainingPercent: nil,
+                    progressFraction: credit.remainingLifetimeFraction(at: date),
                     resetCount: snapshot.availableResetCount, date: expiry, fetchedAt: snapshot.fetchedAt
                 ))
             }
@@ -580,6 +592,15 @@ final class AppStore {
     }
 
     private func persistAccounts() { UserDefaults.standard.set(try? JSONEncoder().encode(accounts), forKey: accountsKey) }
+
+    private func mergeLatestPlan(_ plan: String?, for accountID: UUID) {
+        guard let plan = plan?.trimmingCharacters(in: .whitespacesAndNewlines), !plan.isEmpty,
+              let index = accounts.firstIndex(where: { $0.id == accountID }),
+              accounts[index].plan != plan else { return }
+        accounts[index].plan = plan
+        persistAccounts()
+    }
+
     private func persistMonitorSettings() {
         UserDefaults.standard.set(try? JSONEncoder().encode(monitorSettings), forKey: settingsKey)
     }
