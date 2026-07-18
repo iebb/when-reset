@@ -34,15 +34,15 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         guard let plan else { return nil }
         let trimmed = plan.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-
-        let normalized = trimmed.lowercased()
-        if self == .chatGPT {
-            if normalized == "pro" { return "Pro 5x" }
-            if normalized == "pro · demo" || normalized == "pro demo" { return "Pro 5x · Demo" }
-        }
-
         let readable = trimmed.replacingOccurrences(of: "_", with: " ")
-        return readable == readable.lowercased() ? readable.capitalized : readable
+        guard readable == readable.lowercased() else { return readable }
+        return readable.split(separator: " ").map { word in
+            let normalized = word.lowercased()
+            if normalized.last == "x", normalized.dropLast().allSatisfy(\.isNumber) {
+                return normalized
+            }
+            return String(word).capitalized
+        }.joined(separator: " ")
     }
 
     var accountDescription: String {
@@ -79,48 +79,154 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
 }
 
 enum LiveActivityMode: String, Codable, CaseIterable, Sendable {
-    case manual, always, nearReset
+    case automatic, always, disabled
+
     var title: String {
-        switch self { case .manual: "Manual"; case .always: "Always"; case .nearReset: "Near reset" }
+        switch self {
+        case .automatic: "Automatic"
+        case .always: "Always"
+        case .disabled: "Do not show Live Activity"
+        }
+    }
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = switch value {
+        case "automatic", "nearReset": .automatic
+        case "always": .always
+        case "disabled", "manual": .disabled
+        default: .automatic
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
-struct AccountMonitorSettings: Codable, Hashable, Sendable {
-    var liveActivityMode: LiveActivityMode = .manual
-    var nearResetMinutes: Int = 120
-    var showBankedResets = true
-    var hiddenMetricIDs: Set<String> = []
-    var showBankedResetsInLiveActivity = true
-    var hiddenLiveActivityMetricIDs: Set<String> = []
+enum LiveActivityTrigger: String, Codable, CaseIterable, Sendable {
+    case remainingPercent
+    case remainingHours
+    case never
 
-    init(liveActivityMode: LiveActivityMode = .manual, nearResetMinutes: Int = 120,
-         showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
-         showBankedResetsInLiveActivity: Bool = true, hiddenLiveActivityMetricIDs: Set<String> = []) {
-        self.liveActivityMode = liveActivityMode
-        self.nearResetMinutes = nearResetMinutes
-        self.showBankedResets = showBankedResets
-        self.hiddenMetricIDs = hiddenMetricIDs
-        self.showBankedResetsInLiveActivity = showBankedResetsInLiveActivity
-        self.hiddenLiveActivityMetricIDs = hiddenLiveActivityMetricIDs
+    var title: String {
+        switch self {
+        case .remainingPercent: "Percentage remaining"
+        case .remainingHours: "Hours remaining"
+        case .never: "Never"
+        }
+    }
+}
+
+struct LiveActivityQuotaRule: Codable, Hashable, Sendable {
+    var trigger: LiveActivityTrigger = .remainingHours
+    var remainingPercent: Int = 20
+    var remainingHours: Double = 4
+
+    init(trigger: LiveActivityTrigger = .remainingHours, remainingPercent: Int = 20,
+         remainingHours: Double = 4) {
+        self.trigger = trigger
+        self.remainingPercent = min(100, max(0, remainingPercent))
+        self.remainingHours = max(0, remainingHours)
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
-        liveActivityMode = try values.decodeIfPresent(LiveActivityMode.self, forKey: .liveActivityMode) ?? .manual
-        nearResetMinutes = try values.decodeIfPresent(Int.self, forKey: .nearResetMinutes) ?? 120
+        trigger = try values.decodeIfPresent(LiveActivityTrigger.self, forKey: .trigger) ?? .remainingHours
+        remainingPercent = min(100, max(0,
+            try values.decodeIfPresent(Int.self, forKey: .remainingPercent) ?? 20
+        ))
+        remainingHours = max(0,
+            try values.decodeIfPresent(Double.self, forKey: .remainingHours) ?? 4
+        )
+    }
+
+    func matches(_ window: UsageWindow, at date: Date = .now) -> Bool {
+        guard window.resetsAt > date else { return false }
+        return switch trigger {
+        case .remainingPercent: window.remainingPercent <= Double(remainingPercent)
+        case .remainingHours: window.resetsAt.timeIntervalSince(date) <= remainingHours * 3_600
+        case .never: false
+        }
+    }
+
+    func matches(expiry: Date, at date: Date = .now) -> Bool {
+        guard expiry > date else { return false }
+        return switch trigger {
+        case .remainingHours: expiry.timeIntervalSince(date) <= remainingHours * 3_600
+        case .remainingPercent, .never: false
+        }
+    }
+}
+
+struct AccountMonitorSettings: Codable, Hashable, Sendable {
+    var showBankedResets = true
+    var hiddenMetricIDs: Set<String> = []
+    var showBankedResetsInLiveActivity = true
+    var hiddenLiveActivityMetricIDs: Set<String> = []
+    var defaultLiveActivityRule = LiveActivityQuotaRule()
+    var liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:]
+    var bankedResetLiveActivityRule = LiveActivityQuotaRule()
+
+    init(showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
+         showBankedResetsInLiveActivity: Bool = true, hiddenLiveActivityMetricIDs: Set<String> = [],
+         defaultLiveActivityRule: LiveActivityQuotaRule = .init(),
+         liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:],
+         bankedResetLiveActivityRule: LiveActivityQuotaRule = .init()) {
+        self.showBankedResets = showBankedResets
+        self.hiddenMetricIDs = hiddenMetricIDs
+        self.showBankedResetsInLiveActivity = showBankedResetsInLiveActivity
+        self.hiddenLiveActivityMetricIDs = hiddenLiveActivityMetricIDs
+        self.defaultLiveActivityRule = defaultLiveActivityRule
+        self.liveActivityQuotaRules = liveActivityQuotaRules
+        self.bankedResetLiveActivityRule = bankedResetLiveActivityRule
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
         showBankedResets = try values.decodeIfPresent(Bool.self, forKey: .showBankedResets) ?? true
         hiddenMetricIDs = try values.decodeIfPresent(Set<String>.self, forKey: .hiddenMetricIDs) ?? []
         showBankedResetsInLiveActivity = try values.decodeIfPresent(Bool.self, forKey: .showBankedResetsInLiveActivity) ?? true
         hiddenLiveActivityMetricIDs = try values.decodeIfPresent(Set<String>.self, forKey: .hiddenLiveActivityMetricIDs) ?? []
+        defaultLiveActivityRule = try values.decodeIfPresent(LiveActivityQuotaRule.self, forKey: .defaultLiveActivityRule) ?? .init()
+        liveActivityQuotaRules = try values.decodeIfPresent([String: LiveActivityQuotaRule].self,
+                                                            forKey: .liveActivityQuotaRules) ?? [:]
+        bankedResetLiveActivityRule = try values.decodeIfPresent(LiveActivityQuotaRule.self,
+                                                                 forKey: .bankedResetLiveActivityRule) ?? .init()
     }
 
     func shows(_ window: UsageWindow) -> Bool { !hiddenMetricIDs.contains(window.metricID) }
     func showsInLiveActivity(_ window: UsageWindow) -> Bool { !hiddenLiveActivityMetricIDs.contains(window.metricID) }
+    func liveActivityRule(for window: UsageWindow) -> LiveActivityQuotaRule {
+        liveActivityQuotaRules[window.metricID] ?? defaultLiveActivityRule
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case showBankedResets, hiddenMetricIDs, showBankedResetsInLiveActivity, hiddenLiveActivityMetricIDs
+        case defaultLiveActivityRule, liveActivityQuotaRules, bankedResetLiveActivityRule
+    }
 }
 
 struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
-    var mode: LiveActivityMode = .nearReset
-    var nearResetMinutes: Int = 240
+    var mode: LiveActivityMode = .automatic
+    var showRemainingPercentage = true
+    var showBankedResets = true
+
+    init(mode: LiveActivityMode = .automatic, showRemainingPercentage: Bool = true,
+         showBankedResets: Bool = true) {
+        self.mode = mode
+        self.showRemainingPercentage = showRemainingPercentage
+        self.showBankedResets = showBankedResets
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try values.decodeIfPresent(LiveActivityMode.self, forKey: .mode) ?? .automatic
+        showRemainingPercentage = try values.decodeIfPresent(Bool.self,
+                                                             forKey: .showRemainingPercentage) ?? true
+        showBankedResets = try values.decodeIfPresent(Bool.self, forKey: .showBankedResets) ?? true
+    }
 }
 
 struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
@@ -132,9 +238,18 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     var workspaceID: String
     var plan: String?
     var addedAt: Date
+    var customDisplayName: String? = nil
+    var customSymbolName: String? = nil
 
     var isDemo: Bool {
         providerID == .chatGPT && workspaceID == Self.demoWorkspaceID
+    }
+
+    var resolvedDisplayName: String {
+        let custom = customDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let custom, !custom.isEmpty { return custom }
+        let remote = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return remote.isEmpty ? providerID.displayName : remote
     }
 }
 
@@ -202,6 +317,13 @@ struct ResetCredit: Identifiable, Codable, Hashable, Sendable {
     }
 }
 
+enum LiveActivityCountdownValue: Equatable, Sendable {
+    case days(days: Int, hours: Int)
+    case hours(hours: Int, minutes: Int)
+    case timer
+    case expired
+}
+
 enum CountdownDisplay {
     static func string(until expiry: Date, from date: Date = .now) -> String {
         let remaining = max(0, Int(expiry.timeIntervalSince(date).rounded(.down)))
@@ -231,12 +353,38 @@ enum CountdownDisplay {
         if remainingMinutes < 100 { return "\(remainingMinutes)m" }
         return "\(remainingMinutes / 60)h"
     }
+
+    static func liveActivityValue(until expiry: Date, from date: Date = .now) -> LiveActivityCountdownValue {
+        let remaining = expiry.timeIntervalSince(date)
+        guard remaining > 0 else { return .expired }
+        if remaining >= 86_400 {
+            let totalHours = Int(remaining / 3_600)
+            return .days(days: totalHours / 24, hours: totalHours % 24)
+        }
+        if remaining >= 7_200 {
+            let totalMinutes = Int(remaining / 60)
+            return .hours(hours: totalMinutes / 60, minutes: totalMinutes % 60)
+        }
+        return .timer
+    }
+
+    static func widgetString(until expiry: Date, from date: Date = .now) -> String {
+        let remaining = max(0, Int(expiry.timeIntervalSince(date).rounded(.down)))
+        if remaining >= 86_400 {
+            let days = remaining / 86_400
+            let hours = (remaining % 86_400) / 3_600
+            return String(format: "%dd %02dh", days, hours)
+        }
+        return string(until: expiry, from: date)
+    }
 }
 
 struct UsageSnapshot: Codable, Hashable, Sendable {
     var accountID: UUID
     var providerName: String
     var accountName: String
+    var accountProviderID: ProviderID? = nil
+    var accountSymbolName: String? = nil
     var plan: String?
     var primary: UsageWindow?
     var secondary: UsageWindow?
@@ -249,6 +397,11 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
         resetCredits
             .filter(\.isAvailable)
             .sorted { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
+    }
+
+    var resolvedAccountName: String {
+        let name = accountName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? providerName : name
     }
 
     var usageWindows: [UsageWindow] {
@@ -299,7 +452,8 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
     }
 
     static let preview = UsageSnapshot(
-        accountID: UUID(), providerName: "ChatGPT", accountName: "Personal", plan: "Pro",
+        accountID: UUID(), providerName: "ChatGPT", accountName: "Personal",
+        accountProviderID: .chatGPT, plan: "Pro",
         primary: UsageWindow(title: "5 hour", usedPercent: 37, resetsAt: .now.addingTimeInterval(5_400), windowMinutes: 300),
         secondary: UsageWindow(title: "Weekly", usedPercent: 68, resetsAt: .now.addingTimeInterval(180_000), windowMinutes: 10_080),
         availableResetCount: 2,

@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import WhenReset
 
 final class DemoModeTests: XCTestCase {
@@ -29,15 +30,44 @@ final class DemoModeTests: XCTestCase {
 
     func testDefaultLiveActivityStartsAutomaticallyWithinFourHours() {
         let settings = GlobalLiveActivitySettings()
-        XCTAssertEqual(settings.mode, .nearReset)
-        XCTAssertEqual(settings.nearResetMinutes, 240)
+        XCTAssertEqual(settings.mode, .automatic)
+        XCTAssertTrue(settings.showRemainingPercentage)
+        XCTAssertTrue(settings.showBankedResets)
+        XCTAssertEqual(AccountMonitorSettings().defaultLiveActivityRule.remainingHours, 4)
     }
 
     func testProviderSectionTitleIncludesAvailablePlan() {
-        XCTAssertEqual(ProviderID.chatGPT.sectionTitle(plan: "pro"), "ChatGPT Pro 5x")
+        XCTAssertEqual(ProviderID.chatGPT.sectionTitle(plan: "pro"), "ChatGPT Pro")
+        XCTAssertEqual(ProviderID.chatGPT.sectionTitle(plan: "pro_20x"), "ChatGPT Pro 20x")
         XCTAssertEqual(ProviderID.chatGPT.sectionTitle(plan: nil), "ChatGPT")
         XCTAssertEqual(ProviderID.claude.sectionTitle(plan: "max"), "Claude Max")
         XCTAssertEqual(ProviderID.githubCopilot.sectionTitle(plan: "Individual Pro"), "GitHub Copilot Individual Pro")
+    }
+
+    func testCustomAccountPresentationFallsBackToProviderIdentity() throws {
+        var account = MonitoredAccount(id: UUID(), providerID: .chatGPT, displayName: "person@example.com",
+                                       workspaceID: "workspace", plan: "pro_20x", addedAt: .now)
+        XCTAssertEqual(account.resolvedDisplayName, "person@example.com")
+
+        account.customDisplayName = "Work account"
+        account.customSymbolName = "briefcase.fill"
+        XCTAssertEqual(account.resolvedDisplayName, "Work account")
+
+        let decoded = try JSONDecoder().decode(MonitoredAccount.self,
+                                               from: JSONEncoder().encode(account))
+        XCTAssertEqual(decoded.customDisplayName, "Work account")
+        XCTAssertEqual(decoded.customSymbolName, "briefcase.fill")
+    }
+
+    func testFullSFSymbolCatalogIsBundled() throws {
+        let data = try XCTUnwrap(NSDataAsset(name: "SFSymbolNames")?.data)
+        let root = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let symbols = try XCTUnwrap(root["symbols"] as? [[String: Any]])
+        let names = Set(symbols.compactMap { $0["name"] as? String })
+
+        XCTAssertGreaterThan(symbols.count, 9_000)
+        XCTAssertEqual(names.count, symbols.count)
+        XCTAssertTrue(names.isSuperset(of: ["clock", "person.crop.circle", "sparkles"]))
     }
 }
 

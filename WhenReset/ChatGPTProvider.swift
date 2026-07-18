@@ -165,11 +165,31 @@ struct ChatGPTProvider {
             ].compactMap { $0 }
         }
         return UsageSnapshot(accountID: account.id, providerName: account.providerID.displayName,
-                             accountName: account.displayName, plan: root["plan_type"] as? String ?? account.plan,
+                             accountName: account.resolvedDisplayName,
+                             accountProviderID: account.providerID,
+                             accountSymbolName: account.customSymbolName,
+                             plan: Self.preferredPlan(reported: root["plan_type"] as? String,
+                                                      linked: account.plan),
                              primary: Self.window(limit["primary_window"] ?? limit["primary"]),
                              secondary: Self.window(limit["secondary_window"] ?? limit["secondary"]),
                              availableResetCount: count, resetCredits: parsedCredits, fetchedAt: .now,
                              extraWindows: extraWindows)
+    }
+
+    static func preferredPlan(reported: String?, linked: String?) -> String? {
+        let reported = reported?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let linked = linked?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let reported, !reported.isEmpty else { return linked }
+        guard let linked, !linked.isEmpty else { return reported }
+
+        let generic = reported.lowercased()
+        let specific = linked.lowercased()
+        let separators = ["_", "-", " "]
+        if separators.contains(where: { specific.hasPrefix(generic + $0) }),
+           specific.contains(where: \.isNumber) {
+            return linked
+        }
+        return reported
     }
 
     static func window(_ value: Any?, title fallbackTitle: String = "Usage limit",

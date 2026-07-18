@@ -147,8 +147,6 @@ final class AppStore {
         if let data = UserDefaults.standard.data(forKey: liveActivitySettingsKey),
            let saved = try? JSONDecoder().decode(GlobalLiveActivitySettings.self, from: data) {
             liveActivitySettings = saved
-        } else if let previous = monitorSettings.values.first {
-            liveActivitySettings = .init(mode: previous.liveActivityMode, nearResetMinutes: previous.nearResetMinutes)
         }
         hasLiveActivity = !Activity<UsageActivityAttributes>.activities.isEmpty
     }
@@ -312,7 +310,7 @@ final class AppStore {
             refreshFailures.removeValue(forKey: account.id)
             publishSnapshots()
             await updateLiveActivity()
-            await applyLiveActivityRule()
+            await reconcileLiveActivity()
             return
         }
         do {
@@ -357,7 +355,7 @@ final class AppStore {
             refreshFailures.removeValue(forKey: account.id)
             publishSnapshots()
             await updateLiveActivity()
-            await applyLiveActivityRule()
+            await reconcileLiveActivity()
         } catch is CancellationError {
             return
         } catch {
@@ -409,24 +407,36 @@ final class AppStore {
         monitorSettings.removeValue(forKey: account.id)
         if !account.isDemo { KeychainStore.delete(for: account.id) }
         persistAccounts(); persistMonitorSettings(); publishSnapshots()
-        Task { await updateLiveActivity(); await applyLiveActivityRule() }
+        Task { await updateLiveActivity(); await reconcileLiveActivity() }
     }
 
-    func toggleLiveActivity() async {
-        let existing = Activity<UsageActivityAttributes>.activities
-        if !existing.isEmpty {
-            let finalContent = ActivityContent(state: activityState(), staleDate: nil)
-            for activity in existing {
-                await activity.end(finalContent, dismissalPolicy: .immediate)
-            }
-            hasLiveActivity = false
-            return
+    func setAppearance(displayName: String, symbolName: String?, for account: MonitoredAccount) {
+        guard let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+        let normalizedName = displayName
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        let limitedName = String(normalizedName.prefix(64))
+        let normalizedSymbol = symbolName?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        accounts[index].customDisplayName = limitedName.isEmpty || limitedName == accounts[index].displayName
+            ? nil : limitedName
+        accounts[index].customSymbolName = normalizedSymbol?.isEmpty == false ? normalizedSymbol : nil
+        persistAccounts()
+        publishSnapshots()
+        Task { await updateLiveActivity(); await reconcileLiveActivity() }
+    }
+
+    private func endGlobalLiveActivity() async {
+        let finalContent = ActivityContent(state: activityState(), staleDate: nil)
+        for activity in Activity<UsageActivityAttributes>.activities {
+            await activity.end(finalContent, dismissalPolicy: .immediate)
         }
-        await startGlobalLiveActivity()
+        hasLiveActivity = false
     }
 
     private func startGlobalLiveActivity() async {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled, !snapshots.isEmpty else { return }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled, hasEligibleLiveActivityContent else { return }
         let attributes = UsageActivityAttributes(accountID: Self.globalActivityID,
                                                   accountName: "All accounts", providerName: "When Reset")
         let state = activityState()
@@ -446,88 +456,110 @@ final class AppStore {
         monitorSettings[account.id] = settings
         persistMonitorSettings()
         publishSnapshots()
-        Task { await updateLiveActivity(); await applyLiveActivityRule() }
+        Task { await updateLiveActivity(); await reconcileLiveActivity() }
     }
 
     func setLiveActivitySettings(_ settings: GlobalLiveActivitySettings) {
         liveActivitySettings = settings
         UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: liveActivitySettingsKey)
-        Task { await applyLiveActivityRule() }
+        Task { await updateLiveActivity(); await reconcileLiveActivity() }
     }
 
-    private func applyLiveActivityRule() async {
-        guard liveActivitySettings.mode != .manual else { return }
-        let running = hasLiveActivity
+    private func reconcileLiveActivity(at date: Date = .now) async {
+        let running = !Activity<UsageActivityAttributes>.activities.isEmpty
         let shouldRun: Bool
         switch liveActivitySettings.mode {
-        case .manual: shouldRun = running
-        case .always: shouldRun = true
-        case .nearReset:
-            let limitTimes = visibleActivityMetrics.map { $0.window.resetsAt.timeIntervalSinceNow }
-            let bankedTimes = visibleLiveActivitySnapshots.compactMap {
-                $0.snapshot.nextBankedResetExpiry()?.timeIntervalSinceNow
-            }
-            let remaining = (limitTimes + bankedTimes)
-                .filter { $0 > 0 }
-                .min() ?? .infinity
-            shouldRun = remaining <= Double(liveActivitySettings.nearResetMinutes * 60)
+        case .automatic: shouldRun = !activityEvents(at: date, matchingRules: true).isEmpty
+        case .always: shouldRun = !activityEvents(at: date, matchingRules: false).isEmpty
+        case .disabled: shouldRun = false
         }
-        if shouldRun != running { await toggleLiveActivity() }
+        if shouldRun, !running {
+            await startGlobalLiveActivity()
+        } else if !shouldRun, running {
+            await endGlobalLiveActivity()
+        } else {
+            hasLiveActivity = running
+        }
     }
 
-    private struct ActivityMetric {
+    private var hasEligibleLiveActivityContent: Bool {
+        switch liveActivitySettings.mode {
+        case .automatic: !activityEvents(matchingRules: true).isEmpty
+        case .always: !activityEvents(matchingRules: false).isEmpty
+        case .disabled: false
+        }
+    }
+
+    private struct ActivityEvent {
         var account: MonitoredAccount
-        var window: UsageWindow
-    }
+        var kind: UsageActivityTarget.Kind
+        var metricID: String
+        var title: String
+        var remainingPercent: Double?
+        var resetCount: Int?
+        var date: Date
+        var fetchedAt: Date
 
-    private var visibleLiveActivitySnapshots: [(account: MonitoredAccount, snapshot: UsageSnapshot)] {
-        accounts.compactMap { account in
-            snapshots[account.id].map {
-                (account, $0.filteredForLiveActivity(using: settings(for: account)))
-            }
+        func target(showRemainingPercentage: Bool) -> UsageActivityTarget {
+            UsageActivityTarget(
+                id: "\(account.id.uuidString):\(metricID)", kind: kind,
+                accountName: account.resolvedDisplayName, accountSymbolName: account.customSymbolName,
+                providerID: account.providerID, title: title,
+                remainingPercent: showRemainingPercentage ? remainingPercent : nil,
+                resetCount: resetCount, expiresAt: date
+            )
         }
     }
 
-    private var visibleActivityMetrics: [ActivityMetric] {
-        visibleLiveActivitySnapshots.flatMap { item in
-            item.snapshot.usageWindows.map {
-                ActivityMetric(account: item.account, window: $0)
+    private func activityEvents(at date: Date = .now, matchingRules: Bool) -> [ActivityEvent] {
+        var events: [ActivityEvent] = []
+        for account in accounts {
+            guard let storedSnapshot = snapshots[account.id] else { continue }
+            let snapshot = presentedSnapshot(storedSnapshot, for: account)
+            let accountSettings = settings(for: account)
+
+            for window in snapshot.usageWindows where window.resetsAt > date
+                && accountSettings.showsInLiveActivity(window) {
+                let rule = accountSettings.liveActivityRule(for: window)
+                guard rule.trigger != .never, !matchingRules || rule.matches(window, at: date) else { continue }
+                events.append(.init(
+                    account: account, kind: .quota, metricID: window.metricID,
+                    title: window.displayTitle, remainingPercent: window.remainingPercent,
+                    resetCount: nil, date: window.resetsAt, fetchedAt: snapshot.fetchedAt
+                ))
+            }
+
+            let bankedRule = accountSettings.bankedResetLiveActivityRule
+            if liveActivitySettings.showBankedResets,
+               accountSettings.showBankedResetsInLiveActivity,
+               bankedRule.trigger != .never,
+               let expiry = snapshot.nextBankedResetExpiry(after: date),
+               !matchingRules || bankedRule.matches(expiry: expiry, at: date) {
+                events.append(.init(
+                    account: account, kind: .bankedReset, metricID: "banked-resets",
+                    title: "Banked resets", remainingPercent: nil,
+                    resetCount: snapshot.availableResetCount, date: expiry, fetchedAt: snapshot.fetchedAt
+                ))
             }
         }
-        .sorted {
-            if $0.window.remainingPercent != $1.window.remainingPercent {
-                return $0.window.remainingPercent < $1.window.remainingPercent
-            }
-            return $0.window.resetsAt < $1.window.resetsAt
+        return events.sorted {
+            if $0.date != $1.date { return $0.date < $1.date }
+            let accountOrder = $0.account.resolvedDisplayName.localizedCaseInsensitiveCompare(
+                $1.account.resolvedDisplayName)
+            if accountOrder != .orderedSame { return accountOrder == .orderedAscending }
+            return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
         }
     }
 
     private func activityState() -> UsageActivityAttributes.ContentState {
-        let metrics = visibleActivityMetrics
-        let primary = metrics.first
-        let secondary = metrics.dropFirst().first
-        let visibleSnapshots = visibleLiveActivitySnapshots.map(\.snapshot)
-        // The API does not guarantee credit or account ordering. Always surface
-        // the earliest future banked expiry across every opted-in account.
-        let nextBankedExpiry = UsageSnapshot.nearestBankedResetExpiry(in: visibleSnapshots)
-        let remaining = primary?.window.resetsAt.timeIntervalSinceNow ?? .infinity
-        let title: (ActivityMetric) -> String = { metric in
-            self.accounts.count > 1 ? "\(metric.account.providerID.displayName) · \(metric.window.displayTitle)" : metric.window.displayTitle
+        let events: [ActivityEvent] = switch liveActivitySettings.mode {
+        case .automatic: activityEvents(matchingRules: true)
+        case .always: activityEvents(matchingRules: false)
+        case .disabled: []
         }
         return .init(
-            primaryTitle: primary.map(title),
-            primaryProviderID: primary?.account.providerID,
-            primaryUsedPercent: primary?.window.usedPercent,
-            primaryResetsAt: primary?.window.resetsAt,
-            secondaryTitle: secondary.map(title),
-            secondaryUsedPercent: secondary?.window.usedPercent,
-            secondaryResetsAt: secondary?.window.resetsAt,
-            availableResets: visibleSnapshots.reduce(0) { $0 + $1.availableResetCount },
-            nextBankedResetExpiresAt: nextBankedExpiry,
-            showResetCountdown: primary?.account.providerID == .chatGPT
-                && remaining > 0
-                && remaining <= Double(liveActivitySettings.nearResetMinutes * 60),
-            updatedAt: visibleSnapshots.map(\.fetchedAt).max() ?? .now
+            targets: events.map { $0.target(showRemainingPercentage: liveActivitySettings.showRemainingPercentage) },
+            updatedAt: events.map(\.fetchedAt).max() ?? snapshots.values.map(\.fetchedAt).max() ?? .now
         )
     }
 
@@ -538,14 +570,8 @@ final class AppStore {
         for activity in legacyActivities {
             await activity.end(ActivityContent(state: state, staleDate: nil), dismissalPolicy: .immediate)
         }
-        var globalActivities = Activity<UsageActivityAttributes>.activities.filter {
+        let globalActivities = Activity<UsageActivityAttributes>.activities.filter {
             $0.attributes.accountID == Self.globalActivityID
-        }
-        if !legacyActivities.isEmpty, globalActivities.isEmpty {
-            await startGlobalLiveActivity()
-            globalActivities = Activity<UsageActivityAttributes>.activities.filter {
-                $0.attributes.accountID == Self.globalActivityID
-            }
         }
         for activity in globalActivities {
             await activity.update(ActivityContent(state: state, staleDate: .now.addingTimeInterval(900)))
@@ -559,8 +585,18 @@ final class AppStore {
     }
     private func publishSnapshots() {
         SharedSnapshotStore.save(accounts.compactMap { account in
-            snapshots[account.id]?.filtered(using: settings(for: account))
+            snapshots[account.id].map {
+                presentedSnapshot($0, for: account).filtered(using: settings(for: account))
+            }
         })
         WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    private func presentedSnapshot(_ snapshot: UsageSnapshot, for account: MonitoredAccount) -> UsageSnapshot {
+        var result = snapshot
+        result.accountName = account.resolvedDisplayName
+        result.accountProviderID = account.providerID
+        result.accountSymbolName = account.customSymbolName
+        return result
     }
 }

@@ -36,7 +36,9 @@ enum DemoUsageFactory {
         return UsageSnapshot(
             accountID: account.id,
             providerName: ProviderID.chatGPT.displayName,
-            accountName: account.displayName,
+            accountName: account.resolvedDisplayName,
+            accountProviderID: account.providerID,
+            accountSymbolName: account.customSymbolName,
             plan: account.plan,
             primary: UsageWindow(
                 title: "5 hour",

@@ -70,6 +70,110 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(CountdownDisplay.usageString(until: now.addingTimeInterval(6 * 86_400 + 21 * 3_600), from: now), "6 days")
     }
 
+    func testLiveActivityCountdownUsesRequestedDayHourAndNativeTimerTiers() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(-1), from: now), .expired)
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now, from: now), .expired)
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(1), from: now), .timer)
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(7_199), from: now), .timer)
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(7_200), from: now),
+                       .hours(hours: 2, minutes: 0))
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(7_500), from: now),
+                       .hours(hours: 2, minutes: 5))
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(86_399), from: now),
+                       .hours(hours: 23, minutes: 59))
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(86_400), from: now),
+                       .days(days: 1, hours: 0))
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(90_000), from: now),
+                       .days(days: 1, hours: 1))
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(172_799), from: now),
+                       .days(days: 1, hours: 23))
+        XCTAssertEqual(CountdownDisplay.liveActivityValue(until: now.addingTimeInterval(172_800), from: now),
+                       .days(days: 2, hours: 0))
+    }
+
+    func testLockScreenCountdownPadsHoursAfterDays() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(CountdownDisplay.widgetString(
+            until: now.addingTimeInterval(8 * 86_400 + 3 * 3_600 + 59 * 60), from: now
+        ), "8d 03h")
+    }
+
+    func testLiveActivityTargetsSortClosestFirstAndKeepOnlyFour() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let targets = [
+            UsageActivityTarget(id: "account-a-weekly", kind: .quota, accountName: "A",
+                                accountSymbolName: nil, providerID: .chatGPT, title: "Weekly",
+                                remainingPercent: 80, expiresAt: now.addingTimeInterval(8 * 3_600)),
+            UsageActivityTarget(id: "account-a-five-hour", kind: .quota, accountName: "A",
+                                accountSymbolName: nil, providerID: .chatGPT, title: "5h",
+                                remainingPercent: 20, expiresAt: now.addingTimeInterval(2 * 3_600)),
+            UsageActivityTarget(id: "account-b-weekly", kind: .quota, accountName: "B",
+                                accountSymbolName: nil, providerID: .claude, title: "Weekly",
+                                remainingPercent: 30, expiresAt: now.addingTimeInterval(3_600)),
+            UsageActivityTarget(id: "account-a-banked", kind: .bankedReset, accountName: "A",
+                                accountSymbolName: nil, providerID: .chatGPT, title: "Banked resets",
+                                resetCount: 3, expiresAt: now.addingTimeInterval(3 * 3_600)),
+            UsageActivityTarget(id: "account-c-weekly", kind: .quota, accountName: "C",
+                                accountSymbolName: nil, providerID: .kimi, title: "Weekly",
+                                remainingPercent: 50, expiresAt: now.addingTimeInterval(12 * 3_600))
+        ]
+
+        let state = UsageActivityAttributes.ContentState(targets: targets, updatedAt: now)
+        XCTAssertEqual(state.targets.map(\.id), [
+            "account-b-weekly", "account-a-five-hour", "account-a-banked", "account-a-weekly"
+        ])
+        XCTAssertEqual(state.targets.first?.accountName, "B")
+        XCTAssertEqual(state.targets[1].accountName, "A")
+    }
+
+    func testLiveActivityLegacyStateDecodesAndSortsAllTargets() throws {
+        struct LegacyState: Encodable {
+            var primaryTitle = "Weekly"
+            var primaryAccountName = "ChatGPT"
+            var primaryProviderID = ProviderID.chatGPT
+            var primaryUsedPercent = 70.0
+            var primaryResetsAt: Date
+            var secondaryTitle = "Session"
+            var secondaryAccountName = "Claude"
+            var secondaryProviderID = ProviderID.claude
+            var secondaryUsedPercent = 20.0
+            var secondaryResetsAt: Date
+            var availableResets = 2
+            var nextBankedResetExpiresAt: Date
+            var updatedAt: Date
+        }
+
+        let now = Date(timeIntervalSince1970: 1_000)
+        let data = try JSONEncoder().encode(LegacyState(
+            primaryResetsAt: now.addingTimeInterval(8_000),
+            secondaryResetsAt: now.addingTimeInterval(2_000),
+            nextBankedResetExpiresAt: now.addingTimeInterval(5_000), updatedAt: now
+        ))
+        let state = try JSONDecoder().decode(UsageActivityAttributes.ContentState.self, from: data)
+
+        XCTAssertEqual(state.targets.map(\.id), ["legacy-secondary", "legacy-banked", "legacy-primary"])
+        XCTAssertEqual(state.targets[0].remainingPercent, 80)
+        XCTAssertEqual(state.targets[1].resetCount, 2)
+    }
+
+    func testLiveActivityFourTargetPayloadStaysBelowActivityKitLimit() throws {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let longText = String(repeating: "x", count: 1_000)
+        let targets = (0..<4).map { index in
+            UsageActivityTarget(id: "\(index)-\(longText)", kind: .quota,
+                                accountName: longText, accountSymbolName: longText,
+                                providerID: .chatGPT, title: longText,
+                                remainingPercent: Double(index * 10),
+                                expiresAt: now.addingTimeInterval(Double(index + 1) * 3_600))
+        }
+        let state = UsageActivityAttributes.ContentState(targets: targets, updatedAt: now)
+        let data = try JSONEncoder().encode(state)
+
+        XCTAssertEqual(state.targets.count, 4)
+        XCTAssertLessThan(data.count, 4_096)
+    }
+
     func testLiveActivityBankedExpiryUsesNearestAcrossAccounts() {
         let now = Date(timeIntervalSince1970: 1_000)
         var first = UsageSnapshot.preview
@@ -137,6 +241,45 @@ final class ParsingTests: XCTestCase {
         XCTAssertTrue(settings.showBankedResetsInLiveActivity)
         XCTAssertTrue(settings.hiddenMetricIDs.isEmpty)
         XCTAssertTrue(settings.hiddenLiveActivityMetricIDs.isEmpty)
+        XCTAssertEqual(settings.defaultLiveActivityRule.trigger, .remainingHours)
+        XCTAssertEqual(settings.defaultLiveActivityRule.remainingHours, 4)
+        XCTAssertTrue(settings.liveActivityQuotaRules.isEmpty)
+    }
+
+    func testLegacyGlobalLiveActivityModesDecodeToAutomaticAndDisabled() throws {
+        let automatic = try JSONDecoder().decode(GlobalLiveActivitySettings.self,
+            from: Data(#"{"mode":"nearReset","nearResetMinutes":60}"#.utf8))
+        let disabled = try JSONDecoder().decode(GlobalLiveActivitySettings.self,
+            from: Data(#"{"mode":"manual"}"#.utf8))
+        XCTAssertEqual(automatic.mode, .automatic)
+        XCTAssertEqual(disabled.mode, .disabled)
+        XCTAssertTrue(automatic.showBankedResets)
+    }
+
+    func testPerQuotaLiveActivityRulesMatchExactBoundaries() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let window = UsageWindow(title: "Weekly", usedPercent: 80,
+                                 resetsAt: now.addingTimeInterval(4 * 3_600), windowMinutes: 10_080)
+        XCTAssertTrue(LiveActivityQuotaRule(trigger: .remainingPercent, remainingPercent: 20).matches(window, at: now))
+        XCTAssertFalse(LiveActivityQuotaRule(trigger: .remainingPercent, remainingPercent: 19).matches(window, at: now))
+        XCTAssertTrue(LiveActivityQuotaRule(trigger: .remainingHours, remainingHours: 4).matches(window, at: now))
+        XCTAssertFalse(LiveActivityQuotaRule(trigger: .remainingHours, remainingHours: 3).matches(window, at: now))
+        XCTAssertFalse(LiveActivityQuotaRule(trigger: .never).matches(window, at: now))
+
+        var expired = window
+        expired.resetsAt = now
+        XCTAssertFalse(LiveActivityQuotaRule(trigger: .remainingPercent, remainingPercent: 100).matches(expired, at: now))
+    }
+
+    func testChatGPTSpecificLinkedPlanSurvivesGenericUsagePlan() throws {
+        let account = MonitoredAccount(id: UUID(), providerID: .chatGPT, displayName: "Test",
+                                       workspaceID: "workspace", plan: "pro_20x", addedAt: .now)
+        let usage = try JSONSerialization.data(withJSONObject: ["plan_type": "pro"])
+        let credits = try JSONSerialization.data(withJSONObject: ["credits": [], "available_count": 0])
+
+        let snapshot = try ChatGPTProvider().parse(account: account, usage: usage, credits: credits)
+        XCTAssertEqual(snapshot.plan, "pro_20x")
+        XCTAssertEqual(ProviderID.chatGPT.sectionTitle(plan: snapshot.plan), "ChatGPT Pro 20x")
     }
 
     func testClaudeOAuthAuthorizationUsesPKCEPublicClientFlow() throws {

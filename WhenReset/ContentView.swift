@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     var body: some View {
@@ -127,23 +128,24 @@ private struct ProviderSectionHeader: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            ProviderIcon(providerID: account.providerID)
-                .frame(width: 18, height: 18)
-            Text(account.providerID.sectionTitle(plan: plan))
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.primary)
+            ProviderIcon(providerID: account.providerID, symbolName: account.customSymbolName)
+                .frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(account.resolvedDisplayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(account.providerID.sectionTitle(plan: plan))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             if let failure {
                 Image(systemName: failure.systemImageName)
                     .foregroundStyle(.red)
                     .accessibilityLabel(failure.title)
             }
             Spacer(minLength: 10)
-            Text(account.displayName)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .multilineTextAlignment(.trailing)
             NavigationLink {
                 AccountSettingsView(account: account)
             } label: {
@@ -201,6 +203,10 @@ struct AccountSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     let account: MonitoredAccount
     @State private var settings = AccountMonitorSettings()
+    @State private var draftDisplayName = ""
+    @State private var draftSymbolName: String?
+    @State private var savedDisplayName = ""
+    @State private var savedSymbolName: String?
     @State private var showingRelink = false
     @State private var confirmingRemoval = false
 
@@ -215,35 +221,67 @@ struct AccountSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Section {
-                if account.providerID.supportsBankedResets {
-                    Toggle("Banked resets", isOn: $settings.showBankedResets)
-                }
-                if let snapshot = store.snapshots[account.id] {
-                    ForEach(snapshot.usageWindows, id: \.metricID) { window in
-                        Toggle(window.displayTitle, isOn: metricBinding(window))
+            Section("Appearance") {
+                TextField("Display name", text: $draftDisplayName)
+                    .textInputAutocapitalization(.words)
+                    .submitLabel(.done)
+                    .onSubmit(saveAppearance)
+                NavigationLink {
+                    AccountIconPicker(selection: $draftSymbolName, providerID: account.providerID)
+                } label: {
+                    LabeledContent("Icon") {
+                        ProviderIcon(providerID: account.providerID, symbolName: draftSymbolName)
+                            .frame(width: 30, height: 30)
                     }
                 }
-            } header: {
-                Text("Displayed limits")
-            } footer: {
-                Text("These choices apply to this account card and widgets.")
-            }
-            Section {
-                if account.providerID.supportsBankedResets {
-                    Toggle("Banked reset expiries", isOn: $settings.showBankedResetsInLiveActivity)
-                }
-                if let snapshot = store.snapshots[account.id] {
-                    ForEach(snapshot.usageWindows, id: \.metricID) { window in
-                        Toggle(window.displayTitle, isOn: liveActivityMetricBinding(window))
+                Button("Save appearance", systemImage: "checkmark") { saveAppearance() }
+                    .disabled(!appearanceHasChanges)
+                if draftDisplayName != account.displayName || draftSymbolName != nil {
+                    Button("Use provider defaults", systemImage: "arrow.uturn.backward") {
+                        draftDisplayName = account.displayName
+                        draftSymbolName = nil
+                        saveAppearance()
                     }
                 }
-            } header: {
-                Text("Live Activity content")
-            } footer: {
-                Text("Selected limits from this account are candidates for the single global Live Activity.")
             }
-            Section("Account") {
+            if let snapshot = store.snapshots[account.id] {
+                ForEach(snapshot.usageWindows, id: \.metricID) { window in
+                    Section {
+                        Toggle("Show in Usage and widgets", isOn: metricBinding(window))
+                        Toggle("Include in Live Activity", isOn: liveActivityMetricBinding(window))
+                        if settings.showsInLiveActivity(window) {
+                            LiveActivityRuleRows(rule: quotaRuleBinding(window), allowsPercentage: true)
+                        }
+                    } header: {
+                        Text(window.displayTitle)
+                    } footer: {
+                        if settings.liveActivityRule(for: window).trigger == .never,
+                           settings.showsInLiveActivity(window) {
+                            Text("This quota is excluded from the Live Activity until you choose another rule.")
+                        }
+                    }
+                }
+            } else {
+                Section("Quotas") {
+                    Label("Refresh this account to configure its quotas", systemImage: "arrow.clockwise")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if account.providerID.supportsBankedResets {
+                Section {
+                    Toggle("Show in Usage and widgets", isOn: $settings.showBankedResets)
+                    Toggle("Include in Live Activity", isOn: $settings.showBankedResetsInLiveActivity)
+                    if settings.showBankedResetsInLiveActivity {
+                        LiveActivityRuleRows(rule: $settings.bankedResetLiveActivityRule,
+                                             allowsPercentage: false)
+                    }
+                } header: {
+                    Text("Banked resets")
+                } footer: {
+                    Text("Uses the earliest future reset expiry for this account.")
+                }
+            }
+            Section("Connection") {
                 if !account.isDemo {
                     Button("Sign in again", systemImage: "arrow.triangle.2.circlepath") {
                         showingRelink = true
@@ -254,8 +292,15 @@ struct AccountSettingsView: View {
                 }
             }
         }
-        .navigationTitle(account.providerID.displayName)
-        .onAppear { settings = store.settings(for: account) }
+        .navigationTitle(account.resolvedDisplayName)
+        .onAppear {
+            settings = store.settings(for: account)
+            draftDisplayName = account.resolvedDisplayName
+            draftSymbolName = account.customSymbolName
+            savedDisplayName = draftDisplayName
+            savedSymbolName = draftSymbolName
+        }
+        .onDisappear(perform: saveAppearance)
         .onChange(of: settings) { _, newValue in store.setSettings(newValue, for: account) }
         .sheet(isPresented: $showingRelink) {
             AddAccountView(relinkingAccount: account)
@@ -294,6 +339,66 @@ struct AccountSettingsView: View {
             else { settings.hiddenLiveActivityMetricIDs.insert(window.metricID) }
         }
     }
+
+    private func quotaRuleBinding(_ window: UsageWindow) -> Binding<LiveActivityQuotaRule> {
+        Binding {
+            settings.liveActivityRule(for: window)
+        } set: { rule in
+            settings.liveActivityQuotaRules[window.metricID] = rule
+        }
+    }
+
+    private var appearanceHasChanges: Bool {
+        draftDisplayName != savedDisplayName || draftSymbolName != savedSymbolName
+    }
+
+    private func saveAppearance() {
+        guard appearanceHasChanges else { return }
+        store.setAppearance(displayName: draftDisplayName, symbolName: draftSymbolName, for: account)
+        let normalized = draftDisplayName
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        draftDisplayName = normalized.isEmpty ? account.displayName : String(normalized.prefix(64))
+        savedDisplayName = draftDisplayName
+        savedSymbolName = draftSymbolName
+    }
+}
+
+private struct LiveActivityRuleRows: View {
+    @Binding var rule: LiveActivityQuotaRule
+    let allowsPercentage: Bool
+
+    private var triggers: [LiveActivityTrigger] {
+        allowsPercentage ? LiveActivityTrigger.allCases : [.remainingHours, .never]
+    }
+
+    var body: some View {
+        Picker("Show when", selection: $rule.trigger) {
+            ForEach(triggers, id: \.self) { trigger in
+                Text(trigger.title).tag(trigger)
+            }
+        }
+        switch rule.trigger {
+        case .remainingPercent:
+            Stepper("At \(rule.remainingPercent)% remaining", value: $rule.remainingPercent,
+                    in: 0...100, step: 5)
+        case .remainingHours:
+            Picker("Reset is within", selection: $rule.remainingHours) {
+                Text("30 minutes").tag(0.5)
+                Text("1 hour").tag(1.0)
+                Text("2 hours").tag(2.0)
+                Text("4 hours").tag(4.0)
+                Text("8 hours").tag(8.0)
+                Text("12 hours").tag(12.0)
+                Text("24 hours").tag(24.0)
+                Text("2 days").tag(48.0)
+                Text("1 week").tag(168.0)
+            }
+        case .never:
+            EmptyView()
+        }
+    }
 }
 
 struct GlobalLiveActivitySettingsView: View {
@@ -303,25 +408,32 @@ struct GlobalLiveActivitySettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Status") {
-                    Button(store.hasLiveActivity ? "Stop Global Live Activity" : "Start Global Live Activity",
-                           systemImage: store.hasLiveActivity ? "stop.circle" : "bolt.circle") {
-                        Task { await store.toggleLiveActivity() }
-                    }
-                }
-                Section("Automatic start") {
-                    Picker("Start", selection: $settings.mode) {
-                        ForEach(LiveActivityMode.allCases, id: \.self) { Text($0.title).tag($0) }
-                    }
-                    if settings.mode == .nearReset {
-                        Picker("When reset is within", selection: $settings.nearResetMinutes) {
-                            Text("30 minutes").tag(30); Text("1 hour").tag(60); Text("2 hours").tag(120)
-                            Text("4 hours").tag(240); Text("8 hours").tag(480)
+                Section {
+                    Picker("Behavior", selection: $settings.mode) {
+                        ForEach(LiveActivityMode.allCases, id: \.self) { mode in
+                            Text(mode.title).tag(mode)
                         }
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } header: {
+                    Text("Show Live Activity")
+                } footer: {
+                    Text(modeExplanation)
+                }
+                Section("Content") {
+                    Toggle("Show percentage remaining", isOn: $settings.showRemainingPercentage)
+                    Toggle("Show banked resets", isOn: $settings.showBankedResets)
+                }
+                if settings.mode == .automatic {
+                    Section {
+                        Text("Each included quota appears only after its own percentage or time rule matches.")
+                    } header: {
+                        Text("Automatic rules")
                     }
                 }
                 Section {
-                    Text("One Live Activity summarizes the most constrained enabled limit across every account. Use each account header’s cog on the Usage tab to choose its content.")
+                    Text("The Live Activity orders matching resets from nearest to farthest, with the nearest target in the large panel and up to three more below. Open an account’s settings from Usage to configure each quota.")
                 }
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -330,6 +442,139 @@ struct GlobalLiveActivitySettingsView: View {
             .onAppear { settings = store.liveActivitySettings }
             .onChange(of: settings) { _, newValue in store.setLiveActivitySettings(newValue) }
         }
+    }
+
+    private var modeExplanation: String {
+        switch settings.mode {
+        case .automatic:
+            "Starts after a refresh finds that any included quota matches its account rule."
+        case .always:
+            "Shows whenever at least one included quota or banked reset is available."
+        case .disabled:
+            "Ends the current Live Activity and prevents When Reset from starting another one."
+        }
+    }
+}
+
+private struct AccountIconPicker: View {
+    @Environment(\.dismiss) private var dismiss
+    @Binding var selection: String?
+    let providerID: ProviderID
+    @State private var searchText = ""
+    @State private var symbols: [SFSymbolCatalog.Symbol] = []
+
+    private let columns = [GridItem(.adaptive(minimum: 76), spacing: 12)]
+
+    private var filteredSymbols: [SFSymbolCatalog.Symbol] {
+        let query = searchText
+            .replacingOccurrences(of: ".", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return symbols }
+        let terms = query.lowercased().split(whereSeparator: \.isWhitespace)
+        return symbols.filter { symbol in
+            let searchable = symbol.name.replacingOccurrences(of: ".", with: " ").lowercased()
+            return terms.allSatisfy { searchable.contains($0) }
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: 12) {
+                Button {
+                    selection = nil
+                    dismiss()
+                } label: {
+                    VStack(spacing: 7) {
+                        ProviderIcon(providerID: providerID)
+                            .frame(width: 30, height: 30)
+                        Text("Provider default")
+                            .font(.caption2)
+                            .lineLimit(2)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 70)
+                    .padding(6)
+                    .background(selection == nil ? Color.accentColor.opacity(0.16) : .clear,
+                                in: .rect(cornerRadius: 12))
+                }
+                .buttonStyle(.plain)
+
+                ForEach(filteredSymbols) { symbol in
+                    SymbolPickerTile(name: symbol.name, selected: selection == symbol.name) {
+                        selection = symbol.name
+                        dismiss()
+                    }
+                }
+            }
+            .padding()
+        }
+        .overlay {
+            if symbols.isEmpty { ProgressView("Loading symbols…") }
+        }
+        .navigationTitle("Account icon")
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $searchText, prompt: "Search all symbols")
+        .task { symbols = SFSymbolCatalog.load() }
+    }
+}
+
+private struct SymbolPickerTile: View {
+    let name: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let available = UIImage(systemName: name) != nil
+        Button(action: action) {
+            VStack(spacing: 7) {
+                Image(systemName: available ? name : "questionmark.square.dashed")
+                    .font(.title2)
+                    .frame(height: 30)
+                Text(name.replacingOccurrences(of: ".", with: " "))
+                    .font(.caption2)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, minHeight: 70)
+            .padding(6)
+            .background(selected ? Color.accentColor.opacity(0.16) : .clear,
+                        in: .rect(cornerRadius: 12))
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: 12)
+                        .stroke(Color.accentColor, lineWidth: 1.5)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(!available)
+        .accessibilityLabel(name.replacingOccurrences(of: ".", with: " "))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}
+
+private enum SFSymbolCatalog {
+    struct Catalog: Decodable {
+        let symbols: [Symbol]
+    }
+
+    struct Symbol: Decodable, Identifiable {
+        let name: String
+        let year: Int
+        var id: String { name }
+    }
+
+    static func load() -> [Symbol] {
+        guard let data = NSDataAsset(name: "SFSymbolNames")?.data,
+              let catalog = try? JSONDecoder().decode(Catalog.self, from: data) else {
+            return []
+        }
+        let osMajor = ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+        let maximumYear = switch osMajor {
+        case 26...: 2025
+        case 18...: 2024
+        default: 2023
+        }
+        return catalog.symbols.filter { $0.year <= maximumYear }
     }
 }
 
