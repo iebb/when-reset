@@ -22,7 +22,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     var supportsBankedResets: Bool { self == .chatGPT }
 
     func sectionTitle(plan: String?) -> String {
-        guard let plan = formattedPlan(plan) else { return displayName }
+        guard let plan = planDisplayName(plan) else { return displayName }
         if plan.localizedCaseInsensitiveCompare(displayName) == .orderedSame
             || plan.lowercased().hasPrefix("\(displayName.lowercased()) ") {
             return plan
@@ -30,7 +30,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         return "\(displayName) \(plan)"
     }
 
-    private func formattedPlan(_ plan: String?) -> String? {
+    func planDisplayName(_ plan: String?) -> String? {
         guard let plan else { return nil }
         let trimmed = plan.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
@@ -164,16 +164,20 @@ struct LiveActivityQuotaRule: Codable, Hashable, Sendable {
 }
 
 struct AccountMonitorSettings: Codable, Hashable, Sendable {
+    static let bankedResetMetricID = "banked-resets"
+
     var showBankedResets = true
     var hiddenMetricIDs: Set<String> = []
     var showBankedResetsInLiveActivity = true
     var hiddenLiveActivityMetricIDs: Set<String> = []
+    var pinnedLiveActivityMetricIDs: Set<String> = []
     var defaultLiveActivityRule = LiveActivityQuotaRule()
     var liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:]
     var bankedResetLiveActivityRule = LiveActivityQuotaRule()
 
     init(showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
          showBankedResetsInLiveActivity: Bool = true, hiddenLiveActivityMetricIDs: Set<String> = [],
+         pinnedLiveActivityMetricIDs: Set<String> = [],
          defaultLiveActivityRule: LiveActivityQuotaRule = .init(),
          liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:],
          bankedResetLiveActivityRule: LiveActivityQuotaRule = .init()) {
@@ -181,6 +185,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         self.hiddenMetricIDs = hiddenMetricIDs
         self.showBankedResetsInLiveActivity = showBankedResetsInLiveActivity
         self.hiddenLiveActivityMetricIDs = hiddenLiveActivityMetricIDs
+        self.pinnedLiveActivityMetricIDs = pinnedLiveActivityMetricIDs
         self.defaultLiveActivityRule = defaultLiveActivityRule
         self.liveActivityQuotaRules = liveActivityQuotaRules
         self.bankedResetLiveActivityRule = bankedResetLiveActivityRule
@@ -192,6 +197,9 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         hiddenMetricIDs = try values.decodeIfPresent(Set<String>.self, forKey: .hiddenMetricIDs) ?? []
         showBankedResetsInLiveActivity = try values.decodeIfPresent(Bool.self, forKey: .showBankedResetsInLiveActivity) ?? true
         hiddenLiveActivityMetricIDs = try values.decodeIfPresent(Set<String>.self, forKey: .hiddenLiveActivityMetricIDs) ?? []
+        pinnedLiveActivityMetricIDs = try values.decodeIfPresent(
+            Set<String>.self, forKey: .pinnedLiveActivityMetricIDs
+        ) ?? []
         defaultLiveActivityRule = try values.decodeIfPresent(LiveActivityQuotaRule.self, forKey: .defaultLiveActivityRule) ?? .init()
         liveActivityQuotaRules = try values.decodeIfPresent([String: LiveActivityQuotaRule].self,
                                                             forKey: .liveActivityQuotaRules) ?? [:]
@@ -201,12 +209,19 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
 
     func shows(_ window: UsageWindow) -> Bool { !hiddenMetricIDs.contains(window.metricID) }
     func showsInLiveActivity(_ window: UsageWindow) -> Bool { !hiddenLiveActivityMetricIDs.contains(window.metricID) }
+    func isPinnedInLiveActivity(_ window: UsageWindow) -> Bool {
+        pinnedLiveActivityMetricIDs.contains(window.metricID)
+    }
+    var isBankedResetPinnedInLiveActivity: Bool {
+        pinnedLiveActivityMetricIDs.contains(Self.bankedResetMetricID)
+    }
     func liveActivityRule(for window: UsageWindow) -> LiveActivityQuotaRule {
         liveActivityQuotaRules[window.metricID] ?? defaultLiveActivityRule
     }
 
     private enum CodingKeys: String, CodingKey {
         case showBankedResets, hiddenMetricIDs, showBankedResetsInLiveActivity, hiddenLiveActivityMetricIDs
+        case pinnedLiveActivityMetricIDs
         case defaultLiveActivityRule, liveActivityQuotaRules, bankedResetLiveActivityRule
     }
 }
@@ -232,6 +247,16 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
     }
 }
 
+struct ProviderAccountDetails: Equatable, Sendable {
+    var profileName: String? = nil
+    var displayName: String? = nil
+    var email: String? = nil
+    var plan: String? = nil
+    var planExpiresAt: Date? = nil
+    var trialExpiresAt: Date? = nil
+    var replacesMissingFields = false
+}
+
 struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     static let demoWorkspaceID = "when-reset.demo.chatgpt"
 
@@ -243,8 +268,10 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     var addedAt: Date
     var customDisplayName: String? = nil
     var customSymbolName: String? = nil
+    var profileName: String? = nil
     var email: String? = nil
     var planExpiresAt: Date? = nil
+    var trialExpiresAt: Date? = nil
 
     var isDemo: Bool {
         providerID == .chatGPT && workspaceID == Self.demoWorkspaceID
@@ -255,6 +282,30 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
         if let custom, !custom.isEmpty { return custom }
         let remote = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         return remote.isEmpty ? providerID.displayName : remote
+    }
+
+    mutating func mergeProviderDetails(_ details: ProviderAccountDetails) {
+        if details.replacesMissingFields {
+            profileName = Self.nonEmpty(details.profileName).map { String($0.prefix(128)) }
+            email = Self.nonEmpty(details.email)
+            plan = Self.nonEmpty(details.plan)
+            planExpiresAt = details.planExpiresAt
+            trialExpiresAt = details.trialExpiresAt
+        } else {
+            if let reportedName = Self.nonEmpty(details.profileName) {
+                profileName = String(reportedName.prefix(128))
+            }
+            if let reportedEmail = Self.nonEmpty(details.email) { email = reportedEmail }
+            if let reportedPlan = Self.nonEmpty(details.plan) { plan = reportedPlan }
+            if let reportedExpiry = details.planExpiresAt { planExpiresAt = reportedExpiry }
+            if let reportedTrialExpiry = details.trialExpiresAt { trialExpiresAt = reportedTrialExpiry }
+        }
+        if let name = Self.nonEmpty(details.displayName) { displayName = String(name.prefix(64)) }
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 }
 

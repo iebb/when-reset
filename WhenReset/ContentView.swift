@@ -232,27 +232,36 @@ struct AccountSettingsView: View {
                 }
             }
             Section {
-                AccountInformationRow(title: "Provider", value: currentAccount.providerID.displayName)
-                AccountInformationRow(title: "Name", value: currentAccount.displayName)
+                AccountInformationRow(
+                    title: "Name",
+                    value: currentAccount.profileName ?? "Not provided",
+                    isSensitive: currentAccount.profileName != nil
+                )
                 AccountInformationRow(title: "Email", value: currentAccount.email ?? "Not provided",
                                       isSensitive: currentAccount.email != nil)
                 AccountInformationRow(
                     title: "Plan",
-                    value: currentPlan?.replacingOccurrences(of: "_", with: " ") ?? "Not provided"
+                    value: currentAccount.providerID.planDisplayName(currentPlan) ?? "Not provided"
                 )
                 AccountInformationRow(
                     title: "Plan expiry",
                     value: currentAccount.planExpiresAt?.formatted(date: .abbreviated, time: .shortened)
                         ?? "Not provided"
                 )
-                AccountInformationRow(
-                    title: "Connected",
-                    value: currentAccount.addedAt.formatted(date: .abbreviated, time: .shortened)
-                )
+                if currentAccount.providerID == .claude, let trialExpiresAt = currentAccount.trialExpiresAt {
+                    AccountInformationRow(
+                        title: "Trial expiry",
+                        value: trialExpiresAt.formatted(date: .abbreviated, time: .shortened)
+                    )
+                }
             } header: {
-                Text("Account information")
+                HStack(spacing: 7) {
+                    ProviderIcon(providerID: currentAccount.providerID)
+                        .frame(width: 15, height: 15)
+                    Text(currentAccount.providerID.displayName)
+                }
             } footer: {
-                Text("These details are reported by the provider. Sign in again to refresh them; the display name below remains your own customization.")
+                Text("Provider-reported account details, updated during account refresh when available.")
             }
             Section("Appearance") {
                 TextField("Display name", text: $draftDisplayName)
@@ -286,12 +295,19 @@ struct AccountSettingsView: View {
                             LiveActivityRuleRows(rule: quotaRuleBinding(window), allowsPercentage: true)
                         }
                     } header: {
-                        Text(window.displayTitle)
-                    } footer: {
-                        if settings.liveActivityRule(for: window).trigger == .never,
-                           settings.showsInLiveActivity(window) {
-                            Text("This quota is excluded from the Live Activity until you choose another rule.")
+                        HStack(spacing: 8) {
+                            Text(window.displayTitle)
+                            Spacer(minLength: 8)
+                            LiveActivityPinButton(
+                                title: window.displayTitle,
+                                isPinned: settings.isPinnedInLiveActivity(window),
+                                isEnabled: isMetricPinEligible(window)
+                            ) {
+                                toggleMetricPin(window)
+                            }
                         }
+                    } footer: {
+                        metricLiveActivityFooter(window)
                     }
                 }
             } else {
@@ -303,18 +319,32 @@ struct AccountSettingsView: View {
             if account.providerID.supportsBankedResets {
                 Section {
                     Toggle("Show in Usage and widgets", isOn: $settings.showBankedResets)
-                    Toggle("Include in Live Activity", isOn: $settings.showBankedResetsInLiveActivity)
+                    Toggle("Include in Live Activity", isOn: bankedLiveActivityBinding)
                     if settings.showBankedResetsInLiveActivity {
-                        LiveActivityRuleRows(rule: $settings.bankedResetLiveActivityRule,
+                        LiveActivityRuleRows(rule: bankedLiveActivityRuleBinding,
                                              allowsPercentage: false)
                     }
                 } header: {
-                    Text("Banked resets")
+                    HStack(spacing: 8) {
+                        Text("Banked resets")
+                        Spacer(minLength: 8)
+                        LiveActivityPinButton(
+                            title: "Banked resets",
+                            isPinned: settings.isBankedResetPinnedInLiveActivity,
+                            isEnabled: isBankedResetPinEligible
+                        ) {
+                            toggleBankedResetPin()
+                        }
+                    }
                 } footer: {
-                    Text("Uses the earliest future reset expiry for this account.")
+                    bankedLiveActivityFooter
                 }
             }
             Section("Connection") {
+                AccountInformationRow(
+                    title: "Added",
+                    value: currentAccount.addedAt.formatted(date: .abbreviated, time: .shortened)
+                )
                 if !account.isDemo {
                     Button("Sign in again", systemImage: "arrow.triangle.2.circlepath") {
                         showingRelink = true
@@ -369,7 +399,10 @@ struct AccountSettingsView: View {
             settings.showsInLiveActivity(window)
         } set: { isShown in
             if isShown { settings.hiddenLiveActivityMetricIDs.remove(window.metricID) }
-            else { settings.hiddenLiveActivityMetricIDs.insert(window.metricID) }
+            else {
+                settings.hiddenLiveActivityMetricIDs.insert(window.metricID)
+                settings.pinnedLiveActivityMetricIDs.remove(window.metricID)
+            }
         }
     }
 
@@ -378,6 +411,82 @@ struct AccountSettingsView: View {
             settings.liveActivityRule(for: window)
         } set: { rule in
             settings.liveActivityQuotaRules[window.metricID] = rule
+            if rule.trigger == .never {
+                settings.pinnedLiveActivityMetricIDs.remove(window.metricID)
+            }
+        }
+    }
+
+    private var bankedLiveActivityBinding: Binding<Bool> {
+        Binding {
+            settings.showBankedResetsInLiveActivity
+        } set: { isShown in
+            settings.showBankedResetsInLiveActivity = isShown
+            if !isShown {
+                settings.pinnedLiveActivityMetricIDs.remove(AccountMonitorSettings.bankedResetMetricID)
+            }
+        }
+    }
+
+    private var bankedLiveActivityRuleBinding: Binding<LiveActivityQuotaRule> {
+        Binding {
+            settings.bankedResetLiveActivityRule
+        } set: { rule in
+            settings.bankedResetLiveActivityRule = rule
+            if rule.trigger == .never {
+                settings.pinnedLiveActivityMetricIDs.remove(AccountMonitorSettings.bankedResetMetricID)
+            }
+        }
+    }
+
+    private func isMetricPinEligible(_ window: UsageWindow) -> Bool {
+        settings.showsInLiveActivity(window)
+            && settings.liveActivityRule(for: window).trigger != .never
+    }
+
+    private var isBankedResetPinEligible: Bool {
+        settings.showBankedResetsInLiveActivity
+            && settings.bankedResetLiveActivityRule.trigger != .never
+    }
+
+    private func toggleMetricPin(_ window: UsageWindow) {
+        guard isMetricPinEligible(window) else { return }
+        if settings.pinnedLiveActivityMetricIDs.contains(window.metricID) {
+            settings.pinnedLiveActivityMetricIDs.remove(window.metricID)
+        } else {
+            settings.pinnedLiveActivityMetricIDs.insert(window.metricID)
+        }
+    }
+
+    private func toggleBankedResetPin() {
+        guard isBankedResetPinEligible else { return }
+        let metricID = AccountMonitorSettings.bankedResetMetricID
+        if settings.pinnedLiveActivityMetricIDs.contains(metricID) {
+            settings.pinnedLiveActivityMetricIDs.remove(metricID)
+        } else {
+            settings.pinnedLiveActivityMetricIDs.insert(metricID)
+        }
+    }
+
+    @ViewBuilder
+    private func metricLiveActivityFooter(_ window: UsageWindow) -> some View {
+        if !settings.showsInLiveActivity(window) {
+            Text("Include this quota in the Live Activity to make it eligible for starring.")
+        } else if settings.liveActivityRule(for: window).trigger == .never {
+            Text("Choose a trigger other than Never to make this quota eligible for starring.")
+        } else {
+            Text("Starred eligible metrics appear first in the Live Activity. Multiple starred metrics are ordered by the nearest reset.")
+        }
+    }
+
+    @ViewBuilder
+    private var bankedLiveActivityFooter: some View {
+        if !settings.showBankedResetsInLiveActivity {
+            Text("Uses the earliest future reset for this account. Include it in the Live Activity to make it eligible for starring.")
+        } else if settings.bankedResetLiveActivityRule.trigger == .never {
+            Text("Uses the earliest future reset for this account. Choose a trigger other than Never to make it eligible for starring.")
+        } else {
+            Text("Uses the earliest future reset for this account. Starred eligible metrics appear first; multiple starred metrics are ordered by the nearest reset.")
         }
     }
 
@@ -395,6 +504,32 @@ struct AccountSettingsView: View {
         draftDisplayName = normalized.isEmpty ? currentAccount.displayName : String(normalized.prefix(64))
         savedDisplayName = draftDisplayName
         savedSymbolName = draftSymbolName
+    }
+}
+
+private struct LiveActivityPinButton: View {
+    let title: String
+    let isPinned: Bool
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: isPinned ? "star.fill" : "star")
+                .font(.body.weight(.semibold))
+                .foregroundStyle(isEnabled ? Color.yellow : Color.secondary)
+                .frame(width: 44, height: 44)
+                .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .accessibilityLabel(isPinned
+                            ? "Unpin \(title) from Live Activity"
+                            : "Pin \(title) in Live Activity")
+        .accessibilityValue(isPinned ? "Pinned" : "Not pinned")
+        .accessibilityHint(isEnabled
+                           ? "Pinned metrics appear first when eligible. Multiple pinned metrics are ordered by nearest reset."
+                           : "Include this metric and choose a trigger other than Never to enable pinning.")
     }
 }
 

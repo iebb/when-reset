@@ -111,6 +111,7 @@ struct CopilotProvider {
         return LinkedIdentity(
             workspaceID: String(profile.id),
             displayName: profile.preferredName,
+            profileName: Self.nonEmpty(profile.name),
             email: profile.email,
             plan: Self.displayPlan(usage.copilotPlan),
             credentials: credentials
@@ -126,6 +127,16 @@ struct CopilotProvider {
             throw CopilotProviderError.relinkRequired
         }
         return credentials
+    }
+
+    func fetchAccountDetails(credentials: AccountCredentials) async throws -> ProviderAccountDetails {
+        let profile = try await fetchProfile(token: credentials.accessToken)
+        return ProviderAccountDetails(
+            profileName: Self.nonEmpty(profile.name),
+            displayName: profile.preferredName,
+            email: profile.email,
+            replacesMissingFields: true
+        )
     }
 
     func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws -> UsageSnapshot {
@@ -358,6 +369,11 @@ struct CopilotProvider {
         return value.replacingOccurrences(of: "_", with: " ")
             .replacingOccurrences(of: "-", with: " ")
             .capitalized
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     private static func safeServerMessage(_ data: Data) -> String {

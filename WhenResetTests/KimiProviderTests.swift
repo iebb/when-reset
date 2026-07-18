@@ -56,16 +56,46 @@ final class KimiProviderTests: XCTestCase {
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "=", with: "")
-        let credentials = AccountCredentials(accessToken: "header.\(encoded).signature",
+        let header = Data(#"{"alg":"RS256","typ":"JWT"}"#.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let credentials = AccountCredentials(accessToken: "\(header).\(encoded).signature",
                                              refreshToken: "refresh", idToken: "")
 
         let identity = KimiProvider.linkedIdentity(credentials: credentials)
 
         XCTAssertEqual(identity.workspaceID, "kimi-user")
         XCTAssertEqual(identity.displayName, "Kimi Person")
+        XCTAssertEqual(identity.profileName, "Kimi Person")
         XCTAssertEqual(identity.email, "person@example.com")
         XCTAssertEqual(identity.plan, "pro")
         XCTAssertNil(identity.planExpiresAt)
+        XCTAssertNil(identity.trialExpiresAt)
+    }
+
+    func testOpaqueTokensUseStableCredentialFingerprintWithoutInventingProfileDetails() {
+        let original = AccountCredentials(accessToken: "opaque-access-one",
+                                          refreshToken: "stable-refresh", idToken: "")
+        let refreshedAccess = AccountCredentials(accessToken: "opaque-access-two",
+                                                 refreshToken: "stable-refresh", idToken: "")
+        let differentAccount = AccountCredentials(accessToken: "opaque-access-one",
+                                                  refreshToken: "different-refresh", idToken: "")
+
+        let identity = KimiProvider.linkedIdentity(credentials: original)
+        let refreshedIdentity = KimiProvider.linkedIdentity(credentials: refreshedAccess)
+        let differentIdentity = KimiProvider.linkedIdentity(credentials: differentAccount)
+
+        XCTAssertEqual(identity.workspaceID, refreshedIdentity.workspaceID)
+        XCTAssertNotEqual(identity.workspaceID, differentIdentity.workspaceID)
+        XCTAssertTrue(identity.workspaceID.hasPrefix("kimi-"))
+        XCTAssertEqual(identity.workspaceID.count, 69)
+        XCTAssertEqual(identity.displayName, "Kimi Code account")
+        XCTAssertNil(identity.profileName)
+        XCTAssertNil(identity.email)
+        XCTAssertNil(identity.plan)
+        XCTAssertNil(identity.planExpiresAt)
+        XCTAssertNil(identity.trialExpiresAt)
     }
 
     func testUsageParserBuildsFiveHourWeeklyAndAdditionalWindows() throws {

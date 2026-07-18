@@ -10,10 +10,24 @@ struct DeviceLink: Sendable {
 struct LinkedIdentity: Sendable {
     let workspaceID: String
     let displayName: String
+    var profileName: String? = nil
     var email: String? = nil
     let plan: String?
     var planExpiresAt: Date? = nil
+    var trialExpiresAt: Date? = nil
     let credentials: AccountCredentials
+
+    var accountDetails: ProviderAccountDetails {
+        ProviderAccountDetails(
+            profileName: profileName,
+            displayName: displayName,
+            email: email,
+            plan: plan,
+            planExpiresAt: planExpiresAt,
+            trialExpiresAt: trialExpiresAt,
+            replacesMissingFields: true
+        )
+    }
 }
 
 enum ProviderError: LocalizedError {
@@ -32,8 +46,11 @@ struct ChatGPTProvider {
     private let session = URLSession.shared
 
     func refreshedIfNeeded(_ credentials: AccountCredentials) async throws -> AccountCredentials {
-        let expiration = (decodeJWT(credentials.accessToken)["exp"] as? NSNumber)?.doubleValue
-        guard expiration == nil || Date(timeIntervalSince1970: expiration!).timeIntervalSinceNow < 5 * 60 else { return credentials }
+        let currentExpiration = credentials.expiresAt
+            ?? Self.date(decodeJWT(credentials.accessToken)["exp"])
+        if let currentExpiration, currentExpiration.timeIntervalSinceNow >= 5 * 60 {
+            return credentials
+        }
         var components = URLComponents()
         components.queryItems = [
             .init(name: "client_id", value: Self.clientID),
@@ -45,9 +62,13 @@ struct ChatGPTProvider {
                                      contentType: "application/x-www-form-urlencoded")
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let access = json?["access_token"] as? String else { throw ProviderError.invalidResponse }
+        let idToken = (json?["id_token"] as? String) ?? credentials.idToken
+        let refreshedExpiration = Self.date(decodeJWT(access)["exp"])
+            ?? Self.date(decodeJWT(idToken)["exp"])
         return AccountCredentials(accessToken: access,
                                   refreshToken: (json?["refresh_token"] as? String) ?? credentials.refreshToken,
-                                  idToken: (json?["id_token"] as? String) ?? credentials.idToken)
+                                  idToken: idToken,
+                                  expiresAt: refreshedExpiration)
     }
 
     func beginLink() async throws -> DeviceLink {
@@ -113,16 +134,29 @@ struct ChatGPTProvider {
         let auth = claims["https://api.openai.com/auth"] as? [String: Any]
         let workspace = (auth?["chatgpt_account_id"] as? String) ?? (claims["chatgpt_account_id"] as? String)
         guard let workspace, !workspace.isEmpty else { throw ProviderError.missingAccount }
-        let email = Self.nonEmptyString(profile?["email"])
-            ?? Self.nonEmptyString(claims["email"])
-        let name = Self.nonEmptyString(profile?["name"])
-            ?? Self.nonEmptyString(claims["name"])
-            ?? email
-            ?? "ChatGPT account"
+        let email = Self.nonEmptyString(claims["email"])
+            ?? Self.nonEmptyString(profile?["email"])
+        let profileName = Self.nonEmptyString(claims["name"])
+            ?? Self.nonEmptyString(profile?["name"])
+        let displayName = profileName ?? email ?? "ChatGPT account"
+        let plan = Self.nonEmptyString(auth?["chatgpt_plan_type"])
+            ?? Self.nonEmptyString(claims["chatgpt_plan_type"])
+        let planExpiresAt = Self.date(
+            auth?["chatgpt_subscription_active_until"]
+                ?? claims["chatgpt_subscription_active_until"]
+        )
+        let accessClaims = decodeJWT(accessToken)
+        let authorizationExpiresAt = Self.date(accessClaims["exp"])
+            ?? Self.date(claims["exp"])
         return LinkedIdentity(
-            workspaceID: workspace, displayName: name, email: email,
-            plan: Self.nonEmptyString(auth?["chatgpt_plan_type"]),
-            credentials: .init(accessToken: accessToken, refreshToken: refreshToken, idToken: idToken)
+            workspaceID: workspace, displayName: displayName, profileName: profileName, email: email,
+            plan: plan, planExpiresAt: planExpiresAt,
+            credentials: .init(
+                accessToken: accessToken,
+                refreshToken: refreshToken,
+                idToken: idToken,
+                expiresAt: authorizationExpiresAt
+            )
         )
     }
 

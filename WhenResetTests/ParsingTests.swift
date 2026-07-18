@@ -131,6 +131,77 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(state.targets[1].accountName, "A")
     }
 
+    func testLiveActivityTargetsPutAllPinsFirstAndSortEachGroupByExpiry() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let targets = [
+            UsageActivityTarget(id: "unpinned-nearest", kind: .quota, accountName: "A",
+                                accountSymbolName: nil, providerID: .chatGPT, title: "5h",
+                                expiresAt: now.addingTimeInterval(3_600)),
+            UsageActivityTarget(id: "pinned-middle", kind: .quota, accountName: "B",
+                                accountSymbolName: nil, providerID: .claude, title: "Weekly",
+                                isPinned: true, expiresAt: now.addingTimeInterval(8 * 3_600)),
+            UsageActivityTarget(id: "unpinned-second", kind: .bankedReset, accountName: "C",
+                                accountSymbolName: nil, providerID: .chatGPT, title: "Banked resets",
+                                expiresAt: now.addingTimeInterval(2 * 3_600)),
+            UsageActivityTarget(id: "pinned-nearest", kind: .quota, accountName: "D",
+                                accountSymbolName: nil, providerID: .kimi, title: "Session",
+                                isPinned: true, expiresAt: now.addingTimeInterval(3 * 3_600)),
+            UsageActivityTarget(id: "pinned-farthest", kind: .quota, accountName: "E",
+                                accountSymbolName: nil, providerID: .githubCopilot, title: "Monthly",
+                                isPinned: true, expiresAt: now.addingTimeInterval(12 * 3_600))
+        ]
+
+        XCTAssertEqual(UsageActivityTarget.ordered(targets, limit: 5).map(\.id), [
+            "pinned-nearest", "pinned-middle", "pinned-farthest",
+            "unpinned-nearest", "unpinned-second"
+        ])
+        XCTAssertEqual(UsageActivityTarget.ordered(targets).map(\.id), [
+            "pinned-nearest", "pinned-middle", "pinned-farthest", "unpinned-nearest"
+        ])
+    }
+
+    func testLiveActivityContentStateUsesPinnedTargetFirst() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let nearest = UsageActivityTarget(
+            id: "nearest", kind: .quota, accountName: "Nearest", accountSymbolName: nil,
+            providerID: .chatGPT, title: "5h", expiresAt: now.addingTimeInterval(3_600)
+        )
+        let pinned = UsageActivityTarget(
+            id: "pinned", kind: .quota, accountName: "Pinned", accountSymbolName: nil,
+            providerID: .claude, title: "Weekly", isPinned: true,
+            expiresAt: now.addingTimeInterval(8 * 3_600)
+        )
+
+        let state = UsageActivityAttributes.ContentState(targets: [nearest, pinned], updatedAt: now)
+
+        XCTAssertEqual(state.targets.first?.id, "pinned")
+        XCTAssertEqual(state.targets.first?.isPinned, true)
+        XCTAssertEqual(state.targets.dropFirst().first?.id, "nearest")
+    }
+
+    func testLegacyLiveActivityTargetWithoutPinDecodesAsUnpinned() throws {
+        struct LegacyTarget: Encodable {
+            var id: String
+            var kind: UsageActivityTarget.Kind
+            var accountName: String
+            var providerID: ProviderID
+            var title: String
+            var expiresAt: Date
+        }
+
+        let data = try JSONEncoder().encode(LegacyTarget(
+            id: "legacy", kind: .quota, accountName: "Legacy", providerID: .chatGPT,
+            title: "Weekly", expiresAt: Date(timeIntervalSince1970: 10_000)
+        ))
+        let target = try JSONDecoder().decode(UsageActivityTarget.self, from: data)
+
+        XCTAssertFalse(target.isPinned)
+        let reencoded = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(target)) as? [String: Any]
+        )
+        XCTAssertEqual(reencoded["isPinned"] as? Bool, false)
+    }
+
     func testLiveActivityLegacyStateDecodesAndSortsAllTargets() throws {
         struct LegacyState: Encodable {
             var primaryTitle = "Weekly"
@@ -245,6 +316,7 @@ final class ParsingTests: XCTestCase {
         XCTAssertTrue(settings.showBankedResetsInLiveActivity)
         XCTAssertTrue(settings.hiddenMetricIDs.isEmpty)
         XCTAssertTrue(settings.hiddenLiveActivityMetricIDs.isEmpty)
+        XCTAssertTrue(settings.pinnedLiveActivityMetricIDs.isEmpty)
         XCTAssertEqual(settings.defaultLiveActivityRule.trigger, .remainingHours)
         XCTAssertEqual(settings.defaultLiveActivityRule.remainingHours, 4)
         XCTAssertTrue(settings.liveActivityQuotaRules.isEmpty)
@@ -316,8 +388,62 @@ final class ParsingTests: XCTestCase {
         XCTAssertFalse(query["code_challenge", default: ""].isEmpty)
     }
 
+    func testClaudeProfileUsesReportedIdentityPlanAndSeparateTrialExpiry() throws {
+        let profile = Data(#"""
+        {
+          "account": {
+            "uuid": "account-pro",
+            "email": "pro@example.com",
+            "display_name": "Pro User"
+          },
+          "organization": {
+            "uuid": "org-pro",
+            "organization_type": "claude_pro",
+            "rate_limit_tier": "default_claude_pro",
+            "cc_onboarding_flags": {"e10": true},
+            "claude_code_trial_ends_at": "2030-07-25T12:34:56.000Z",
+            "claude_code_trial_duration_days": 14,
+            "subscription_created_at": "2026-01-10T00:00:00.000Z"
+          }
+        }
+        """#.utf8)
+
+        let details = try ClaudeProvider.parseAccountDetails(profileData: profile)
+
+        XCTAssertEqual(details.profileName, "Pro User")
+        XCTAssertEqual(details.displayName, "Pro User")
+        XCTAssertEqual(details.email, "pro@example.com")
+        XCTAssertEqual(details.plan, "Claude Pro")
+        XCTAssertNil(details.planExpiresAt)
+        XCTAssertEqual(details.trialExpiresAt,
+                       ISO8601DateFormatter().date(from: "2030-07-25T12:34:56Z"))
+        XCTAssertTrue(details.replacesMissingFields)
+    }
+
+    func testClaudeMax20xProfileDoesNotInventPlanExpiry() throws {
+        let profile = Data(#"""
+        {
+          "account": {"uuid":"account-max","email":"max@example.com"},
+          "organization": {
+            "uuid":"org-max",
+            "organization_type":"claude_max",
+            "rate_limit_tier":"default_claude_max_20x"
+          }
+        }
+        """#.utf8)
+
+        let details = try ClaudeProvider.parseAccountDetails(profileData: profile)
+
+        XCTAssertEqual(details.displayName, "max@example.com")
+        XCTAssertNil(details.profileName)
+        XCTAssertEqual(details.plan, "Claude Max 20x")
+        XCTAssertNil(details.planExpiresAt)
+        XCTAssertNil(details.trialExpiresAt)
+    }
+
     func testChatGPTWorkspaceIsReadFromNamespacedAuthClaim() throws {
         let payload: [String: Any] = [
+            "exp": 2_000_000_000,
             "email": "person@example.com",
             "https://api.openai.com/profile": [
                 "name": "Profile Person",
@@ -325,7 +451,8 @@ final class ParsingTests: XCTestCase {
             ],
             "https://api.openai.com/auth": [
                 "chatgpt_account_id": "account-123",
-                "chatgpt_plan_type": "plus"
+                "chatgpt_plan_type": "pro_20x",
+                "chatgpt_subscription_active_until": "2030-01-01T00:00:00Z"
             ]
         ]
         let data = try JSONSerialization.data(withJSONObject: payload)
@@ -333,10 +460,12 @@ final class ParsingTests: XCTestCase {
             .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
         let identity = try ChatGPTProvider().linkedIdentity(accessToken: "access", refreshToken: "refresh", idToken: "header.\(encoded).signature")
         XCTAssertEqual(identity.workspaceID, "account-123")
-        XCTAssertEqual(identity.plan, "plus")
+        XCTAssertEqual(identity.plan, "pro_20x")
         XCTAssertEqual(identity.displayName, "Profile Person")
-        XCTAssertEqual(identity.email, "profile@example.com")
-        XCTAssertNil(identity.planExpiresAt)
+        XCTAssertEqual(identity.profileName, "Profile Person")
+        XCTAssertEqual(identity.email, "person@example.com")
+        XCTAssertEqual(identity.planExpiresAt, ISO8601DateFormatter().date(from: "2030-01-01T00:00:00Z"))
+        XCTAssertEqual(identity.credentials.expiresAt, Date(timeIntervalSince1970: 2_000_000_000))
     }
 
     func testCredentialsRoundTripThroughKeychain() throws {

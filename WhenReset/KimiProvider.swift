@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct KimiDeviceLink: Sendable {
@@ -268,23 +269,33 @@ struct KimiProvider {
     }
 
     static func linkedIdentity(credentials: AccountCredentials) -> LinkedIdentity {
-        let identityToken = credentials.idToken.isEmpty ? credentials.accessToken : credentials.idToken
-        let claims = jwtClaims(identityToken)
+        let idTokenClaims = jwtClaims(credentials.idToken)
+        let accessTokenClaims = jwtClaims(credentials.accessToken)
+        let claims = idTokenClaims.isEmpty ? accessTokenClaims : idTokenClaims
         let workspaceID = string(claims["sub"])
             ?? string(claims["user_id"])
             ?? string(claims["uid"])
-            ?? UUID().uuidString
+            ?? credentialFingerprint(credentials)
         let email = string(claims["email"])
-        let displayName = string(claims["name"])
+        let profileName = string(claims["name"])
             ?? string(claims["preferred_username"])
             ?? string(claims["nickname"])
+        let displayName = profileName
             ?? email
             ?? "Kimi Code account"
         let plan = string(claims["plan"])
             ?? string(claims["subscription_type"])
             ?? string(claims["tier"])
-        return LinkedIdentity(workspaceID: workspaceID, displayName: displayName, email: email,
-                              plan: plan, credentials: credentials)
+        return LinkedIdentity(
+            workspaceID: workspaceID,
+            displayName: displayName,
+            profileName: profileName,
+            email: email,
+            plan: plan,
+            planExpiresAt: nil,
+            trialExpiresAt: nil,
+            credentials: credentials
+        )
     }
 
     private static func usageWindow(detail: [String: Any], title: String, minutes: Int?,
@@ -378,16 +389,39 @@ struct KimiProvider {
 
     private static func jwtClaims(_ token: String) -> [String: Any] {
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count > 1 else { return [:] }
-        var payload = String(parts[1])
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
-        guard let data = Data(base64Encoded: payload),
-              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+        guard parts.count == 3,
+              !parts[0].isEmpty,
+              !parts[1].isEmpty,
+              !parts[2].isEmpty,
+              let headerData = base64URLDecoded(parts[0]),
+              let header = try? JSONSerialization.jsonObject(with: headerData) as? [String: Any],
+              string(header["alg"]) != nil,
+              let payloadData = base64URLDecoded(parts[1]),
+              let claims = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] else {
             return [:]
         }
         return claims
+    }
+
+    private static func base64URLDecoded(_ value: Substring) -> Data? {
+        var payload = String(value)
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        return Data(base64Encoded: payload)
+    }
+
+    private static func credentialFingerprint(_ credentials: AccountCredentials) -> String {
+        let source: String
+        if !credentials.refreshToken.isEmpty {
+            source = "refresh:\(credentials.refreshToken)"
+        } else if !credentials.accessToken.isEmpty {
+            source = "access:\(credentials.accessToken)"
+        } else {
+            source = "id:\(credentials.idToken)"
+        }
+        let digest = SHA256.hash(data: Data(source.utf8))
+        return "kimi-" + digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private func postForm(_ url: URL, values: [(String, String)]) async throws -> HTTPResponse {

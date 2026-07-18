@@ -8,6 +8,11 @@ struct ClaudeOAuthLink: Sendable {
     let state: String
 }
 
+struct ClaudeCredentialRefresh: Sendable {
+    let credentials: AccountCredentials
+    let accountDetails: ProviderAccountDetails?
+}
+
 enum ClaudeOAuthError: LocalizedError {
     case invalidAuthorizationCode
     case stateMismatch
@@ -31,7 +36,12 @@ struct ClaudeProvider {
     static let requestedScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
     private static let authorizationURL = URL(string: "https://claude.com/cai/oauth/authorize")!
     private static let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
-    private let session = URLSession.shared
+    private static let profileURL = URL(string: "https://api.anthropic.com/api/oauth/profile")!
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
 
     func beginLink() throws -> ClaudeOAuthLink {
         let verifier = Self.randomBase64URL(byteCount: 64)
@@ -68,37 +78,73 @@ struct ClaudeProvider {
         guard let refreshToken = response.refreshToken, !refreshToken.isEmpty else {
             throw ClaudeOAuthError.missingRefreshToken
         }
-        let name = response.account?.displayName
-            ?? response.account?.emailAddress
-            ?? response.organization?.name
-            ?? "Claude account"
-        let workspaceID = response.account?.uuid ?? response.organization?.uuid ?? UUID().uuidString
+        let profile = try await profileIfAvailable(accessToken: response.accessToken)
+        let details = profile.map { Self.accountDetails(from: $0) }
+            ?? Self.accountDetails(from: response, includeLabelFallback: true)
+        let name = details.displayName ?? "Claude account"
+        guard let workspaceID = Self.nonEmpty(profile?.account.uuid)
+            ?? Self.nonEmpty(response.account?.uuid)
+            ?? Self.nonEmpty(profile?.organization.uuid)
+            ?? Self.nonEmpty(response.organization?.uuid) else {
+            throw ProviderError.missingAccount
+        }
         let credentials = AccountCredentials(
             accessToken: response.accessToken,
             refreshToken: refreshToken,
             idToken: "",
             expiresAt: response.expirationDate
         )
-        return LinkedIdentity(workspaceID: workspaceID, displayName: name,
-                              email: response.account?.emailAddress,
-                              plan: response.subscriptionType, credentials: credentials)
+        return LinkedIdentity(
+            workspaceID: workspaceID,
+            displayName: name,
+            profileName: details.profileName,
+            email: details.email,
+            plan: details.plan,
+            planExpiresAt: nil,
+            trialExpiresAt: details.trialExpiresAt,
+            credentials: credentials
+        )
     }
 
     func refreshedIfNeeded(_ credentials: AccountCredentials) async throws -> AccountCredentials {
+        try await refreshedAccountIfNeeded(credentials).credentials
+    }
+
+    func refreshedAccountIfNeeded(_ credentials: AccountCredentials) async throws -> ClaudeCredentialRefresh {
         guard let expiresAt = credentials.expiresAt,
-              expiresAt.timeIntervalSinceNow < 5 * 60 else { return credentials }
+              expiresAt.timeIntervalSinceNow < 5 * 60 else {
+            let profile = try await profileIfAvailable(accessToken: credentials.accessToken)
+            return ClaudeCredentialRefresh(
+                credentials: credentials,
+                accountDetails: profile.map { Self.accountDetails(from: $0) }
+            )
+        }
         guard !credentials.refreshToken.isEmpty else { throw ClaudeOAuthError.missingRefreshToken }
         let response = try await tokenRequest([
             "grant_type": "refresh_token",
             "refresh_token": credentials.refreshToken,
             "client_id": Self.clientID
         ])
-        return AccountCredentials(
+        let updatedCredentials = AccountCredentials(
             accessToken: response.accessToken,
             refreshToken: response.refreshToken ?? credentials.refreshToken,
             idToken: credentials.idToken,
             expiresAt: response.expirationDate
         )
+        let profile = try await profileIfAvailable(accessToken: updatedCredentials.accessToken)
+        return ClaudeCredentialRefresh(
+            credentials: updatedCredentials,
+            accountDetails: profile.map { Self.accountDetails(from: $0) }
+                ?? Self.accountDetails(from: response, includeLabelFallback: false)
+        )
+    }
+
+    func fetchAccountDetails(credentials: AccountCredentials) async throws -> ProviderAccountDetails {
+        Self.accountDetails(from: try await fetchProfile(accessToken: credentials.accessToken))
+    }
+
+    static func parseAccountDetails(profileData: Data) throws -> ProviderAccountDetails {
+        accountDetails(from: try JSONDecoder().decode(ClaudeProfileResponse.self, from: profileData))
     }
 
     func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws -> UsageSnapshot {
@@ -140,6 +186,32 @@ struct ClaudeProvider {
             throw ProviderError.server(code, Self.safeServerMessage(data))
         }
         return try JSONDecoder().decode(TokenResponse.self, from: data)
+    }
+
+    private func fetchProfile(accessToken: String) async throws -> ClaudeProfileResponse {
+        var request = URLRequest(url: Self.profileURL, cachePolicy: .reloadIgnoringLocalCacheData,
+                                 timeoutInterval: 10)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        let (data, response) = try await session.data(for: request)
+        let code = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(code) else {
+            throw ProviderError.server(code, Self.safeServerMessage(data))
+        }
+        return try JSONDecoder().decode(ClaudeProfileResponse.self, from: data)
+    }
+
+    /// Claude Code treats profile enrichment as optional. Linking and token refresh should still
+    /// succeed if this private endpoint is temporarily unavailable, while cancellation propagates.
+    private func profileIfAvailable(accessToken: String) async throws -> ClaudeProfileResponse? {
+        do {
+            return try await fetchProfile(accessToken: accessToken)
+        } catch {
+            try Task.checkCancellation()
+            return nil
+        }
     }
 
     private func window(_ value: Any?, title: String, minutes: Int) -> UsageWindow? {
@@ -190,6 +262,134 @@ struct ClaudeProvider {
         if let error = json["error"] as? String { return error }
         return "Claude OAuth request failed."
     }
+
+    private static func accountDetails(from profile: ClaudeProfileResponse) -> ProviderAccountDetails {
+        let profileName = nonEmpty(profile.account.displayName)
+        let email = nonEmpty(profile.account.email)
+        return ProviderAccountDetails(
+            profileName: profileName,
+            displayName: profileName ?? email,
+            email: email,
+            plan: plan(
+                organizationType: profile.organization.organizationType,
+                rateLimitTier: profile.organization.rateLimitTier
+            ),
+            planExpiresAt: nil,
+            trialExpiresAt: trialExpiresAt(from: profile.organization),
+            replacesMissingFields: true
+        )
+    }
+
+    private static func accountDetails(from response: TokenResponse,
+                                       includeLabelFallback: Bool) -> ProviderAccountDetails {
+        let profileName = nonEmpty(response.account?.displayName)
+        let email = nonEmpty(response.account?.emailAddress)
+        let fallback = includeLabelFallback ? email ?? nonEmpty(response.organization?.name) : nil
+        return ProviderAccountDetails(
+            profileName: profileName,
+            displayName: profileName ?? fallback,
+            email: email,
+            plan: plan(subscriptionType: response.subscriptionType),
+            planExpiresAt: nil,
+            trialExpiresAt: nil
+        )
+    }
+
+    private static func plan(organizationType: String?, rateLimitTier: String?) -> String? {
+        switch nonEmpty(organizationType)?.lowercased() {
+        case "claude_max":
+            return rateLimitTier?.lowercased() == "default_claude_max_20x" ? "Claude Max 20x" : "Claude Max"
+        case "claude_pro":
+            return "Claude Pro"
+        case "claude_team":
+            return "Claude Team"
+        case "claude_enterprise":
+            return "Claude Enterprise"
+        default:
+            return nil
+        }
+    }
+
+    private static func plan(subscriptionType: String?) -> String? {
+        switch nonEmpty(subscriptionType)?.lowercased() {
+        case "max", "claude_max":
+            return "Claude Max"
+        case "pro", "claude_pro":
+            return "Claude Pro"
+        case "team", "claude_team":
+            return "Claude Team"
+        case "enterprise", "claude_enterprise":
+            return "Claude Enterprise"
+        case let value?:
+            return value
+        case nil:
+            return nil
+        }
+    }
+
+    private static func trialExpiresAt(from organization: ClaudeProfileResponse.Organization) -> Date? {
+        guard organization.organizationType?.lowercased() == "claude_pro",
+              organization.onboardingFlags?.proTrialEligible == true,
+              let raw = nonEmpty(organization.trialEndsAt) else { return nil }
+        return ChatGPTProvider.date(raw)
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
+}
+
+private struct ClaudeProfileResponse: Decodable {
+    struct Account: Decodable {
+        let uuid: String
+        let email: String
+        let displayName: String?
+        let createdAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case uuid, email
+            case displayName = "display_name"
+            case createdAt = "created_at"
+        }
+    }
+
+    struct Organization: Decodable {
+        struct OnboardingFlags: Decodable {
+            let proTrialEligible: Bool?
+
+            enum CodingKeys: String, CodingKey {
+                case proTrialEligible = "e10"
+            }
+        }
+
+        let uuid: String
+        let organizationType: String?
+        let rateLimitTier: String?
+        let seatTier: String?
+        let hasExtraUsageEnabled: Bool?
+        let billingType: String?
+        let onboardingFlags: OnboardingFlags?
+        let trialEndsAt: String?
+        let trialDurationDays: Int?
+        let subscriptionCreatedAt: String?
+
+        enum CodingKeys: String, CodingKey {
+            case uuid
+            case organizationType = "organization_type"
+            case rateLimitTier = "rate_limit_tier"
+            case seatTier = "seat_tier"
+            case hasExtraUsageEnabled = "has_extra_usage_enabled"
+            case billingType = "billing_type"
+            case onboardingFlags = "cc_onboarding_flags"
+            case trialEndsAt = "claude_code_trial_ends_at"
+            case trialDurationDays = "claude_code_trial_duration_days"
+            case subscriptionCreatedAt = "subscription_created_at"
+        }
+    }
+
+    let account: Account
+    let organization: Organization
 }
 
 private struct TokenResponse: Decodable {

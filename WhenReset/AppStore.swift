@@ -317,6 +317,7 @@ final class AppStore {
         }
         do {
             var credentials = try KeychainStore.load(for: account.id)
+            var effectiveAccount = accounts.first(where: { $0.id == account.id }) ?? account
             let snapshot: UsageSnapshot
             switch account.providerID {
             case .chatGPT:
@@ -325,32 +326,51 @@ final class AppStore {
                     try KeychainStore.save(refreshed, for: account.id)
                     credentials = refreshed
                 }
-                snapshot = try await provider.fetchUsage(account: account, credentials: credentials)
-            case .claude:
-                let refreshed = try await claudeProvider.refreshedIfNeeded(credentials)
-                if refreshed != credentials {
-                    try KeychainStore.save(refreshed, for: account.id)
-                    credentials = refreshed
+                if let identity = try? provider.linkedIdentity(
+                    accessToken: credentials.accessToken,
+                    refreshToken: credentials.refreshToken,
+                    idToken: credentials.idToken
+                ), let updated = mergeProviderDetails(identity.accountDetails, for: account.id) {
+                    effectiveAccount = updated
                 }
-                snapshot = try await claudeProvider.fetchUsage(account: account, credentials: credentials)
+                snapshot = try await provider.fetchUsage(account: effectiveAccount, credentials: credentials)
+            case .claude:
+                let refreshed = try await claudeProvider.refreshedAccountIfNeeded(credentials)
+                if refreshed.credentials != credentials {
+                    try KeychainStore.save(refreshed.credentials, for: account.id)
+                    credentials = refreshed.credentials
+                }
+                if let details = refreshed.accountDetails,
+                   let updated = mergeProviderDetails(details, for: account.id) {
+                    effectiveAccount = updated
+                }
+                snapshot = try await claudeProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
             case .kimi:
                 let refreshed = try await kimiProvider.refreshedIfNeeded(credentials)
                 if refreshed != credentials {
                     try KeychainStore.save(refreshed, for: account.id)
                     credentials = refreshed
                 }
-                snapshot = try await kimiProvider.fetchUsage(account: account, credentials: credentials)
+                let identity = KimiProvider.linkedIdentity(credentials: credentials)
+                if let updated = mergeProviderDetails(identity.accountDetails, for: account.id) {
+                    effectiveAccount = updated
+                }
+                snapshot = try await kimiProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
             case .githubCopilot:
                 let refreshed = try await copilotProvider.refreshedIfNeeded(credentials)
                 if refreshed != credentials {
                     try KeychainStore.save(refreshed, for: account.id)
                     credentials = refreshed
                 }
-                snapshot = try await copilotProvider.fetchUsage(account: account, credentials: credentials)
+                if let details = try? await copilotProvider.fetchAccountDetails(credentials: credentials),
+                   let updated = mergeProviderDetails(details, for: account.id) {
+                    effectiveAccount = updated
+                }
+                snapshot = try await copilotProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
             case .zai:
-                snapshot = try await zaiProvider.fetchUsage(account: account, credentials: credentials)
+                snapshot = try await zaiProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
             case .miniMax:
-                snapshot = try await miniMaxProvider.fetchUsage(account: account, credentials: credentials)
+                snapshot = try await miniMaxProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
             }
             guard accounts.contains(where: { $0.id == account.id }) else { return }
             mergeLatestPlan(snapshot.plan, for: account.id)
@@ -378,22 +398,19 @@ final class AppStore {
             }
             var account = accounts[index]
             try KeychainStore.save(identity.credentials, for: account.id)
-            account.displayName = identity.displayName
             account.workspaceID = identity.workspaceID
-            account.plan = identity.plan
-            account.email = identity.email
-            account.planExpiresAt = identity.planExpiresAt
+            account.mergeProviderDetails(identity.accountDetails)
             accounts[index] = account
             refreshFailures.removeValue(forKey: account.id)
             persistAccounts()
             return account
         }
 
-        let account = MonitoredAccount(
+        var account = MonitoredAccount(
             id: UUID(), providerID: providerID, displayName: identity.displayName,
-            workspaceID: identity.workspaceID, plan: identity.plan, addedAt: .now,
-            email: identity.email, planExpiresAt: identity.planExpiresAt
+            workspaceID: identity.workspaceID, plan: identity.plan, addedAt: .now
         )
+        account.mergeProviderDetails(identity.accountDetails)
         try KeychainStore.save(identity.credentials, for: account.id)
         accounts.append(account)
         persistAccounts()
@@ -506,6 +523,7 @@ final class AppStore {
         var remainingPercent: Double?
         var progressFraction: Double?
         var resetCount: Int?
+        var isPinned: Bool
         var date: Date
         var fetchedAt: Date
 
@@ -515,7 +533,8 @@ final class AppStore {
                 accountName: account.resolvedDisplayName, accountSymbolName: account.customSymbolName,
                 providerID: account.providerID, title: title,
                 remainingPercent: showRemainingPercentage ? remainingPercent : nil,
-                progressFraction: progressFraction, resetCount: resetCount, expiresAt: date
+                progressFraction: progressFraction, resetCount: resetCount,
+                isPinned: isPinned, expiresAt: date
             )
         }
     }
@@ -535,7 +554,8 @@ final class AppStore {
                     account: account, kind: .quota, metricID: window.metricID,
                     title: window.displayTitle, remainingPercent: window.remainingPercent,
                     progressFraction: window.remainingPercent / 100,
-                    resetCount: nil, date: window.resetsAt, fetchedAt: snapshot.fetchedAt
+                    resetCount: nil, isPinned: accountSettings.isPinnedInLiveActivity(window),
+                    date: window.resetsAt, fetchedAt: snapshot.fetchedAt
                 ))
             }
 
@@ -547,14 +567,18 @@ final class AppStore {
                let expiry = credit.expiresAt,
                !matchingRules || bankedRule.matches(expiry: expiry, at: date) {
                 events.append(.init(
-                    account: account, kind: .bankedReset, metricID: "banked-resets",
+                    account: account, kind: .bankedReset,
+                    metricID: AccountMonitorSettings.bankedResetMetricID,
                     title: "Banked resets", remainingPercent: nil,
                     progressFraction: credit.remainingLifetimeFraction(at: date),
-                    resetCount: snapshot.availableResetCount, date: expiry, fetchedAt: snapshot.fetchedAt
+                    resetCount: snapshot.availableResetCount,
+                    isPinned: accountSettings.isBankedResetPinnedInLiveActivity,
+                    date: expiry, fetchedAt: snapshot.fetchedAt
                 ))
             }
         }
         return events.sorted {
+            if $0.isPinned != $1.isPinned { return $0.isPinned && !$1.isPinned }
             if $0.date != $1.date { return $0.date < $1.date }
             let accountOrder = $0.account.resolvedDisplayName.localizedCaseInsensitiveCompare(
                 $1.account.resolvedDisplayName)
@@ -599,6 +623,16 @@ final class AppStore {
               accounts[index].plan != plan else { return }
         accounts[index].plan = plan
         persistAccounts()
+    }
+
+    @discardableResult
+    private func mergeProviderDetails(_ details: ProviderAccountDetails,
+                                      for accountID: UUID) -> MonitoredAccount? {
+        guard let index = accounts.firstIndex(where: { $0.id == accountID }) else { return nil }
+        let original = accounts[index]
+        accounts[index].mergeProviderDetails(details)
+        if accounts[index] != original { persistAccounts() }
+        return accounts[index]
     }
 
     private func persistMonitorSettings() {

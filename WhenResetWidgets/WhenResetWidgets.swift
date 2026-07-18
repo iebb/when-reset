@@ -528,7 +528,8 @@ private struct LivePrimaryIslandDetail: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack {
+            HStack(spacing: 5) {
+                if target.isPinned { LiveActivityPinnedMarker() }
                 Text(target.title).lineLimit(1)
                 Spacer()
                 if let value = target.valueLabel {
@@ -550,6 +551,7 @@ private struct LiveIslandMiniTarget: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
+                if target.isPinned { LiveActivityPinnedMarker() }
                 Text(target.title).font(.caption2).lineLimit(1).foregroundStyle(.secondary)
                 Spacer(minLength: 2)
                 if let value = target.valueLabel {
@@ -644,6 +646,7 @@ private struct LiveHeroTargetCard: View {
                     .font(.headline).layoutPriority(1)
             }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
+                if target.isPinned { LiveActivityPinnedMarker() }
                 Text(target.title).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
                 if let value = target.valueLabel {
@@ -667,6 +670,7 @@ private struct LiveCompactTargetCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
+                if target.isPinned { LiveActivityPinnedMarker() }
                 Text(target.title).font(.caption2).lineLimit(1)
                 Spacer(minLength: 3)
                 if let value = target.valueLabel {
@@ -689,6 +693,15 @@ private struct LiveCompactTargetCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(7)
         .background(.white.opacity(0.08), in: .rect(cornerRadius: 10))
+    }
+}
+
+private struct LiveActivityPinnedMarker: View {
+    var body: some View {
+        Image(systemName: "star.fill")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(.yellow)
+            .accessibilityLabel("Pinned")
     }
 }
 

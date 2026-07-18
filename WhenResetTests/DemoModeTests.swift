@@ -36,6 +36,18 @@ final class DemoModeTests: XCTestCase {
         XCTAssertEqual(AccountMonitorSettings().defaultLiveActivityRule.remainingHours, 4)
     }
 
+    func testMultipleLiveActivityPinsRoundTrip() throws {
+        var settings = AccountMonitorSettings()
+        settings.pinnedLiveActivityMetricIDs = ["weekly", AccountMonitorSettings.bankedResetMetricID]
+
+        let decoded = try JSONDecoder().decode(
+            AccountMonitorSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertEqual(decoded.pinnedLiveActivityMetricIDs, settings.pinnedLiveActivityMetricIDs)
+    }
+
     func testProviderSectionTitleIncludesAvailablePlan() {
         XCTAssertEqual(ProviderID.chatGPT.sectionTitle(plan: "pro"), "ChatGPT Pro")
         XCTAssertEqual(ProviderID.chatGPT.sectionTitle(plan: "pro_20x"), "ChatGPT Pro 20x")
@@ -51,16 +63,20 @@ final class DemoModeTests: XCTestCase {
 
         account.customDisplayName = "Work account"
         account.customSymbolName = "briefcase.fill"
+        account.profileName = "Provider Person"
         account.email = "person@example.com"
         account.planExpiresAt = Date(timeIntervalSince1970: 2_000_000_000)
+        account.trialExpiresAt = Date(timeIntervalSince1970: 1_900_000_000)
         XCTAssertEqual(account.resolvedDisplayName, "Work account")
 
         let decoded = try JSONDecoder().decode(MonitoredAccount.self,
                                                from: JSONEncoder().encode(account))
         XCTAssertEqual(decoded.customDisplayName, "Work account")
         XCTAssertEqual(decoded.customSymbolName, "briefcase.fill")
+        XCTAssertEqual(decoded.profileName, "Provider Person")
         XCTAssertEqual(decoded.email, "person@example.com")
         XCTAssertEqual(decoded.planExpiresAt, account.planExpiresAt)
+        XCTAssertEqual(decoded.trialExpiresAt, account.trialExpiresAt)
     }
 
     func testLegacyAccountWithoutProfileDetailsDecodes() throws {
@@ -84,8 +100,56 @@ final class DemoModeTests: XCTestCase {
                                                from: JSONEncoder().encode(legacy))
 
         XCTAssertEqual(decoded.displayName, "Legacy Person")
+        XCTAssertNil(decoded.profileName)
         XCTAssertNil(decoded.email)
         XCTAssertNil(decoded.planExpiresAt)
+        XCTAssertNil(decoded.trialExpiresAt)
+    }
+
+    func testAuthoritativeProviderDetailsReplaceIncorrectStoredMetadata() {
+        var account = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Old fallback",
+            workspaceID: "workspace", plan: "wrong", addedAt: .now,
+            profileName: "Wrong Name", email: "wrong@example.com",
+            planExpiresAt: Date(timeIntervalSince1970: 2_000),
+            trialExpiresAt: Date(timeIntervalSince1970: 3_000)
+        )
+
+        account.mergeProviderDetails(.init(
+            profileName: "Ada Lovelace",
+            displayName: "Ada Lovelace",
+            email: "ada@example.com",
+            plan: "pro_20x",
+            planExpiresAt: Date(timeIntervalSince1970: 4_000),
+            replacesMissingFields: true
+        ))
+
+        XCTAssertEqual(account.displayName, "Ada Lovelace")
+        XCTAssertEqual(account.profileName, "Ada Lovelace")
+        XCTAssertEqual(account.email, "ada@example.com")
+        XCTAssertEqual(account.plan, "pro_20x")
+        XCTAssertEqual(account.planExpiresAt, Date(timeIntervalSince1970: 4_000))
+        XCTAssertNil(account.trialExpiresAt)
+    }
+
+    func testAuthoritativeMissingProviderFieldsClearStaleValues() {
+        var account = MonitoredAccount(
+            id: UUID(), providerID: .kimi, displayName: "Old",
+            workspaceID: "workspace", plan: "old", addedAt: .now,
+            profileName: "Wrong", email: "wrong@example.com",
+            planExpiresAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        account.mergeProviderDetails(.init(
+            displayName: "Kimi Code account",
+            replacesMissingFields: true
+        ))
+
+        XCTAssertEqual(account.displayName, "Kimi Code account")
+        XCTAssertNil(account.profileName)
+        XCTAssertNil(account.email)
+        XCTAssertNil(account.plan)
+        XCTAssertNil(account.planExpiresAt)
     }
 
     func testFullSFSymbolCatalogIsBundled() throws {
