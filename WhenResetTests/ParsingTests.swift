@@ -2,6 +2,13 @@ import XCTest
 @testable import WhenReset
 
 final class ParsingTests: XCTestCase {
+    func testPublicGitHubLinksTargetWhenResetRepository() {
+        XCTAssertEqual(AppLinks.sourceCode.scheme, "https")
+        XCTAssertEqual(AppLinks.sourceCode.host, "github.com")
+        XCTAssertEqual(AppLinks.sourceCode.path, "/iebb/when-reset")
+        XCTAssertEqual(AppLinks.issues.path, "/iebb/when-reset/issues")
+    }
+
     func testRemainingPercentIsClamped() {
         XCTAssertEqual(UsageWindow(title: "Test", usedPercent: 30, resetsAt: .now, windowMinutes: nil).remainingPercent, 70)
         XCTAssertEqual(UsageWindow(title: "Test", usedPercent: 120, resetsAt: .now, windowMinutes: nil).remainingPercent, 0)

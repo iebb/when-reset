@@ -2,13 +2,18 @@ import Charts
 import SwiftUI
 import UIKit
 
+enum AppLinks {
+    static let sourceCode = URL(string: "https://github.com/iebb/when-reset")!
+    static let issues = URL(string: "https://github.com/iebb/when-reset/issues")!
+}
+
 struct ContentView: View {
     var body: some View {
         TabView {
             UsageTabView()
                 .tabItem { Label("Usage", systemImage: "chart.bar.fill") }
-            GlobalLiveActivitySettingsView()
-                .tabItem { Label("Activity", systemImage: "livephoto") }
+            SettingsView()
+                .tabItem { Label("Settings", systemImage: "gearshape.fill") }
         }
     }
 }
@@ -910,7 +915,7 @@ private struct LiveActivityRuleRows: View {
     }
 }
 
-struct GlobalLiveActivitySettingsView: View {
+struct SettingsView: View {
     @Environment(AppStore.self) private var store
     @State private var settings = GlobalLiveActivitySettings()
     @State private var notificationSettings = GlobalNotificationSettings()
@@ -941,8 +946,16 @@ struct GlobalLiveActivitySettingsView: View {
                     Toggle("Show percentage remaining", isOn: $settings.showRemainingPercentage)
                     Toggle("Show banked resets", isOn: $settings.showBankedResets)
                 }
+                Section("GitHub") {
+                    Link(destination: AppLinks.sourceCode) {
+                        Label("Source Code", systemImage: "chevron.left.forwardslash.chevron.right")
+                    }
+                    Link(destination: AppLinks.issues) {
+                        Label("Report an Issue", systemImage: "exclamationmark.bubble")
+                    }
+                }
             }
-            .navigationTitle("Live Activity")
+            .navigationTitle("Settings")
             .onAppear {
                 settings = store.liveActivitySettings
                 notificationSettings = store.notificationSettings
