@@ -174,10 +174,11 @@ final class AppStore {
         } catch {
             historyStorageError = error.localizedDescription
         }
-        if accounts.contains(where: { !$0.isDemo && settings(for: $0).notifyAboutResets }) {
+        if hasAnyEnabledNotification {
             await UsageNotificationService.prepareProvisionalAuthorization()
         }
         await deliverUsageNotifications(pendingNotifications)
+        await reconcileScheduledResetNotifications()
         guard !accounts.isEmpty else { return }
         await refreshAll(source: .launch)
     }
@@ -331,8 +332,7 @@ final class AppStore {
         guard !isRefreshing else { return false }
         isRefreshing = true; errorMessage = nil
         defer { isRefreshing = false }
-        if source == .manual,
-           accounts.contains(where: { !$0.isDemo && settings(for: $0).notifyAboutResets }) {
+        if source == .manual, hasAnyEnabledNotification {
             await UsageNotificationService.prepareProvisionalAuthorization()
         }
         let refreshAccounts = accounts
@@ -353,6 +353,7 @@ final class AppStore {
         guard !Task.isCancelled else { return false }
         await deliverPendingUsageNotifications()
         publishSnapshots()
+        await reconcileScheduledResetNotifications()
         await updateLiveActivity()
         await reconcileLiveActivity()
         return succeeded
@@ -376,6 +377,7 @@ final class AppStore {
             refreshFailures.removeValue(forKey: account.id)
             if publishChanges {
                 publishSnapshots()
+                await reconcileScheduledResetNotifications()
                 await updateLiveActivity()
                 await reconcileLiveActivity()
             }
@@ -450,6 +452,7 @@ final class AppStore {
             refreshFailures.removeValue(forKey: account.id)
             if publishChanges {
                 publishSnapshots()
+                await reconcileScheduledResetNotifications()
                 await updateLiveActivity()
                 await reconcileLiveActivity()
             }
@@ -515,6 +518,7 @@ final class AppStore {
             } catch {
                 historyStorageError = error.localizedDescription
             }
+            await reconcileScheduledResetNotifications()
             await updateLiveActivity()
             await reconcileLiveActivity()
         }
@@ -534,7 +538,11 @@ final class AppStore {
         accounts[index].customSymbolName = normalizedSymbol?.isEmpty == false ? normalizedSymbol : nil
         persistAccounts()
         publishSnapshots()
-        Task { await updateLiveActivity(); await reconcileLiveActivity() }
+        Task {
+            await reconcileScheduledResetNotifications()
+            await updateLiveActivity()
+            await reconcileLiveActivity()
+        }
     }
 
     private func endGlobalLiveActivity() async {
@@ -563,12 +571,12 @@ final class AppStore {
     func settings(for account: MonitoredAccount) -> AccountMonitorSettings { monitorSettings[account.id] ?? .init() }
 
     func setSettings(_ settings: AccountMonitorSettings, for account: MonitoredAccount) {
-        let previouslyEnabled = self.settings(for: account).notifyAboutResets
+        let previousSettings = self.settings(for: account)
         monitorSettings[account.id] = settings
         persistMonitorSettings()
         publishSnapshots()
         Task {
-            if previouslyEnabled != settings.notifyAboutResets {
+            if previousSettings.notifyAboutResets != settings.notifyAboutResets {
                 if settings.notifyAboutResets, !account.isDemo {
                     await UsageNotificationService.requestProminentAuthorization()
                 } else {
@@ -579,6 +587,14 @@ final class AppStore {
                         historyStorageError = error.localizedDescription
                     }
                 }
+            }
+            if previousSettings.notifyAtScheduledReset != settings.notifyAtScheduledReset {
+                if settings.notifyAtScheduledReset,
+                   notificationSettings.notifyAtScheduledReset,
+                   !account.isDemo {
+                    await UsageNotificationService.requestProminentAuthorization()
+                }
+                await reconcileScheduledResetNotifications()
             }
             await updateLiveActivity()
             await reconcileLiveActivity()
@@ -592,8 +608,17 @@ final class AppStore {
     }
 
     func setNotificationSettings(_ settings: GlobalNotificationSettings) {
+        let previousSettings = notificationSettings
         notificationSettings = settings
         UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: notificationSettingsKey)
+        Task {
+            if !previousSettings.notifyAtScheduledReset,
+               settings.notifyAtScheduledReset,
+               accounts.contains(where: { !$0.isDemo && self.settings(for: $0).notifyAtScheduledReset }) {
+                await UsageNotificationService.requestProminentAuthorization()
+            }
+            await reconcileScheduledResetNotifications()
+        }
     }
 
     private func reconcileLiveActivity(at date: Date = .now) async {
@@ -745,11 +770,35 @@ final class AppStore {
         UserDefaults.standard.set(try? JSONEncoder().encode(monitorSettings), forKey: settingsKey)
     }
 
+    private var hasAnyEnabledNotification: Bool {
+        accounts.contains { account in
+            guard !account.isDemo else { return false }
+            let accountSettings = settings(for: account)
+            return accountSettings.notifyAboutResets
+                || (notificationSettings.notifyAtScheduledReset
+                    && accountSettings.notifyAtScheduledReset)
+        }
+    }
+
+    private func reconcileScheduledResetNotifications() async {
+        let targets = ScheduledResetNotificationPlanner.targets(
+            accounts: accounts,
+            snapshots: snapshots,
+            monitorSettings: monitorSettings,
+            globalSettings: notificationSettings
+        )
+        await UsageNotificationService.reconcileScheduledResets(targets)
+    }
+
     private func recordSuccessfulSnapshot(_ snapshot: UsageSnapshot, for account: MonitoredAccount,
                                           source: UsageRefreshSource,
                                           deliverNotifications: Bool) async {
-        let notificationsEnabled = settings(for: account).notifyAboutResets
-        if !account.isDemo, notificationsEnabled, source == .accountLink {
+        let accountSettings = settings(for: account)
+        let notificationsEnabled = accountSettings.notifyAboutResets
+        let scheduledNotificationsEnabled = notificationSettings.notifyAtScheduledReset
+            && accountSettings.notifyAtScheduledReset
+        if !account.isDemo, notificationsEnabled || scheduledNotificationsEnabled,
+           source == .accountLink {
             await UsageNotificationService.requestProminentAuthorization()
         }
         do {
@@ -831,6 +880,68 @@ final class AppStore {
     }
 }
 
+struct ScheduledResetNotificationTarget: Equatable, Sendable {
+    static let identifierPrefix = "when-reset.scheduled."
+
+    var identifier: String
+    var accountID: UUID
+    var accountName: String
+    var metricID: String
+    var metricTitle: String
+    var fireDate: Date
+
+    static func identifier(accountID: UUID, metricID: String) -> String {
+        let encodedMetricID = Data(metricID.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+        return "\(identifierPrefix)\(accountID.uuidString).\(encodedMetricID)"
+    }
+}
+
+enum ScheduledResetNotificationPlanner {
+    static let maximumPendingNotifications = 60
+
+    static func targets(accounts: [MonitoredAccount], snapshots: [UUID: UsageSnapshot],
+                        monitorSettings: [UUID: AccountMonitorSettings],
+                        globalSettings: GlobalNotificationSettings,
+                        now: Date = .now) -> [ScheduledResetNotificationTarget] {
+        guard globalSettings.notifyAtScheduledReset else { return [] }
+
+        var targetsByIdentifier: [String: ScheduledResetNotificationTarget] = [:]
+        for account in accounts where !account.isDemo {
+            let accountSettings = monitorSettings[account.id] ?? .init()
+            guard accountSettings.notifyAtScheduledReset,
+                  let snapshot = snapshots[account.id] else { continue }
+
+            for window in snapshot.usageWindows where window.resetsAt > now.addingTimeInterval(1) {
+                let identifier = ScheduledResetNotificationTarget.identifier(
+                    accountID: account.id,
+                    metricID: window.metricID
+                )
+                let target = ScheduledResetNotificationTarget(
+                    identifier: identifier,
+                    accountID: account.id,
+                    accountName: account.resolvedDisplayName,
+                    metricID: window.metricID,
+                    metricTitle: window.displayTitle,
+                    fireDate: window.resetsAt
+                )
+                if let existing = targetsByIdentifier[identifier], existing.fireDate <= target.fireDate {
+                    continue
+                }
+                targetsByIdentifier[identifier] = target
+            }
+        }
+
+        return targetsByIdentifier.values.sorted {
+            if $0.fireDate != $1.fireDate { return $0.fireDate < $1.fireDate }
+            return $0.identifier < $1.identifier
+        }
+        .prefix(maximumPendingNotifications)
+        .map { $0 }
+    }
+}
+
 @MainActor
 private enum UsageNotificationService {
     static func prepareProvisionalAuthorization() async {
@@ -881,5 +992,50 @@ private enum UsageNotificationService {
             }
         }
         return delivered
+    }
+
+    static func reconcileScheduledResets(_ targets: [ScheduledResetNotificationTarget]) async {
+        let center = UNUserNotificationCenter.current()
+        let pending = await center.pendingNotificationRequests()
+        let existingIDs = Set(pending.lazy.map(\.identifier).filter {
+            $0.hasPrefix(ScheduledResetNotificationTarget.identifierPrefix)
+        })
+        let desiredIDs = Set(targets.map(\.identifier))
+        let staleIDs = existingIDs.subtracting(desiredIDs)
+        if !staleIDs.isEmpty {
+            center.removePendingNotificationRequests(withIdentifiers: Array(staleIDs))
+        }
+
+        guard !targets.isEmpty else { return }
+        let settings = await center.notificationSettings()
+        switch settings.authorizationStatus {
+        case .authorized, .provisional, .ephemeral:
+            break
+        case .denied, .notDetermined:
+            return
+        @unknown default:
+            return
+        }
+
+        for target in targets {
+            let interval = target.fireDate.timeIntervalSinceNow
+            guard interval > 1 else { continue }
+            let content = UNMutableNotificationContent()
+            content.title = "\(target.metricTitle) reset"
+            content.body = "\(target.accountName)’s \(target.metricTitle) should now be available again."
+            content.threadIdentifier = "usage-\(target.accountID.uuidString)"
+            content.userInfo = [
+                "accountID": target.accountID.uuidString,
+                "metricID": target.metricID
+            ]
+            if settings.soundSetting == .enabled { content.sound = .default }
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: interval, repeats: false)
+            let request = UNNotificationRequest(
+                identifier: target.identifier,
+                content: content,
+                trigger: trigger
+            )
+            try? await center.add(request)
+        }
     }
 }

@@ -33,7 +33,9 @@ final class DemoModeTests: XCTestCase {
         XCTAssertEqual(settings.mode, .automatic)
         XCTAssertTrue(settings.showRemainingPercentage)
         XCTAssertTrue(settings.showBankedResets)
+        XCTAssertFalse(GlobalNotificationSettings().notifyAtScheduledReset)
         XCTAssertEqual(AccountMonitorSettings().defaultLiveActivityRule.remainingHours, 4)
+        XCTAssertTrue(AccountMonitorSettings().notifyAtScheduledReset)
     }
 
     func testMultipleLiveActivityPinsRoundTrip() throws {

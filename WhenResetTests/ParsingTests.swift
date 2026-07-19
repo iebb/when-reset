@@ -313,6 +313,7 @@ final class ParsingTests: XCTestCase {
         let data = Data(#"{"liveActivityMode":"nearReset","nearResetMinutes":60}"#.utf8)
         let settings = try JSONDecoder().decode(AccountMonitorSettings.self, from: data)
         XCTAssertTrue(settings.notifyAboutResets)
+        XCTAssertTrue(settings.notifyAtScheduledReset)
         XCTAssertTrue(settings.showBankedResets)
         XCTAssertTrue(settings.showBankedResetsInLiveActivity)
         XCTAssertTrue(settings.hiddenMetricIDs.isEmpty)
@@ -330,6 +331,7 @@ final class ParsingTests: XCTestCase {
             from: JSONEncoder().encode(original)
         )
         XCTAssertFalse(decoded.notifyAboutResets)
+        XCTAssertTrue(decoded.notifyAtScheduledReset)
     }
 
     func testGlobalNotificationSettingsDefaultToUnexpectedResetAlertsEnabled() throws {
@@ -339,6 +341,7 @@ final class ParsingTests: XCTestCase {
         )
 
         XCTAssertTrue(decoded.notifyAboutUnexpectedResets)
+        XCTAssertFalse(decoded.notifyAtScheduledReset)
         XCTAssertTrue(decoded.allows(.probableEarlyReset))
         XCTAssertTrue(decoded.allows(.probableEarlyWeeklyReset))
     }
@@ -354,6 +357,91 @@ final class ParsingTests: XCTestCase {
         XCTAssertFalse(decoded.allows(.probableEarlyWeeklyReset))
         XCTAssertTrue(decoded.allows(.quotaReset))
         XCTAssertTrue(decoded.allows(.newBankedReset))
+    }
+
+    func testGlobalScheduledResetNotificationSettingRoundTripsEnabled() throws {
+        let settings = GlobalNotificationSettings(notifyAtScheduledReset: true)
+        let decoded = try JSONDecoder().decode(
+            GlobalNotificationSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertTrue(decoded.notifyAtScheduledReset)
+    }
+
+    func testScheduledResetNotificationPlannerRequiresGlobalAndAccountOptIn() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = MonitoredAccount(
+            id: UUID(), providerID: .claude, displayName: "Claude Work",
+            workspaceID: "workspace", plan: "Max", addedAt: now
+        )
+        let weekly = UsageWindow(
+            title: "Weekly", usedPercent: 30,
+            resetsAt: now.addingTimeInterval(3_600), windowMinutes: 10_080,
+            kind: .weekly
+        )
+        let snapshot = UsageSnapshot(
+            accountID: account.id, providerName: "Claude", accountName: account.displayName,
+            plan: account.plan, primary: weekly, secondary: nil,
+            availableResetCount: 0, resetCredits: [], fetchedAt: now
+        )
+        let snapshots = [account.id: snapshot]
+
+        XCTAssertTrue(ScheduledResetNotificationPlanner.targets(
+            accounts: [account], snapshots: snapshots, monitorSettings: [:],
+            globalSettings: .init(), now: now
+        ).isEmpty)
+        XCTAssertTrue(ScheduledResetNotificationPlanner.targets(
+            accounts: [account], snapshots: snapshots,
+            monitorSettings: [account.id: .init(notifyAtScheduledReset: false)],
+            globalSettings: .init(notifyAtScheduledReset: true), now: now
+        ).isEmpty)
+
+        let targets = ScheduledResetNotificationPlanner.targets(
+            accounts: [account], snapshots: snapshots, monitorSettings: [:],
+            globalSettings: .init(notifyAtScheduledReset: true), now: now
+        )
+        XCTAssertEqual(targets.count, 1)
+        XCTAssertEqual(targets[0].accountID, account.id)
+        XCTAssertEqual(targets[0].metricID, weekly.metricID)
+        XCTAssertEqual(targets[0].metricTitle, "Weekly limit")
+        XCTAssertEqual(targets[0].fireDate, weekly.resetsAt)
+        XCTAssertTrue(targets[0].identifier.hasPrefix(ScheduledResetNotificationTarget.identifierPrefix))
+    }
+
+    func testScheduledResetNotificationPlannerSortsNearestAndDropsPastTargets() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "ChatGPT Personal",
+            workspaceID: "workspace", plan: "Plus", addedAt: now
+        )
+        let later = UsageWindow(
+            title: "Weekly", usedPercent: 10,
+            resetsAt: now.addingTimeInterval(7_200), windowMinutes: 10_080,
+            kind: .weekly
+        )
+        let sooner = UsageWindow(
+            title: "5-hour", usedPercent: 20,
+            resetsAt: now.addingTimeInterval(1_800), windowMinutes: 300,
+            kind: .fiveHour
+        )
+        let past = UsageWindow(
+            title: "Past", usedPercent: 100,
+            resetsAt: now.addingTimeInterval(-60), windowMinutes: 60,
+            kind: .additional, identifier: "past"
+        )
+        let snapshot = UsageSnapshot(
+            accountID: account.id, providerName: "ChatGPT", accountName: account.displayName,
+            plan: account.plan, primary: later, secondary: sooner,
+            availableResetCount: 0, resetCredits: [], fetchedAt: now,
+            extraWindows: [past]
+        )
+
+        let targets = ScheduledResetNotificationPlanner.targets(
+            accounts: [account], snapshots: [account.id: snapshot], monitorSettings: [:],
+            globalSettings: .init(notifyAtScheduledReset: true), now: now
+        )
+        XCTAssertEqual(targets.map(\.metricID), [sooner.metricID, later.metricID])
     }
 
     func testLegacyGlobalLiveActivityModesDecodeToAutomaticAndDisabled() throws {

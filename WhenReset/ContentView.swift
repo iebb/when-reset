@@ -285,11 +285,13 @@ struct AccountSettingsView: View {
             }
             if !account.isDemo {
                 Section {
-                    Toggle("Notify Me About Resets", isOn: $settings.notifyAboutResets)
+                    Toggle("Notify About Detected Resets", isOn: $settings.notifyAboutResets)
+                    Toggle("Notify at Scheduled Reset Time",
+                           isOn: $settings.notifyAtScheduledReset)
                 } header: {
                     Text("Notifications")
                 } footer: {
-                    Text("Unexpected reset alerts also require the global notification setting.")
+                    Text("Scheduled-time and unexpected reset alerts also require their global settings.")
                 }
             }
             Section("Appearance") {
@@ -919,6 +921,8 @@ struct GlobalLiveActivitySettingsView: View {
                 Section("Notifications") {
                     Toggle("Notify About Unexpected Resets",
                            isOn: $notificationSettings.notifyAboutUnexpectedResets)
+                    Toggle("Notify at Scheduled Reset Time",
+                           isOn: $notificationSettings.notifyAtScheduledReset)
                 }
                 Section {
                     Picker("Behavior", selection: $settings.mode) {

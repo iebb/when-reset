@@ -167,6 +167,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     static let bankedResetMetricID = "banked-resets"
 
     var notifyAboutResets = true
+    var notifyAtScheduledReset = true
     var showBankedResets = true
     var hiddenMetricIDs: Set<String> = []
     var showBankedResetsInLiveActivity = true
@@ -176,14 +177,15 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     var liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:]
     var bankedResetLiveActivityRule = LiveActivityQuotaRule()
 
-    init(notifyAboutResets: Bool = true,
+    init(notifyAboutResets: Bool = true, notifyAtScheduledReset: Bool = true,
          showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
          showBankedResetsInLiveActivity: Bool = true, hiddenLiveActivityMetricIDs: Set<String> = [],
          pinnedLiveActivityMetricIDs: Set<String> = [],
          defaultLiveActivityRule: LiveActivityQuotaRule = .init(),
          liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:],
-         bankedResetLiveActivityRule: LiveActivityQuotaRule = .init()) {
+        bankedResetLiveActivityRule: LiveActivityQuotaRule = .init()) {
         self.notifyAboutResets = notifyAboutResets
+        self.notifyAtScheduledReset = notifyAtScheduledReset
         self.showBankedResets = showBankedResets
         self.hiddenMetricIDs = hiddenMetricIDs
         self.showBankedResetsInLiveActivity = showBankedResetsInLiveActivity
@@ -197,6 +199,10 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         notifyAboutResets = try values.decodeIfPresent(Bool.self, forKey: .notifyAboutResets) ?? true
+        notifyAtScheduledReset = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .notifyAtScheduledReset
+        ) ?? true
         showBankedResets = try values.decodeIfPresent(Bool.self, forKey: .showBankedResets) ?? true
         hiddenMetricIDs = try values.decodeIfPresent(Set<String>.self, forKey: .hiddenMetricIDs) ?? []
         showBankedResetsInLiveActivity = try values.decodeIfPresent(Bool.self, forKey: .showBankedResetsInLiveActivity) ?? true
@@ -224,7 +230,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case notifyAboutResets
+        case notifyAboutResets, notifyAtScheduledReset
         case showBankedResets, hiddenMetricIDs, showBankedResetsInLiveActivity, hiddenLiveActivityMetricIDs
         case pinnedLiveActivityMetricIDs
         case defaultLiveActivityRule, liveActivityQuotaRules, bankedResetLiveActivityRule
@@ -254,9 +260,11 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
 
 struct GlobalNotificationSettings: Codable, Hashable, Sendable {
     var notifyAboutUnexpectedResets = true
+    var notifyAtScheduledReset = false
 
-    init(notifyAboutUnexpectedResets: Bool = true) {
+    init(notifyAboutUnexpectedResets: Bool = true, notifyAtScheduledReset: Bool = false) {
         self.notifyAboutUnexpectedResets = notifyAboutUnexpectedResets
+        self.notifyAtScheduledReset = notifyAtScheduledReset
     }
 
     init(from decoder: Decoder) throws {
@@ -265,6 +273,10 @@ struct GlobalNotificationSettings: Codable, Hashable, Sendable {
             Bool.self,
             forKey: .notifyAboutUnexpectedResets
         ) ?? true
+        notifyAtScheduledReset = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .notifyAtScheduledReset
+        ) ?? false
     }
 
     func allows(_ eventKind: UsageNotificationEvent.Kind) -> Bool {
