@@ -123,6 +123,7 @@ final class AppStore {
     var isLinking = false
     var monitorSettings: [UUID: AccountMonitorSettings] = [:]
     var liveActivitySettings = GlobalLiveActivitySettings()
+    var notificationSettings = GlobalNotificationSettings()
     private(set) var hasLiveActivity = false
     private(set) var usageHistory: [UsageHistoryPoint] = []
     private(set) var historyStorageError: String?
@@ -139,6 +140,7 @@ final class AppStore {
     private var copilotLink: CopilotDeviceLink?
     private let settingsKey = "monitorSettings.v1"
     private let liveActivitySettingsKey = "globalLiveActivitySettings.v1"
+    private let notificationSettingsKey = "globalNotificationSettings.v1"
     private let historyStore = UsageHistoryStore()
     private var hasStarted = false
     private static let globalActivityID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
@@ -152,6 +154,10 @@ final class AppStore {
         if let data = UserDefaults.standard.data(forKey: liveActivitySettingsKey),
            let saved = try? JSONDecoder().decode(GlobalLiveActivitySettings.self, from: data) {
             liveActivitySettings = saved
+        }
+        if let data = UserDefaults.standard.data(forKey: notificationSettingsKey),
+           let saved = try? JSONDecoder().decode(GlobalNotificationSettings.self, from: data) {
+            notificationSettings = saved
         }
         hasLiveActivity = !Activity<UsageActivityAttributes>.activities.isEmpty
     }
@@ -585,6 +591,11 @@ final class AppStore {
         Task { await updateLiveActivity(); await reconcileLiveActivity() }
     }
 
+    func setNotificationSettings(_ settings: GlobalNotificationSettings) {
+        notificationSettings = settings
+        UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: notificationSettingsKey)
+    }
+
     private func reconcileLiveActivity(at date: Date = .now) async {
         let running = !Activity<UsageActivityAttributes>.activities.isEmpty
         let shouldRun: Bool
@@ -774,7 +785,9 @@ final class AppStore {
     private func deliverUsageNotifications(_ events: [UsageNotificationEvent]) async {
         let deliverable = events.filter { event in
             guard let account = accounts.first(where: { $0.id == event.accountID }) else { return false }
-            return !account.isDemo && settings(for: account).notifyAboutResets
+            return !account.isDemo
+                && settings(for: account).notifyAboutResets
+                && notificationSettings.allows(event.kind)
         }
         let deliverableIDs = Set(deliverable.map(\.id))
         let suppressed = Set(events.map(\.id)).subtracting(deliverableIDs)

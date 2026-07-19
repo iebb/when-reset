@@ -252,6 +252,31 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
     }
 }
 
+struct GlobalNotificationSettings: Codable, Hashable, Sendable {
+    var notifyAboutUnexpectedResets = true
+
+    init(notifyAboutUnexpectedResets: Bool = true) {
+        self.notifyAboutUnexpectedResets = notifyAboutUnexpectedResets
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        notifyAboutUnexpectedResets = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .notifyAboutUnexpectedResets
+        ) ?? true
+    }
+
+    func allows(_ eventKind: UsageNotificationEvent.Kind) -> Bool {
+        switch eventKind {
+        case .probableEarlyReset, .probableEarlyWeeklyReset:
+            notifyAboutUnexpectedResets
+        case .quotaReset, .newBankedReset:
+            true
+        }
+    }
+}
+
 struct ProviderAccountDetails: Equatable, Sendable {
     var profileName: String? = nil
     var displayName: String? = nil

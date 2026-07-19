@@ -289,9 +289,7 @@ struct AccountSettingsView: View {
                 } header: {
                     Text("Notifications")
                 } footer: {
-                    Text(currentAccount.providerID == .chatGPT
-                         ? "Notifies after detected quota resets. ChatGPT also reports probable banked-reset applications and newly granted banked resets."
-                         : "Notifies after a refresh detects a scheduled or probable early quota reset.")
+                    Text("Unexpected reset alerts also require the global notification setting.")
                 }
             }
             Section("Appearance") {
@@ -697,9 +695,6 @@ private struct AccountUsageHistorySections: View {
             }
         }
 
-        Section("Recording") {
-            Label("35-day on-device history", systemImage: "internaldrive")
-        }
     }
 
     private func makeSeries(from points: [UsageHistoryPoint]) -> [UsageHistorySeries] {
@@ -886,7 +881,7 @@ private struct LiveActivityRuleRows: View {
     }
 
     var body: some View {
-        Picker("Show when", selection: $rule.trigger) {
+        Picker("Include in Live Activity when", selection: $rule.trigger) {
             ForEach(triggers, id: \.self) { trigger in
                 Text(trigger.title).tag(trigger)
             }
@@ -916,10 +911,15 @@ private struct LiveActivityRuleRows: View {
 struct GlobalLiveActivitySettingsView: View {
     @Environment(AppStore.self) private var store
     @State private var settings = GlobalLiveActivitySettings()
+    @State private var notificationSettings = GlobalNotificationSettings()
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Notifications") {
+                    Toggle("Notify About Unexpected Resets",
+                           isOn: $notificationSettings.notifyAboutUnexpectedResets)
+                }
                 Section {
                     Picker("Behavior", selection: $settings.mode) {
                         ForEach(LiveActivityMode.allCases, id: \.self) { mode in
@@ -939,8 +939,14 @@ struct GlobalLiveActivitySettingsView: View {
                 }
             }
             .navigationTitle("Live Activity")
-            .onAppear { settings = store.liveActivitySettings }
+            .onAppear {
+                settings = store.liveActivitySettings
+                notificationSettings = store.notificationSettings
+            }
             .onChange(of: settings) { _, newValue in store.setLiveActivitySettings(newValue) }
+            .onChange(of: notificationSettings) { _, newValue in
+                store.setNotificationSettings(newValue)
+            }
         }
     }
 

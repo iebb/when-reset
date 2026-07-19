@@ -332,6 +332,30 @@ final class ParsingTests: XCTestCase {
         XCTAssertFalse(decoded.notifyAboutResets)
     }
 
+    func testGlobalNotificationSettingsDefaultToUnexpectedResetAlertsEnabled() throws {
+        let decoded = try JSONDecoder().decode(
+            GlobalNotificationSettings.self,
+            from: Data("{}".utf8)
+        )
+
+        XCTAssertTrue(decoded.notifyAboutUnexpectedResets)
+        XCTAssertTrue(decoded.allows(.probableEarlyReset))
+        XCTAssertTrue(decoded.allows(.probableEarlyWeeklyReset))
+    }
+
+    func testGlobalNotificationSettingsOnlyGateUnexpectedResetAlerts() throws {
+        let settings = GlobalNotificationSettings(notifyAboutUnexpectedResets: false)
+        let decoded = try JSONDecoder().decode(
+            GlobalNotificationSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+
+        XCTAssertFalse(decoded.allows(.probableEarlyReset))
+        XCTAssertFalse(decoded.allows(.probableEarlyWeeklyReset))
+        XCTAssertTrue(decoded.allows(.quotaReset))
+        XCTAssertTrue(decoded.allows(.newBankedReset))
+    }
+
     func testLegacyGlobalLiveActivityModesDecodeToAutomaticAndDisabled() throws {
         let automatic = try JSONDecoder().decode(GlobalLiveActivitySettings.self,
             from: Data(#"{"mode":"nearReset","nearResetMinutes":60}"#.utf8))
