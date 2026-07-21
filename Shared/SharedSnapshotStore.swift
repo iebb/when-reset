@@ -36,6 +36,9 @@ struct UsageHistoryPoint: Codable, Hashable, Identifiable, Sendable {
     var secondsUntilReset: TimeInterval
     var source: UsageRefreshSource
     var plan: String? = nil
+    var isSyntheticMissingQuota: Bool? = nil
+
+    var representsSyntheticMissingQuota: Bool { isSyntheticMissingQuota == true }
 
     var id: String {
         "\(accountID.uuidString):\(metricID):\(Int64(recordedAt.timeIntervalSince1970 * 1_000))"
@@ -220,6 +223,7 @@ actor UsageHistoryStore {
 
     func record(snapshot: UsageSnapshot, account: MonitoredAccount,
                 source: UsageRefreshSource, notificationsEnabled: Bool = true,
+                accountSettings: AccountMonitorSettings = .init(),
                 now: Date = .now) throws -> UsageHistoryRecordResult {
         var archive = try loadedArchive()
         prune(&archive, now: now)
@@ -242,10 +246,40 @@ actor UsageHistoryStore {
                 plan: recordedPlan
             )
         }
-        let newPoints = Dictionary(
+        let actualPoints = Dictionary(
             mappedPoints.map { ($0.metricID, $0) },
             uniquingKeysWith: { _, latest in latest }
         ).values.sorted { $0.metricID < $1.metricID }
+        let actualMetricIDs = Set(actualPoints.map(\.metricID))
+        let latestKnownPoints = archive.points
+            .filter { $0.accountID == account.id }
+            .reduce(into: [String: UsageHistoryPoint]()) { result, point in
+                if let existing = result[point.metricID], existing.recordedAt >= point.recordedAt {
+                    return
+                }
+                result[point.metricID] = point
+            }
+        let missingPoints = latestKnownPoints.values.compactMap { previous -> UsageHistoryPoint? in
+            guard !actualMetricIDs.contains(previous.metricID),
+                  accountSettings.missingQuotaHistoryBehavior(for: previous.metricID) == .recordAsFull
+            else { return nil }
+            return UsageHistoryPoint(
+                accountID: account.id,
+                providerID: account.providerID,
+                metricID: previous.metricID,
+                metricTitle: previous.metricTitle,
+                kind: previous.kind,
+                windowMinutes: previous.windowMinutes,
+                remainingPercent: 100,
+                recordedAt: snapshot.fetchedAt,
+                resetsAt: previous.resetsAt,
+                secondsUntilReset: max(0, previous.resetsAt.timeIntervalSince(snapshot.fetchedAt)),
+                source: observationSource,
+                plan: recordedPlan,
+                isSyntheticMissingQuota: true
+            )
+        }
+        let newPoints = (actualPoints + missingPoints).sorted { $0.metricID < $1.metricID }
 
         for point in newPoints {
             archive.points.removeAll { existing in
@@ -265,7 +299,7 @@ actor UsageHistoryStore {
             updateResetDetector(
                 snapshot: snapshot,
                 account: account,
-                points: newPoints,
+                points: actualPoints,
                 notificationsEnabled: notificationsEnabled,
                 archive: &archive
             )
@@ -577,11 +611,12 @@ actor UsageHistoryStore {
 
     private func updateMetricObservations(_ points: [UsageHistoryPoint],
                                           state: inout UsageAlertDetectorState) {
-        for point in points {
-            if let existing = state.metricObservations[point.metricID],
-               point.recordedAt <= existing.recordedAt { continue }
-            state.metricObservations[point.metricID] = point
-        }
+        state.metricObservations = Dictionary(
+            points.map { ($0.metricID, $0) },
+            uniquingKeysWith: { existing, candidate in
+                candidate.recordedAt > existing.recordedAt ? candidate : existing
+            }
+        )
     }
 
     private func enqueue(kind: UsageNotificationEvent.Kind, accountID: UUID,

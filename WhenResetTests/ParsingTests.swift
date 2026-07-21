@@ -329,6 +329,7 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(settings.defaultLiveActivityRule.trigger, .remainingHours)
         XCTAssertEqual(settings.defaultLiveActivityRule.remainingHours, 4)
         XCTAssertTrue(settings.liveActivityQuotaRules.isEmpty)
+        XCTAssertTrue(settings.missingQuotaHistoryBehaviors.isEmpty)
     }
 
     func testAccountResetNotificationSettingRoundTripsDisabled() throws {
@@ -339,6 +340,23 @@ final class ParsingTests: XCTestCase {
         )
         XCTAssertFalse(decoded.notifyAboutResets)
         XCTAssertTrue(decoded.notifyAtScheduledReset)
+    }
+
+    func testMissingQuotaHistoryBehaviorRoundTripsPerMetric() throws {
+        let original = AccountMonitorSettings(
+            missingQuotaHistoryBehaviors: [
+                "five_hour": .recordAsFull,
+                "monthly": .omit
+            ]
+        )
+        let decoded = try JSONDecoder().decode(
+            AccountMonitorSettings.self,
+            from: JSONEncoder().encode(original)
+        )
+
+        XCTAssertEqual(decoded.missingQuotaHistoryBehavior(for: "five_hour"), .recordAsFull)
+        XCTAssertEqual(decoded.missingQuotaHistoryBehavior(for: "monthly"), .omit)
+        XCTAssertEqual(decoded.missingQuotaHistoryBehavior(for: "unconfigured"), .omit)
     }
 
     func testGlobalNotificationSettingsDefaultToUnexpectedResetAlertsEnabled() throws {
@@ -459,6 +477,27 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(automatic.mode, .automatic)
         XCTAssertEqual(disabled.mode, .disabled)
         XCTAssertTrue(automatic.showBankedResets)
+    }
+
+    func testRefreshSettingsRoundTripAndLegacyDefaults() throws {
+        let settings = GlobalRefreshSettings(
+            inAppInterval: .fiveMinutes,
+            backgroundInterval: .twoHours
+        )
+        let decoded = try JSONDecoder().decode(
+            GlobalRefreshSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+        let defaults = try JSONDecoder().decode(
+            GlobalRefreshSettings.self,
+            from: Data("{}".utf8)
+        )
+
+        XCTAssertEqual(decoded, settings)
+        XCTAssertEqual(defaults.inAppInterval, .off)
+        XCTAssertEqual(defaults.backgroundInterval, .fifteenMinutes)
+        XCTAssertNil(RefreshInterval.off.timeInterval)
+        XCTAssertEqual(RefreshInterval.twoHours.timeInterval, 7_200)
     }
 
     func testPerQuotaLiveActivityRulesMatchExactBoundaries() throws {
@@ -727,6 +766,208 @@ final class UsageHistoryTests: XCTestCase {
         let result = try await store.record(snapshot: snapshot, account: account,
                                             source: .background, now: observedAt)
         XCTAssertEqual(result.points.map(\.plan), ["Pro"])
+    }
+
+    func testConfiguredMissingQuotaRecordsOneHundredPercentWithoutResetAlert() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let weeklyReset = start.addingTimeInterval(5 * 86_400)
+        let baseline = UsageSnapshot(
+            accountID: account.id, providerName: "Claude", accountName: "Work",
+            accountProviderID: .claude, plan: "Max",
+            primary: UsageWindow(
+                title: "Session", usedPercent: 60,
+                resetsAt: start.addingTimeInterval(4 * 3_600), windowMinutes: 300,
+                kind: .fiveHour, identifier: "five_hour"
+            ),
+            secondary: UsageWindow(
+                title: "Weekly", usedPercent: 20,
+                resetsAt: weeklyReset, windowMinutes: 10_080,
+                kind: .weekly, identifier: "weekly"
+            ),
+            availableResetCount: 0, resetCredits: [], fetchedAt: start,
+            extraWindows: [
+                UsageWindow(
+                    title: "Extra", usedPercent: 50,
+                    resetsAt: start.addingTimeInterval(8 * 3_600), windowMinutes: 480,
+                    kind: .additional, identifier: "extra"
+                )
+            ]
+        )
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(30 * 60)
+        let weeklyOnly = makeSnapshot(
+            account: account, at: observedAt, weeklyRemaining: 80,
+            weeklyResetAt: weeklyReset
+        )
+        let accountSettings = AccountMonitorSettings(
+            missingQuotaHistoryBehaviors: ["five_hour": .recordAsFull]
+        )
+        let result = try await store.record(
+            snapshot: weeklyOnly, account: account, source: .background,
+            accountSettings: accountSettings, now: observedAt
+        )
+
+        let pointsAtRefresh = result.points.filter { $0.recordedAt == observedAt }
+        XCTAssertEqual(Set(pointsAtRefresh.map(\.metricID)), ["five_hour", "weekly"])
+        let inferredFiveHour = try XCTUnwrap(pointsAtRefresh.first { $0.metricID == "five_hour" })
+        XCTAssertEqual(inferredFiveHour.remainingPercent, 100)
+        XCTAssertTrue(inferredFiveHour.representsSyntheticMissingQuota)
+        XCTAssertEqual(inferredFiveHour.plan, "Pro")
+        XCTAssertFalse(pointsAtRefresh.contains { $0.metricID == "extra" })
+        XCTAssertTrue(result.pendingNotifications.isEmpty)
+    }
+
+    func testMissingQuotaIsOmittedByDefaultAndNeverInventedBeforeFirstObservation() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let weeklyReset = start.addingTimeInterval(5 * 86_400)
+        let baseline = UsageSnapshot(
+            accountID: account.id, providerName: "Claude", accountName: "Work",
+            accountProviderID: .claude, plan: "Max",
+            primary: UsageWindow(
+                title: "Session", usedPercent: 60,
+                resetsAt: start.addingTimeInterval(4 * 3_600), windowMinutes: 300,
+                kind: .fiveHour, identifier: "five_hour"
+            ),
+            secondary: UsageWindow(
+                title: "Weekly", usedPercent: 20,
+                resetsAt: weeklyReset, windowMinutes: 10_080,
+                kind: .weekly, identifier: "weekly"
+            ),
+            availableResetCount: 0, resetCredits: [], fetchedAt: start
+        )
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let observedAt = start.addingTimeInterval(30 * 60)
+        let weeklyOnly = makeSnapshot(
+            account: account, at: observedAt, weeklyRemaining: 80,
+            weeklyResetAt: weeklyReset
+        )
+        let omitted = try await store.record(
+            snapshot: weeklyOnly, account: account, source: .background,
+            now: observedAt
+        )
+        XCTAssertEqual(omitted.points.filter { $0.recordedAt == observedAt }.map(\.metricID), ["weekly"])
+
+        let neverObservedAccount = makeAccount(provider: .kimi)
+        let neverObservedSnapshot = makeSnapshot(
+            account: neverObservedAccount, at: observedAt, weeklyRemaining: 100,
+            weeklyResetAt: weeklyReset
+        )
+        let configured = AccountMonitorSettings(
+            missingQuotaHistoryBehaviors: ["five_hour": .recordAsFull]
+        )
+        let neverInvented = try await store.record(
+            snapshot: neverObservedSnapshot, account: neverObservedAccount,
+            source: .background, accountSettings: configured, now: observedAt
+        )
+        XCTAssertFalse(neverInvented.points.contains {
+            $0.accountID == neverObservedAccount.id && $0.metricID == "five_hour"
+        })
+    }
+
+    func testReappearingMissingQuotaStartsFreshResetBaseline() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let weeklyReset = start.addingTimeInterval(5 * 86_400)
+        let fiveHourReset = start.addingTimeInterval(4 * 3_600)
+        let baseline = UsageSnapshot(
+            accountID: account.id, providerName: "Claude", accountName: "Work",
+            accountProviderID: .claude, plan: "Max",
+            primary: UsageWindow(
+                title: "Session", usedPercent: 80,
+                resetsAt: fiveHourReset, windowMinutes: 300,
+                kind: .fiveHour, identifier: "five_hour"
+            ),
+            secondary: UsageWindow(
+                title: "Weekly", usedPercent: 20,
+                resetsAt: weeklyReset, windowMinutes: 10_080,
+                kind: .weekly, identifier: "weekly"
+            ),
+            availableResetCount: 0, resetCredits: [], fetchedAt: start
+        )
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let missingAt = start.addingTimeInterval(30 * 60)
+        let settings = AccountMonitorSettings(
+            missingQuotaHistoryBehaviors: ["five_hour": .recordAsFull]
+        )
+        _ = try await store.record(
+            snapshot: makeSnapshot(
+                account: account, at: missingAt, weeklyRemaining: 80,
+                weeklyResetAt: weeklyReset
+            ),
+            account: account, source: .background,
+            accountSettings: settings, now: missingAt
+        )
+
+        let returnedAt = start.addingTimeInterval(60 * 60)
+        let returned = UsageSnapshot(
+            accountID: account.id, providerName: "Claude", accountName: "Work",
+            accountProviderID: .claude, plan: "Max",
+            primary: UsageWindow(
+                title: "Session", usedPercent: 0,
+                resetsAt: returnedAt.addingTimeInterval(5 * 3_600), windowMinutes: 300,
+                kind: .fiveHour, identifier: "five_hour"
+            ),
+            secondary: UsageWindow(
+                title: "Weekly", usedPercent: 20,
+                resetsAt: weeklyReset, windowMinutes: 10_080,
+                kind: .weekly, identifier: "weekly"
+            ),
+            availableResetCount: 0, resetCredits: [], fetchedAt: returnedAt
+        )
+        let result = try await store.record(
+            snapshot: returned, account: account, source: .background,
+            accountSettings: settings, now: returnedAt
+        )
+
+        XCTAssertFalse(result.pendingNotifications.contains { $0.kind == .probableEarlyReset })
+        let returnedPoint = try XCTUnwrap(result.points.last {
+            $0.metricID == "five_hour" && $0.recordedAt == returnedAt
+        })
+        XCTAssertEqual(returnedPoint.remainingPercent, 100)
+        XCTAssertFalse(returnedPoint.representsSyntheticMissingQuota)
+    }
+
+    func testConfiguredMissingWeeklyQuotaCanRecordOneHundredPercent() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let weeklyReset = start.addingTimeInterval(5 * 86_400)
+        let baseline = makeSnapshot(
+            account: account, at: start, weeklyRemaining: 30,
+            weeklyResetAt: weeklyReset
+        )
+        _ = try await store.record(snapshot: baseline, account: account,
+                                   source: .background, now: start)
+
+        let missingAt = start.addingTimeInterval(30 * 60)
+        var missing = baseline
+        missing.secondary = nil
+        missing.fetchedAt = missingAt
+        let result = try await store.record(
+            snapshot: missing, account: account, source: .background,
+            accountSettings: .init(
+                missingQuotaHistoryBehaviors: ["weekly": .recordAsFull]
+            ),
+            now: missingAt
+        )
+
+        let synthetic = try XCTUnwrap(result.points.last {
+            $0.metricID == "weekly" && $0.recordedAt == missingAt
+        })
+        XCTAssertEqual(synthetic.remainingPercent, 100)
+        XCTAssertTrue(synthetic.representsSyntheticMissingQuota)
+        XCTAssertTrue(result.pendingNotifications.isEmpty)
     }
 
     func testDuplicateProviderMetricIDsAreDeduplicated() async throws {

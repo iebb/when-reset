@@ -209,6 +209,13 @@ private enum AccountSettingsPage: String, CaseIterable {
     case usage = "Usage"
 }
 
+private struct MissingQuotaHistoryOption: Identifiable {
+    var id: String { metricID }
+    var metricID: String
+    var title: String
+    var windowMinutes: Int?
+}
+
 struct AccountSettingsView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -231,6 +238,34 @@ struct AccountSettingsView: View {
         let value = store.snapshots[account.id]?.plan ?? currentAccount.plan
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed?.isEmpty == false ? trimmed : nil
+    }
+
+    private var missingQuotaHistoryOptions: [MissingQuotaHistoryOption] {
+        var options: [String: MissingQuotaHistoryOption] = [:]
+        if let snapshot = store.snapshots[account.id] {
+            for window in snapshot.usageWindows {
+                options[window.metricID] = MissingQuotaHistoryOption(
+                    metricID: window.metricID,
+                    title: window.displayTitle,
+                    windowMinutes: window.windowMinutes
+                )
+            }
+        }
+        for point in store.usageHistory where point.accountID == account.id {
+            if options[point.metricID] == nil {
+                options[point.metricID] = MissingQuotaHistoryOption(
+                    metricID: point.metricID,
+                    title: point.metricTitle,
+                    windowMinutes: point.windowMinutes
+                )
+            }
+        }
+        return options.values.sorted {
+            if ($0.windowMinutes ?? .max) != ($1.windowMinutes ?? .max) {
+                return ($0.windowMinutes ?? .max) < ($1.windowMinutes ?? .max)
+            }
+            return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
+        }
     }
 
     var body: some View {
@@ -297,6 +332,21 @@ struct AccountSettingsView: View {
                     Text("Notifications")
                 } footer: {
                     Text("Scheduled-time and unexpected reset alerts also require their global settings.")
+                }
+            }
+            if !missingQuotaHistoryOptions.isEmpty {
+                Section {
+                    ForEach(missingQuotaHistoryOptions) { option in
+                        Picker(option.title,
+                               selection: missingQuotaHistoryBinding(option.metricID)) {
+                            ForEach(MissingQuotaHistoryBehavior.allCases, id: \.self) { behavior in
+                                Text(behavior.title).tag(behavior)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+                } header: {
+                    Text("When quota is missing")
                 }
             }
             Section("Appearance") {
@@ -530,6 +580,18 @@ struct AccountSettingsView: View {
 
     private var appearanceHasChanges: Bool {
         draftDisplayName != savedDisplayName || draftSymbolName != savedSymbolName
+    }
+
+    private func missingQuotaHistoryBinding(_ metricID: String) -> Binding<MissingQuotaHistoryBehavior> {
+        Binding {
+            settings.missingQuotaHistoryBehavior(for: metricID)
+        } set: { behavior in
+            if behavior == .omit {
+                settings.missingQuotaHistoryBehaviors.removeValue(forKey: metricID)
+            } else {
+                settings.missingQuotaHistoryBehaviors[metricID] = behavior
+            }
+        }
     }
 
     private func saveAppearance() {
@@ -919,6 +981,7 @@ struct SettingsView: View {
     @Environment(AppStore.self) private var store
     @State private var settings = GlobalLiveActivitySettings()
     @State private var notificationSettings = GlobalNotificationSettings()
+    @State private var refreshSettings = GlobalRefreshSettings()
 
     var body: some View {
         NavigationStack {
@@ -928,6 +991,19 @@ struct SettingsView: View {
                            isOn: $notificationSettings.notifyAboutUnexpectedResets)
                     Toggle("Notify at Scheduled Reset Time",
                            isOn: $notificationSettings.notifyAtScheduledReset)
+                }
+                Section("Refresh") {
+                    Picker("In app", selection: $refreshSettings.inAppInterval) {
+                        ForEach(RefreshInterval.inAppOptions, id: \.self) { interval in
+                            Text(interval.title).tag(interval)
+                        }
+                    }
+                    Picker("Background & Live Activity",
+                           selection: $refreshSettings.backgroundInterval) {
+                        ForEach(RefreshInterval.backgroundOptions, id: \.self) { interval in
+                            Text(interval.title).tag(interval)
+                        }
+                    }
                 }
                 Section {
                     Picker("Behavior", selection: $settings.mode) {
@@ -959,10 +1035,14 @@ struct SettingsView: View {
             .onAppear {
                 settings = store.liveActivitySettings
                 notificationSettings = store.notificationSettings
+                refreshSettings = store.refreshSettings
             }
             .onChange(of: settings) { _, newValue in store.setLiveActivitySettings(newValue) }
             .onChange(of: notificationSettings) { _, newValue in
                 store.setNotificationSettings(newValue)
+            }
+            .onChange(of: refreshSettings) { _, newValue in
+                store.setRefreshSettings(newValue)
             }
         }
     }

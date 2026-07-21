@@ -176,6 +176,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     var defaultLiveActivityRule = LiveActivityQuotaRule()
     var liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:]
     var bankedResetLiveActivityRule = LiveActivityQuotaRule()
+    var missingQuotaHistoryBehaviors: [String: MissingQuotaHistoryBehavior] = [:]
 
     init(notifyAboutResets: Bool = true, notifyAtScheduledReset: Bool = true,
          showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
@@ -183,7 +184,8 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
          pinnedLiveActivityMetricIDs: Set<String> = [],
          defaultLiveActivityRule: LiveActivityQuotaRule = .init(),
          liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:],
-        bankedResetLiveActivityRule: LiveActivityQuotaRule = .init()) {
+         bankedResetLiveActivityRule: LiveActivityQuotaRule = .init(),
+         missingQuotaHistoryBehaviors: [String: MissingQuotaHistoryBehavior] = [:]) {
         self.notifyAboutResets = notifyAboutResets
         self.notifyAtScheduledReset = notifyAtScheduledReset
         self.showBankedResets = showBankedResets
@@ -194,6 +196,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         self.defaultLiveActivityRule = defaultLiveActivityRule
         self.liveActivityQuotaRules = liveActivityQuotaRules
         self.bankedResetLiveActivityRule = bankedResetLiveActivityRule
+        self.missingQuotaHistoryBehaviors = missingQuotaHistoryBehaviors
     }
 
     init(from decoder: Decoder) throws {
@@ -215,6 +218,10 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
                                                             forKey: .liveActivityQuotaRules) ?? [:]
         bankedResetLiveActivityRule = try values.decodeIfPresent(LiveActivityQuotaRule.self,
                                                                  forKey: .bankedResetLiveActivityRule) ?? .init()
+        missingQuotaHistoryBehaviors = try values.decodeIfPresent(
+            [String: MissingQuotaHistoryBehavior].self,
+            forKey: .missingQuotaHistoryBehaviors
+        ) ?? [:]
     }
 
     func shows(_ window: UsageWindow) -> Bool { !hiddenMetricIDs.contains(window.metricID) }
@@ -228,12 +235,16 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     func liveActivityRule(for window: UsageWindow) -> LiveActivityQuotaRule {
         liveActivityQuotaRules[window.metricID] ?? defaultLiveActivityRule
     }
+    func missingQuotaHistoryBehavior(for metricID: String) -> MissingQuotaHistoryBehavior {
+        missingQuotaHistoryBehaviors[metricID] ?? .omit
+    }
 
     private enum CodingKeys: String, CodingKey {
         case notifyAboutResets, notifyAtScheduledReset
         case showBankedResets, hiddenMetricIDs, showBankedResetsInLiveActivity, hiddenLiveActivityMetricIDs
         case pinnedLiveActivityMetricIDs
         case defaultLiveActivityRule, liveActivityQuotaRules, bankedResetLiveActivityRule
+        case missingQuotaHistoryBehaviors
     }
 }
 
@@ -353,6 +364,76 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
 
 enum UsageWindowKind: String, Codable, Hashable, Sendable {
     case fiveHour, weekly, additional
+}
+
+enum MissingQuotaHistoryBehavior: String, Codable, CaseIterable, Hashable, Sendable {
+    case omit
+    case recordAsFull
+
+    var title: String {
+        switch self {
+        case .omit: "Do not add datapoint"
+        case .recordAsFull: "Show as 100%"
+        }
+    }
+}
+
+enum RefreshInterval: Int, Codable, CaseIterable, Hashable, Sendable {
+    case off = 0
+    case fiveMinutes = 300
+    case fifteenMinutes = 900
+    case thirtyMinutes = 1_800
+    case oneHour = 3_600
+    case twoHours = 7_200
+    case fourHours = 14_400
+    case eightHours = 28_800
+
+    static let inAppOptions: [Self] = [
+        .off, .fiveMinutes, .fifteenMinutes, .thirtyMinutes, .oneHour, .twoHours
+    ]
+    static let backgroundOptions: [Self] = [
+        .fifteenMinutes, .thirtyMinutes, .oneHour, .twoHours, .fourHours, .eightHours
+    ]
+
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .fiveMinutes: "5 minutes"
+        case .fifteenMinutes: "15 minutes"
+        case .thirtyMinutes: "30 minutes"
+        case .oneHour: "1 hour"
+        case .twoHours: "2 hours"
+        case .fourHours: "4 hours"
+        case .eightHours: "8 hours"
+        }
+    }
+
+    var timeInterval: TimeInterval? {
+        self == .off ? nil : TimeInterval(rawValue)
+    }
+}
+
+struct GlobalRefreshSettings: Codable, Hashable, Sendable {
+    var inAppInterval: RefreshInterval = .off
+    var backgroundInterval: RefreshInterval = .fifteenMinutes
+
+    init(inAppInterval: RefreshInterval = .off,
+         backgroundInterval: RefreshInterval = .fifteenMinutes) {
+        self.inAppInterval = inAppInterval
+        self.backgroundInterval = backgroundInterval
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        inAppInterval = try values.decodeIfPresent(
+            RefreshInterval.self,
+            forKey: .inAppInterval
+        ) ?? .off
+        backgroundInterval = try values.decodeIfPresent(
+            RefreshInterval.self,
+            forKey: .backgroundInterval
+        ) ?? .fifteenMinutes
+    }
 }
 
 struct UsageWindow: Codable, Hashable, Sendable {

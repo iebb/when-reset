@@ -124,6 +124,7 @@ final class AppStore {
     var monitorSettings: [UUID: AccountMonitorSettings] = [:]
     var liveActivitySettings = GlobalLiveActivitySettings()
     var notificationSettings = GlobalNotificationSettings()
+    var refreshSettings = GlobalRefreshSettings()
     private(set) var hasLiveActivity = false
     private(set) var usageHistory: [UsageHistoryPoint] = []
     private(set) var historyStorageError: String?
@@ -141,6 +142,7 @@ final class AppStore {
     private let settingsKey = "monitorSettings.v1"
     private let liveActivitySettingsKey = "globalLiveActivitySettings.v1"
     private let notificationSettingsKey = "globalNotificationSettings.v1"
+    private let refreshSettingsKey = "globalRefreshSettings.v1"
     private let historyStore = UsageHistoryStore()
     private var hasStarted = false
     private static let globalActivityID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
@@ -158,6 +160,10 @@ final class AppStore {
         if let data = UserDefaults.standard.data(forKey: notificationSettingsKey),
            let saved = try? JSONDecoder().decode(GlobalNotificationSettings.self, from: data) {
             notificationSettings = saved
+        }
+        if let data = UserDefaults.standard.data(forKey: refreshSettingsKey),
+           let saved = try? JSONDecoder().decode(GlobalRefreshSettings.self, from: data) {
+            refreshSettings = saved
         }
         hasLiveActivity = !Activity<UsageActivityAttributes>.activities.isEmpty
     }
@@ -560,7 +566,7 @@ final class AppStore {
         let state = activityState()
         do {
             _ = try Activity.request(attributes: attributes,
-                                     content: ActivityContent(state: state, staleDate: .now.addingTimeInterval(900)))
+                                     content: ActivityContent(state: state, staleDate: liveActivityStaleDate))
             hasLiveActivity = true
         } catch {
             errorMessage = error.localizedDescription
@@ -619,6 +625,13 @@ final class AppStore {
             }
             await reconcileScheduledResetNotifications()
         }
+    }
+
+    func setRefreshSettings(_ settings: GlobalRefreshSettings) {
+        refreshSettings = settings
+        UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: refreshSettingsKey)
+        BackgroundRefreshScheduler.scheduleNext(after: settings.backgroundInterval)
+        Task { await updateLiveActivity() }
     }
 
     private func reconcileLiveActivity(at date: Date = .now) async {
@@ -741,9 +754,13 @@ final class AppStore {
             $0.attributes.accountID == Self.globalActivityID
         }
         for activity in globalActivities {
-            await activity.update(ActivityContent(state: state, staleDate: .now.addingTimeInterval(900)))
+            await activity.update(ActivityContent(state: state, staleDate: liveActivityStaleDate))
         }
         hasLiveActivity = !Activity<UsageActivityAttributes>.activities.isEmpty
+    }
+
+    private var liveActivityStaleDate: Date? {
+        refreshSettings.backgroundInterval.timeInterval.map { Date.now.addingTimeInterval($0) }
     }
 
     private func persistAccounts() { UserDefaults.standard.set(try? JSONEncoder().encode(accounts), forKey: accountsKey) }
@@ -806,7 +823,8 @@ final class AppStore {
                 snapshot: snapshot,
                 account: account,
                 source: source,
-                notificationsEnabled: notificationsEnabled
+                notificationsEnabled: notificationsEnabled,
+                accountSettings: accountSettings
             )
             usageHistory = result.points
             historyStorageError = nil
