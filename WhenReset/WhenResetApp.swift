@@ -49,6 +49,10 @@ struct WhenResetApp: App {
                     BackgroundRefreshScheduler.scheduleNext(after: store.refreshSettings.backgroundInterval)
                     await store.start()
                 }
+                .task(id: scenePhase) {
+                    guard scenePhase == .active else { return }
+                    await store.synchronizeAccountsFromICloudKeychain()
+                }
                 .task(id: ForegroundRefreshTaskID(
                     isActive: scenePhase == .active,
                     interval: store.refreshSettings.inAppInterval

@@ -1,3 +1,4 @@
+import Security
 import XCTest
 @testable import WhenReset
 
@@ -647,6 +648,64 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(restored.refreshToken, "refresh")
         XCTAssertEqual(restored.idToken, "id")
         XCTAssertEqual(restored.expiresAt, expiry)
+        XCTAssertEqual(keychainStatus(service: KeychainStore.credentialsService, id: id,
+                                      synchronizable: true), errSecSuccess)
+        XCTAssertEqual(keychainStatus(service: KeychainStore.credentialsService, id: id,
+                                      synchronizable: false), errSecItemNotFound)
+    }
+
+    func testLegacyDeviceOnlyCredentialsMigrateToICloudKeychain() throws {
+        let id = UUID()
+        let credentials = AccountCredentials(accessToken: "legacy-access", refreshToken: "legacy-refresh",
+                                             idToken: "legacy-id")
+        let data = try JSONEncoder().encode(credentials)
+        KeychainStore.delete(for: id)
+        defer { KeychainStore.delete(for: id) }
+
+        let legacyItem: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: KeychainStore.credentialsService,
+            kSecAttrAccount as String: id.uuidString,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        XCTAssertEqual(SecItemAdd(legacyItem as CFDictionary, nil), errSecSuccess)
+
+        XCTAssertEqual(try KeychainStore.load(for: id), credentials)
+        XCTAssertEqual(keychainStatus(service: KeychainStore.credentialsService, id: id,
+                                      synchronizable: true), errSecSuccess)
+        XCTAssertEqual(keychainStatus(service: KeychainStore.credentialsService, id: id,
+                                      synchronizable: false), errSecItemNotFound)
+    }
+
+    func testAccountMetadataRoundTripsThroughICloudKeychain() throws {
+        let account = MonitoredAccount(
+            id: UUID(), providerID: .claude, displayName: "Synced account",
+            workspaceID: "workspace-synced", plan: "Max", addedAt: Date(timeIntervalSince1970: 2_000),
+            customDisplayName: "My Claude", email: "sync@example.com"
+        )
+        defer { KeychainStore.deleteAccount(for: account.id) }
+
+        try KeychainStore.saveAccount(account)
+        XCTAssertEqual(try KeychainStore.loadAccounts().first(where: { $0.id == account.id }), account)
+        XCTAssertEqual(keychainStatus(service: KeychainStore.accountsService, id: account.id,
+                                      synchronizable: true), errSecSuccess)
+
+        KeychainStore.deleteAccount(for: account.id)
+        XCTAssertNil(try KeychainStore.loadAccounts().first(where: { $0.id == account.id }))
+    }
+
+    private func keychainStatus(service: String, id: UUID, synchronizable: Bool) -> OSStatus {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: id.uuidString,
+            kSecAttrSynchronizable as String: synchronizable,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+        var result: CFTypeRef?
+        return SecItemCopyMatching(query as CFDictionary, &result)
     }
 
     func testRefreshFailureClassifiesExpiredProviderCredentialsAsAuthentication() {

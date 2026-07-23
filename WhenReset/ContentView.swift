@@ -62,7 +62,7 @@ private struct UsageTabView: View {
                 }
                 Button("Cancel", role: .cancel) { accountPendingRemoval = nil }
             } message: {
-                Text("This deletes its saved credentials, cached usage, recorded history, and monitor settings from this device.")
+                Text("This deletes the account and credentials from devices using your iCloud Keychain, plus this device’s cached usage, recorded history, and monitor settings.")
             }
             .alert("Couldn’t update", isPresented: .init(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
@@ -321,7 +321,7 @@ struct AccountSettingsView: View {
                     Text(currentAccount.providerID.displayName)
                 }
             } footer: {
-                Text("Provider-reported account details, updated during account refresh when available.")
+                Text("Provider-reported details update during refresh. The account and its credentials sync through iCloud Keychain.")
             }
             if !account.isDemo {
                 Section {
@@ -473,7 +473,7 @@ struct AccountSettingsView: View {
         } message: {
             Text(account.isDemo
                  ? "This deletes the demo and its generated usage from this device."
-                 : "This deletes its saved credentials, cached usage, recorded history, and monitor settings from this device.")
+                 : "This deletes the account and credentials from devices using your iCloud Keychain, plus this device’s cached usage, recorded history, and monitor settings.")
         }
     }
 

@@ -143,14 +143,20 @@ final class AppStore {
     private let liveActivitySettingsKey = "globalLiveActivitySettings.v1"
     private let notificationSettingsKey = "globalNotificationSettings.v1"
     private let refreshSettingsKey = "globalRefreshSettings.v1"
+    private static let accountKeychainMigrationKey = "accounts.iCloudKeychainMigrated.v1"
     private let historyStore = UsageHistoryStore()
     private var hasStarted = false
     private static let globalActivityID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
 
     init() {
-        if let data = UserDefaults.standard.data(forKey: accountsKey),
-           let saved = try? JSONDecoder().decode([MonitoredAccount].self, from: data) { accounts = saved }
-        snapshots = Dictionary(uniqueKeysWithValues: SharedSnapshotStore.load().map { ($0.accountID, $0) })
+        let cachedAccounts = UserDefaults.standard.data(forKey: accountsKey)
+            .flatMap { try? JSONDecoder().decode([MonitoredAccount].self, from: $0) } ?? []
+        accounts = Self.loadInitialAccounts(cachedAccounts)
+        cacheAccounts()
+        let accountIDs = Set(accounts.map(\.id))
+        snapshots = Dictionary(uniqueKeysWithValues: SharedSnapshotStore.load()
+            .filter { accountIDs.contains($0.accountID) }
+            .map { ($0.accountID, $0) })
         if let data = UserDefaults.standard.data(forKey: settingsKey),
            let saved = try? JSONDecoder().decode([UUID: AccountMonitorSettings].self, from: data) { monitorSettings = saved }
         if let data = UserDefaults.standard.data(forKey: liveActivitySettingsKey),
@@ -187,6 +193,45 @@ final class AppStore {
         await reconcileScheduledResetNotifications()
         guard !accounts.isEmpty else { return }
         await refreshAll(source: .launch)
+    }
+
+    func synchronizeAccountsFromICloudKeychain() async {
+        guard UserDefaults.standard.bool(forKey: Self.accountKeychainMigrationKey),
+              let syncedAccounts = try? KeychainStore.loadAccounts() else { return }
+        let updatedAccounts = Self.mergeSyncedAccounts(syncedAccounts, localAccounts: accounts)
+        guard updatedAccounts != accounts else { return }
+
+        let previousByID = Dictionary(uniqueKeysWithValues: accounts.map { ($0.id, $0) })
+        let updatedIDs = Set(updatedAccounts.map(\.id))
+        let removedIDs = Set(previousByID.keys).subtracting(updatedIDs)
+        let accountsToRefresh = updatedAccounts.filter { account in
+            !account.isDemo && previousByID[account.id] != account
+        }
+
+        accounts = updatedAccounts
+        cacheAccounts()
+        for id in removedIDs {
+            snapshots.removeValue(forKey: id)
+            refreshFailures.removeValue(forKey: id)
+            monitorSettings.removeValue(forKey: id)
+            do {
+                usageHistory = try await historyStore.remove(accountID: id)
+                historyStorageError = nil
+            } catch {
+                historyStorageError = error.localizedDescription
+            }
+        }
+        persistMonitorSettings()
+
+        if hasStarted {
+            for account in accountsToRefresh {
+                _ = await refresh(account, source: .background, publishChanges: false)
+            }
+        }
+        publishSnapshots()
+        await reconcileScheduledResetNotifications()
+        await updateLiveActivity()
+        await reconcileLiveActivity()
     }
 
     @discardableResult
@@ -515,7 +560,10 @@ final class AppStore {
         snapshots.removeValue(forKey: account.id)
         refreshFailures.removeValue(forKey: account.id)
         monitorSettings.removeValue(forKey: account.id)
-        if !account.isDemo { KeychainStore.delete(for: account.id) }
+        if !account.isDemo {
+            KeychainStore.delete(for: account.id)
+            KeychainStore.deleteAccount(for: account.id)
+        }
         persistAccounts(); persistMonitorSettings(); publishSnapshots()
         Task {
             do {
@@ -763,7 +811,44 @@ final class AppStore {
         refreshSettings.backgroundInterval.timeInterval.map { Date.now.addingTimeInterval($0) }
     }
 
-    private func persistAccounts() { UserDefaults.standard.set(try? JSONEncoder().encode(accounts), forKey: accountsKey) }
+    private func persistAccounts() {
+        cacheAccounts()
+        do {
+            for account in accounts where !account.isDemo {
+                try KeychainStore.saveAccount(account)
+            }
+            UserDefaults.standard.set(true, forKey: Self.accountKeychainMigrationKey)
+        } catch {
+            // The local cache remains available and the next write retries iCloud Keychain.
+        }
+    }
+
+    private func cacheAccounts() {
+        UserDefaults.standard.set(try? JSONEncoder().encode(accounts), forKey: accountsKey)
+    }
+
+    private static func loadInitialAccounts(_ cachedAccounts: [MonitoredAccount]) -> [MonitoredAccount] {
+        do {
+            if !UserDefaults.standard.bool(forKey: accountKeychainMigrationKey) {
+                for account in cachedAccounts where !account.isDemo {
+                    try KeychainStore.saveAccount(account)
+                    _ = try? KeychainStore.load(for: account.id)
+                }
+                UserDefaults.standard.set(true, forKey: accountKeychainMigrationKey)
+            }
+            return mergeSyncedAccounts(try KeychainStore.loadAccounts(), localAccounts: cachedAccounts)
+        } catch {
+            return KeychainStore.orderedAccounts(cachedAccounts)
+        }
+    }
+
+    private static func mergeSyncedAccounts(_ syncedAccounts: [MonitoredAccount],
+                                            localAccounts: [MonitoredAccount]) -> [MonitoredAccount] {
+        let accounts = syncedAccounts + localAccounts.filter(\.isDemo)
+        let accountsByID = Dictionary(accounts.map { ($0.id, $0) },
+                                      uniquingKeysWith: { _, synced in synced })
+        return KeychainStore.orderedAccounts(Array(accountsByID.values))
+    }
 
     private func mergeLatestPlan(_ plan: String?, for accountID: UUID) {
         guard let plan = plan?.trimmingCharacters(in: .whitespacesAndNewlines), !plan.isEmpty,

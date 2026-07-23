@@ -15,7 +15,7 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 - Duration-classified 5-hour and weekly usage windows with live countdowns
 - Nearest banked reset expiry with a day-aware countdown and exact local time
 - Home Screen, Lock Screen, Dynamic Island, and Live Activity views
-- Tokens in Keychain; sanitized snapshots in an App Group
+- Accounts and tokens synchronized through iCloud Keychain; sanitized snapshots in an App Group
 
 ## Build
 
