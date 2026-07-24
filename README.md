@@ -16,6 +16,7 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 - Nearest banked reset expiry with a day-aware countdown and exact local time
 - Home Screen, Lock Screen, Dynamic Island, and Live Activity views
 - Accounts and tokens synchronized through iCloud Keychain; sanitized snapshots in an App Group
+- Optional hourly silent refresh hints through a self-hosted Cloudflare Worker
 
 ## Build
 
@@ -23,7 +24,8 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 2. Open `WhenReset.xcodeproj`.
 3. Select your development team for the app and widget targets.
 4. The app uses `ad.neko.when`, its widget extension, and the `group.ad.neko.when` App Group.
-5. Build on an iOS 17+ device or simulator.
+5. Enable Push Notifications for the app identifier and regenerate the development and App Store provisioning profiles.
+6. Build on an iOS 17+ device or simulator.
 
 Keep code signing enabled when testing account linking in Simulator. An unsigned build
 (`CODE_SIGNING_ALLOWED=NO`) cannot access Keychain and fails with OSStatus `-34018` after
@@ -41,3 +43,9 @@ OAuth succeeds.
 When Reset intentionally tracks recurring coding-plan allowances, not general pay-as-you-go API balances. The private and first-party-compatible integrations may change without notice. No provider token is written to app snapshots, logs, or user defaults.
 
 The OpenAI Blossom is used only to identify the ChatGPT provider. OpenAI, ChatGPT, and the Blossom are trademarks of OpenAI; this project is not endorsed by or affiliated with OpenAI.
+
+## Push refresh server
+
+The optional [Cloudflare Worker](server/README.md) is self-hosted in the user’s Cloudflare account and sends silent refresh hints without receiving provider credentials or quota data. When Reset does not operate an official push server.
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iebb/when-reset/tree/master/server)

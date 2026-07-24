@@ -982,6 +982,8 @@ struct SettingsView: View {
     @State private var settings = GlobalLiveActivitySettings()
     @State private var notificationSettings = GlobalNotificationSettings()
     @State private var refreshSettings = GlobalRefreshSettings()
+    @State private var pushServerSettings = PushServerSettings()
+    @State private var pushServerAccessKey = ""
 
     var body: some View {
         NavigationStack {
@@ -1002,6 +1004,45 @@ struct SettingsView: View {
                            selection: $refreshSettings.backgroundInterval) {
                         ForEach(RefreshInterval.backgroundOptions, id: \.self) { interval in
                             Text(interval.title).tag(interval)
+                        }
+                    }
+                }
+                Section("Push Refresh") {
+                    Picker("Server", selection: $pushServerSettings.mode) {
+                        ForEach(PushServerMode.allCases, id: \.self) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    if pushServerSettings.mode == .custom {
+                        TextField("https://push.example.com",
+                                  text: $pushServerSettings.customServerURL)
+                            .textInputAutocapitalization(.never)
+                            .keyboardType(.URL)
+                            .autocorrectionDisabled()
+                        SecureField("Server access key", text: $pushServerAccessKey)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    Button("Apply") {
+                        store.setPushServerSettings(
+                            pushServerSettings,
+                            accessKey: pushServerAccessKey
+                        )
+                        pushServerAccessKey = ""
+                    }
+                    .disabled(!canApplyPushServerSettings)
+
+                    if pushServerSettings.mode != .disabled
+                        || store.pushServerSettings.mode != .disabled {
+                        LabeledContent("Status", value: store.pushServerStatus.title)
+                        if case .failed = store.pushServerStatus,
+                           store.pushServerSettings.mode != .disabled {
+                            Button("Retry Registration") { store.retryPushRegistration() }
+                        }
+                        if store.pushServerStatus == .registered {
+                            Button("Send Test Refresh") {
+                                Task { await store.requestTestPushRefresh() }
+                            }
                         }
                     }
                 }
@@ -1036,6 +1077,7 @@ struct SettingsView: View {
                 settings = store.liveActivitySettings
                 notificationSettings = store.notificationSettings
                 refreshSettings = store.refreshSettings
+                pushServerSettings = store.pushServerSettings
             }
             .onChange(of: settings) { _, newValue in store.setLiveActivitySettings(newValue) }
             .onChange(of: notificationSettings) { _, newValue in
@@ -1056,6 +1098,16 @@ struct SettingsView: View {
         case .disabled:
             "Ends the current Live Activity and prevents When Reset from starting another one."
         }
+    }
+
+    private var canApplyPushServerSettings: Bool {
+        let enteredKey = pushServerAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard pushServerSettings != store.pushServerSettings || !enteredKey.isEmpty else {
+            return false
+        }
+        if pushServerSettings.mode == .disabled { return true }
+        guard (try? pushServerSettings.resolvedServerURL()) != nil else { return false }
+        return enteredKey.count >= 32 || store.hasPushServerAccessKey(for: pushServerSettings)
     }
 }
 

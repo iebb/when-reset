@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 
@@ -11,6 +12,8 @@ struct AccountCredentials: Codable, Equatable, Sendable {
 enum KeychainStore {
     static let credentialsService = "ad.neko.when.credentials"
     static let accountsService = "ad.neko.when.accounts"
+    static let pushRegistrationService = "ad.neko.when.push-registration"
+    static let pushServerAccessService = "ad.neko.when.push-server-access"
 
     static func save(_ credentials: AccountCredentials, for id: UUID) throws {
         let data = try JSONEncoder().encode(credentials)
@@ -73,6 +76,61 @@ enum KeychainStore {
         deleteData(service: accountsService, account: id.uuidString)
     }
 
+    static func savePushRegistration(_ credentials: PushRegistrationCredentials) throws {
+        try saveDeviceLocal(
+            try JSONEncoder().encode(credentials),
+            service: pushRegistrationService,
+            account: pushRegistrationAccount(for: credentials.serverURL)
+        )
+    }
+
+    static func loadPushRegistration(for serverURL: URL) throws -> PushRegistrationCredentials {
+        let data = try loadData(
+            service: pushRegistrationService,
+            account: pushRegistrationAccount(for: serverURL),
+            synchronizable: false
+        )
+        return try JSONDecoder().decode(PushRegistrationCredentials.self, from: data)
+    }
+
+    static func deletePushRegistration(for serverURL: URL) {
+        var query = baseQuery(
+            service: pushRegistrationService,
+            account: pushRegistrationAccount(for: serverURL)
+        )
+        query[kSecAttrSynchronizable as String] = false
+        SecItemDelete(query as CFDictionary)
+    }
+
+    static func savePushServerAccessKey(_ key: String, for serverURL: URL) throws {
+        try saveDeviceLocal(
+            Data(key.utf8),
+            service: pushServerAccessService,
+            account: pushRegistrationAccount(for: serverURL)
+        )
+    }
+
+    static func loadPushServerAccessKey(for serverURL: URL) throws -> String {
+        let data = try loadData(
+            service: pushServerAccessService,
+            account: pushRegistrationAccount(for: serverURL),
+            synchronizable: false
+        )
+        guard let key = String(data: data, encoding: .utf8), !key.isEmpty else {
+            throw keychainError(errSecDecode)
+        }
+        return key
+    }
+
+    static func deletePushServerAccessKey(for serverURL: URL) {
+        var query = baseQuery(
+            service: pushServerAccessService,
+            account: pushRegistrationAccount(for: serverURL)
+        )
+        query[kSecAttrSynchronizable as String] = false
+        SecItemDelete(query as CFDictionary)
+    }
+
     static func orderedAccounts(_ accounts: [MonitoredAccount]) -> [MonitoredAccount] {
         accounts.sorted(by: accountOrder)
     }
@@ -98,6 +156,24 @@ enum KeychainStore {
         var legacyQuery = baseQuery(service: service, account: account)
         legacyQuery[kSecAttrSynchronizable as String] = false
         SecItemDelete(legacyQuery as CFDictionary)
+    }
+
+    private static func saveDeviceLocal(_ data: Data, service: String, account: String) throws {
+        var query = baseQuery(service: service, account: account)
+        query[kSecAttrSynchronizable as String] = false
+        let attributes: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query
+            attributes.forEach { item[$0.key] = $0.value }
+            let addStatus = SecItemAdd(item as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw keychainError(addStatus) }
+        } else if status != errSecSuccess {
+            throw keychainError(status)
+        }
     }
 
     private static func loadData(service: String, account: String,
@@ -132,6 +208,11 @@ enum KeychainStore {
     private static func accountOrder(_ lhs: MonitoredAccount, _ rhs: MonitoredAccount) -> Bool {
         if lhs.addedAt != rhs.addedAt { return lhs.addedAt < rhs.addedAt }
         return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func pushRegistrationAccount(for serverURL: URL) -> String {
+        let digest = SHA256.hash(data: Data(serverURL.absoluteString.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private static func keychainError(_ status: OSStatus) -> NSError {

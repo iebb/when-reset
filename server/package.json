@@ -1,0 +1,28 @@
+{
+  "name": "when-reset-push-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
+    "deploy": "npm run db:migrate && wrangler deploy",
+    "test": "vitest run",
+    "types": "wrangler types"
+  },
+  "cloudflare": {
+    "bindings": {
+      "REGISTRATION_ACCESS_KEY": {
+        "description": "A private random value of at least 32 characters used only to enroll your devices. Generate one with `openssl rand -base64 32` and enter the same value in When Reset."
+      }
+    }
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.18.8",
+    "@cloudflare/workers-types": "5.20260724.1",
+    "@types/node": "24.10.13",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wrangler": "4.114.0"
+  }
+}

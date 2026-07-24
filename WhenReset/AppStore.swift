@@ -125,7 +125,9 @@ final class AppStore {
     var liveActivitySettings = GlobalLiveActivitySettings()
     var notificationSettings = GlobalNotificationSettings()
     var refreshSettings = GlobalRefreshSettings()
+    var pushServerSettings = PushServerSettings()
     private(set) var hasLiveActivity = false
+    private(set) var pushServerStatus = PushServerStatus.disabled
     private(set) var usageHistory: [UsageHistoryPoint] = []
     private(set) var historyStorageError: String?
 
@@ -143,6 +145,7 @@ final class AppStore {
     private let liveActivitySettingsKey = "globalLiveActivitySettings.v1"
     private let notificationSettingsKey = "globalNotificationSettings.v1"
     private let refreshSettingsKey = "globalRefreshSettings.v1"
+    private let pushServerSettingsKey = "pushServerSettings.v1"
     private static let accountKeychainMigrationKey = "accounts.iCloudKeychainMigrated.v1"
     private let historyStore = UsageHistoryStore()
     private var hasStarted = false
@@ -172,11 +175,17 @@ final class AppStore {
             refreshSettings = saved
         }
         hasLiveActivity = !Activity<UsageActivityAttributes>.activities.isEmpty
+        if let data = UserDefaults.standard.data(forKey: pushServerSettingsKey),
+           let saved = try? JSONDecoder().decode(PushServerSettings.self, from: data) {
+            pushServerSettings = saved
+            pushServerStatus = saved.mode == .disabled ? .disabled : .waitingForDeviceToken
+        }
     }
 
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
+        RemotePushCoordinator.shared.requestRegistrationIfNeeded()
         var pendingNotifications: [UsageNotificationEvent] = []
         do {
             let loaded = try await historyStore.load()
@@ -681,6 +690,101 @@ final class AppStore {
         BackgroundRefreshScheduler.scheduleNext(after: settings.backgroundInterval)
         Task { await updateLiveActivity() }
     }
+
+    func setPushServerSettings(_ settings: PushServerSettings, accessKey: String = "") {
+        if settings.mode != .disabled {
+            do {
+                guard let serverURL = try settings.resolvedServerURL() else { return }
+                let trimmedKey = accessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedKey.isEmpty {
+                    guard trimmedKey.count >= 32 else {
+                        throw PushServerError.missingServerAccessKey
+                    }
+                    try KeychainStore.savePushServerAccessKey(trimmedKey, for: serverURL)
+                }
+                _ = try KeychainStore.loadPushServerAccessKey(for: serverURL)
+            } catch {
+                pushServerStatus = .failed(error.localizedDescription)
+                return
+            }
+        }
+        let previousSettings = pushServerSettings
+        pushServerSettings = settings
+        UserDefaults.standard.set(
+            try? JSONEncoder().encode(settings),
+            forKey: pushServerSettingsKey
+        )
+        pushServerStatus = settings.mode == .disabled ? .disabled : .waitingForDeviceToken
+        Task { await transitionPushServer(from: previousSettings, to: settings) }
+    }
+
+    func hasPushServerAccessKey(for settings: PushServerSettings) -> Bool {
+        guard let serverURL = try? settings.resolvedServerURL() else { return false }
+        return (try? KeychainStore.loadPushServerAccessKey(for: serverURL)) != nil
+    }
+
+    func retryPushRegistration() {
+        guard pushServerSettings.mode != .disabled else { return }
+        pushServerStatus = .waitingForDeviceToken
+        RemotePushCoordinator.shared.requestRegistrationIfNeeded()
+    }
+
+    func requestTestPushRefresh() async {
+        let settings = pushServerSettings
+        guard settings.mode != .disabled else { return }
+        pushServerStatus = .registering
+        do {
+            try await PushServerClient.requestTestRefresh(settings: settings)
+            guard pushServerSettings == settings else { return }
+            pushServerStatus = .registered
+        } catch {
+            guard pushServerSettings == settings else { return }
+            pushServerStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func updatePushRegistration(deviceToken: Data) async {
+        let settings = pushServerSettings
+        guard settings.mode != .disabled else {
+            pushServerStatus = .disabled
+            return
+        }
+        pushServerStatus = .registering
+        do {
+            try await PushServerClient.register(settings: settings, deviceToken: deviceToken)
+            guard pushServerSettings == settings else { return }
+            pushServerStatus = .registered
+        } catch {
+            guard pushServerSettings == settings else { return }
+            pushServerStatus = .failed(error.localizedDescription)
+        }
+    }
+
+    func pushRegistrationFailed(_ error: Error) {
+        guard pushServerSettings.mode != .disabled else { return }
+        pushServerStatus = .failed(error.localizedDescription)
+    }
+
+    private func transitionPushServer(from previousSettings: PushServerSettings,
+                                      to settings: PushServerSettings) async {
+        let previousURL = try? previousSettings.resolvedServerURL()
+        let newURL = try? settings.resolvedServerURL()
+        if previousSettings.mode != .disabled,
+           (settings.mode == .disabled || previousURL != newURL) {
+            try? await PushServerClient.unregister(settings: previousSettings)
+        }
+        guard pushServerSettings == settings, settings.mode != .disabled else {
+            if pushServerSettings.mode == .disabled { pushServerStatus = .disabled }
+            return
+        }
+        do {
+            _ = try settings.resolvedServerURL()
+            RemotePushCoordinator.shared.requestRegistrationIfNeeded()
+        } catch {
+            pushServerStatus = .failed(error.localizedDescription)
+        }
+    }
+
 
     private func reconcileLiveActivity(at date: Date = .now) async {
         let running = !Activity<UsageActivityAttributes>.activities.isEmpty

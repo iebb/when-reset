@@ -5,8 +5,12 @@ build/
 *.ipa
 *.mobileprovision
 *.p8
+!server/apns/WhenResetSharedAPNs.p8
 *.p12
 *.cer
 *.xcresult
 xcuserdata/
 *.xcuserstate
+node_modules/
+.wrangler/
+.dev.vars

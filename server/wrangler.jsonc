@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "when-reset-push",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+  "triggers": { "crons": ["0 * * * *"] },
+  "rules": [
+    { "type": "Text", "globs": ["**/*.p8"], "fallthrough": true }
+  ],
+  "secrets": {
+    "required": ["REGISTRATION_ACCESS_KEY"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "when-reset-push",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "PUSH_QUEUE", "queue": "when-reset-push" }
+    ],
+    "consumers": [
+      {
+        "queue": "when-reset-push",
+        "max_batch_size": 20,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "retry_delay": 60
+      }
+    ]
+  }
+}

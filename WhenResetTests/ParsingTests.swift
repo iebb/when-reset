@@ -501,6 +501,34 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(RefreshInterval.twoHours.timeInterval, 7_200)
     }
 
+    func testPushServerSettingsDecodeDisabledByDefault() throws {
+        let settings = try JSONDecoder().decode(
+            PushServerSettings.self,
+            from: Data("{}".utf8)
+        )
+
+        XCTAssertEqual(settings.mode, .disabled)
+        XCTAssertEqual(settings.customServerURL, "")
+        XCTAssertNil(try settings.resolvedServerURL())
+    }
+
+    func testPushServerURLRequiresHTTPSAndNormalizesOrigin() throws {
+        let url = try PushServerConfiguration.normalizedServerURL(
+            "  https://PUSH.Example.com/base///?secret=no#fragment  "
+        )
+
+        XCTAssertEqual(url.absoluteString, "https://push.example.com/base")
+        XCTAssertThrowsError(
+            try PushServerConfiguration.normalizedServerURL("http://push.example.com")
+        )
+        XCTAssertThrowsError(
+            try PushServerConfiguration.normalizedServerURL(
+                "https://user:pass@push.example.com"
+            )
+        )
+    }
+
+
     func testPerQuotaLiveActivityRulesMatchExactBoundaries() throws {
         let now = Date(timeIntervalSince1970: 1_000)
         let window = UsageWindow(title: "Weekly", usedPercent: 80,

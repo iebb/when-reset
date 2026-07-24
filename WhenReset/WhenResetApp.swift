@@ -16,6 +16,24 @@ final class WhenResetAppDelegate: NSObject, UIApplicationDelegate, UNUserNotific
         -> UNNotificationPresentationOptions {
         [.banner, .list, .sound]
     }
+
+    func application(_ application: UIApplication,
+                     didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
+        RemotePushCoordinator.shared.didRegister(deviceToken: deviceToken)
+    }
+
+    func application(_ application: UIApplication,
+                     didFailToRegisterForRemoteNotificationsWithError error: Error) {
+        RemotePushCoordinator.shared.didFailToRegister(error)
+    }
+
+    func application(_ application: UIApplication,
+                     didReceiveRemoteNotification userInfo: [AnyHashable: Any],
+                     fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void) {
+        Task {
+            completionHandler(await RemotePushCoordinator.shared.handle(userInfo: userInfo))
+        }
+    }
 }
 
 @MainActor
@@ -40,7 +58,13 @@ private struct ForegroundRefreshTaskID: Equatable {
 struct WhenResetApp: App {
     @UIApplicationDelegateAdaptor(WhenResetAppDelegate.self) private var appDelegate
     @Environment(\.scenePhase) private var scenePhase
-    @State private var store = AppStore()
+    @State private var store: AppStore
+
+    init() {
+        let store = AppStore()
+        _store = State(initialValue: store)
+        RemotePushCoordinator.shared.configure(store: store)
+    }
 
     var body: some Scene {
         WindowGroup {
