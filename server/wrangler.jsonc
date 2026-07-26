@@ -2,15 +2,15 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "when-reset-push",
   "main": "src/index.ts",
-  "compatibility_date": "2026-07-22",
+  "compatibility_date": "2026-07-26",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
-  "triggers": { "crons": ["0 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *"] },
   "rules": [
     { "type": "Text", "globs": ["**/*.p8"], "fallthrough": true }
   ],
   "secrets": {
-    "required": ["REGISTRATION_ACCESS_KEY"]
+    "required": ["REGISTRATION_ACCESS_KEY", "CREDENTIAL_ENCRYPTION_KEY"]
   },
   "d1_databases": [
     {

@@ -8,13 +8,46 @@ enum AppLinks {
 }
 
 struct ContentView: View {
+    private enum Tab: Hashable { case usage, settings }
+
+    @State private var selectedTab = Tab.usage
+    @State private var pendingWorkerLink: WorkerLinkDraft?
+    @State private var workerLinkError: String?
+
     var body: some View {
-        TabView {
+        TabView(selection: $selectedTab) {
             UsageTabView()
                 .tabItem { Label("Usage", systemImage: "chart.bar.fill") }
-            SettingsView()
+                .tag(Tab.usage)
+            SettingsView(onStageWorkerLink: stageWorkerLink)
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
+                .tag(Tab.settings)
         }
+        .onOpenURL { url in
+            do {
+                let payload = try WorkerLinkPayload.parse(url)
+                selectedTab = .settings
+                pendingWorkerLink = .pairing(payload)
+            } catch {
+                workerLinkError = error.localizedDescription
+            }
+        }
+        .sheet(item: $pendingWorkerLink) { draft in
+            WorkerLinkReviewView(draft: draft)
+        }
+        .alert("Couldn’t read Worker link", isPresented: Binding(
+            get: { workerLinkError != nil },
+            set: { if !$0 { workerLinkError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(workerLinkError ?? "The Worker link is invalid.")
+        }
+    }
+
+    private func stageWorkerLink(_ draft: WorkerLinkDraft) {
+        selectedTab = .settings
+        pendingWorkerLink = draft
     }
 }
 
@@ -227,6 +260,7 @@ struct AccountSettingsView: View {
     @State private var savedSymbolName: String?
     @State private var showingRelink = false
     @State private var confirmingRemoval = false
+    @State private var confirmingServerMonitoring = false
     @State private var selectedPage = AccountSettingsPage.account
     @State private var historyRange = UsageHistoryRange.day
 
@@ -332,6 +366,23 @@ struct AccountSettingsView: View {
                     Text("Notifications")
                 } footer: {
                     Text("Scheduled-time and unexpected reset alerts also require their global settings.")
+                }
+                Section {
+                    Toggle("Monitor on Self-hosted Server",
+                           isOn: serverMonitoringBinding)
+                        .disabled(!currentAccount.providerID.supportsOffDeviceMonitoring
+                                  || (!store.isServerMonitoringEnabled(for: currentAccount)
+                                      && store.pushServerStatus != .registered))
+                } header: {
+                    Text("Self-hosted monitoring")
+                } footer: {
+                    if !currentAccount.providerID.supportsOffDeviceMonitoring {
+                        Text("GitHub Copilot credentials stay on this device and cannot be uploaded for off-device monitoring.")
+                    } else if store.pushServerSettings.mode == .disabled {
+                        Text("Configure a self-hosted server in Settings first.")
+                    } else {
+                        Text("Enabling this uploads the account credentials to your Worker after you confirm.")
+                    }
                 }
             }
             if !missingQuotaHistoryOptions.isEmpty {
@@ -461,6 +512,16 @@ struct AccountSettingsView: View {
             AddAccountView(relinkingAccount: account)
         }
         .confirmationDialog(
+            "Upload credentials to \(pushServerHost)?",
+            isPresented: $confirmingServerMonitoring,
+            titleVisibility: .visible
+        ) {
+            Button("Upload Credentials") { confirmServerMonitoring() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This sends \(credentialDisclosure) to \(pushServerHost). The Worker encrypts stored credentials, but whoever controls it can use them. Continue only if you control this Worker.")
+        }
+        .confirmationDialog(
             account.isDemo ? "Remove demo?" : "Remove account?",
             isPresented: $confirmingRemoval,
             titleVisibility: .visible
@@ -475,6 +536,45 @@ struct AccountSettingsView: View {
                  ? "This deletes the demo and its generated usage from this device."
                  : "This deletes the account and credentials from devices using your iCloud Keychain, plus this device’s cached usage, recorded history, and monitor settings.")
         }
+    }
+
+    private var serverMonitoringBinding: Binding<Bool> {
+        Binding {
+            guard let serverURL = try? store.pushServerSettings.resolvedServerURL() else {
+                return false
+            }
+            return settings.monitorOnSelfHostedServer
+                && settings.selfHostedServerConsentURL == serverURL.absoluteString
+        } set: { isEnabled in
+            if isEnabled {
+                confirmingServerMonitoring = true
+            } else {
+                settings.monitorOnSelfHostedServer = false
+                settings.selfHostedServerConsentURL = nil
+            }
+        }
+    }
+
+    private var pushServerHost: String {
+        (try? store.pushServerSettings.resolvedServerURL())?.host ?? "this Worker"
+    }
+
+    private var credentialDisclosure: String {
+        switch currentAccount.providerID {
+        case .chatGPT, .claude, .kimi:
+            "this account’s access token, refresh token, and ID token when available"
+        case .zai, .miniMax:
+            "this account’s API key"
+        case .githubCopilot:
+            "this account’s credentials"
+        }
+    }
+
+    private func confirmServerMonitoring() {
+        guard currentAccount.providerID.supportsOffDeviceMonitoring,
+              let serverURL = try? store.pushServerSettings.resolvedServerURL() else { return }
+        settings.monitorOnSelfHostedServer = true
+        settings.selfHostedServerConsentURL = serverURL.absoluteString
     }
 
     private func metricBinding(_ window: UsageWindow) -> Binding<Bool> {
@@ -610,12 +710,14 @@ struct AccountSettingsView: View {
 private enum UsageHistoryRange: String, CaseIterable, Identifiable {
     case day = "24 Hours"
     case week = "7 Days"
+    case month = "30 Days"
 
     var id: Self { self }
     var duration: TimeInterval {
         switch self {
         case .day: 24 * 60 * 60
         case .week: 7 * 24 * 60 * 60
+        case .month: 30 * 24 * 60 * 60
         }
     }
 }
@@ -798,8 +900,8 @@ private struct AccountUsageHistorySections: View {
     }
 
     private func emptyMessage(hasAnyHistory: Bool) -> String {
-        if hasAnyHistory, range == .day {
-            return "Choose 7 Days to see older samples, or refresh this account to record a new one."
+        if hasAnyHistory, range != .month {
+            return "Choose a longer range to see older samples, or refresh this account to record a new one."
         }
         return "A point is added after the next successful account refresh."
     }
@@ -867,11 +969,17 @@ private struct UsageHistoryChart: View {
                     AxisTick()
                     AxisValueLabel(format: .dateTime.hour())
                 }
-            } else {
+            } else if range == .week {
                 AxisMarks(values: .stride(by: .day, count: 1)) {
                     AxisGridLine()
                     AxisTick()
                     AxisValueLabel(format: .dateTime.weekday(.abbreviated).day())
+                }
+            } else {
+                AxisMarks(values: .stride(by: .day, count: 5)) {
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
                 }
             }
         }
@@ -979,11 +1087,15 @@ private struct LiveActivityRuleRows: View {
 
 struct SettingsView: View {
     @Environment(AppStore.self) private var store
+    let onStageWorkerLink: (WorkerLinkDraft) -> Void
     @State private var settings = GlobalLiveActivitySettings()
     @State private var notificationSettings = GlobalNotificationSettings()
     @State private var refreshSettings = GlobalRefreshSettings()
     @State private var pushServerSettings = PushServerSettings()
     @State private var pushServerAccessKey = ""
+    @State private var showingWorkerLinkEntry = false
+    @State private var stagedLinkFromEntry: WorkerLinkDraft?
+    @State private var pushServerActionError: String?
 
     var body: some View {
         NavigationStack {
@@ -1007,13 +1119,16 @@ struct SettingsView: View {
                         }
                     }
                 }
-                Section("Push Refresh") {
+                Section("Self-hosted Worker") {
                     Picker("Server", selection: $pushServerSettings.mode) {
                         ForEach(PushServerMode.allCases, id: \.self) { mode in
                             Text(mode.title).tag(mode)
                         }
                     }
                     if pushServerSettings.mode == .custom {
+                        Button("Scan or Paste Worker Link", systemImage: "qrcode.viewfinder") {
+                            showingWorkerLinkEntry = true
+                        }
                         TextField("https://push.example.com",
                                   text: $pushServerSettings.customServerURL)
                             .textInputAutocapitalization(.never)
@@ -1022,22 +1137,22 @@ struct SettingsView: View {
                         SecureField("Server access key", text: $pushServerAccessKey)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
+                        Picker("Server monitoring",
+                               selection: $pushServerSettings.serverMonitoringInterval) {
+                            ForEach(RefreshInterval.backgroundOptions, id: \.self) { interval in
+                                Text(interval.title).tag(interval)
+                            }
+                        }
                     }
-                    Button("Apply") {
-                        store.setPushServerSettings(
-                            pushServerSettings,
-                            accessKey: pushServerAccessKey
-                        )
-                        pushServerAccessKey = ""
-                    }
+                    Button(pushServerActionTitle, action: applyPushServerAction)
                     .disabled(!canApplyPushServerSettings)
 
                     if pushServerSettings.mode != .disabled
-                        || store.pushServerSettings.mode != .disabled {
+                        || store.pushServerSettings.mode != .disabled
+                        || store.pushServerStatus != .disabled {
                         LabeledContent("Status", value: store.pushServerStatus.title)
-                        if case .failed = store.pushServerStatus,
-                           store.pushServerSettings.mode != .disabled {
-                            Button("Retry Registration") { store.retryPushRegistration() }
+                        if case .failed = store.pushServerStatus {
+                            Button("Retry") { store.retryPushRegistration() }
                         }
                         if store.pushServerStatus == .registered {
                             Button("Send Test Refresh") {
@@ -1079,12 +1194,34 @@ struct SettingsView: View {
                 refreshSettings = store.refreshSettings
                 pushServerSettings = store.pushServerSettings
             }
+            .onChange(of: store.pushServerSettings) { _, newValue in
+                pushServerSettings = newValue
+            }
             .onChange(of: settings) { _, newValue in store.setLiveActivitySettings(newValue) }
             .onChange(of: notificationSettings) { _, newValue in
                 store.setNotificationSettings(newValue)
             }
             .onChange(of: refreshSettings) { _, newValue in
                 store.setRefreshSettings(newValue)
+            }
+            .sheet(isPresented: $showingWorkerLinkEntry) {
+                WorkerLinkEntryView { payload in
+                    stagedLinkFromEntry = .pairing(payload)
+                    showingWorkerLinkEntry = false
+                }
+            }
+            .onChange(of: showingWorkerLinkEntry) { _, isShowing in
+                guard !isShowing, let draft = stagedLinkFromEntry else { return }
+                stagedLinkFromEntry = nil
+                onStageWorkerLink(draft)
+            }
+            .alert("Couldn’t update Worker", isPresented: Binding(
+                get: { pushServerActionError != nil },
+                set: { if !$0 { pushServerActionError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(pushServerActionError ?? "The Worker settings could not be updated.")
             }
         }
     }
@@ -1102,12 +1239,348 @@ struct SettingsView: View {
 
     private var canApplyPushServerSettings: Bool {
         let enteredKey = pushServerAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard pushServerSettings != store.pushServerSettings || !enteredKey.isEmpty else {
-            return false
+        if pushServerSettings.mode == .disabled {
+            return store.pushServerSettings.mode != .disabled
         }
-        if pushServerSettings.mode == .disabled { return true }
-        guard (try? pushServerSettings.resolvedServerURL()) != nil else { return false }
-        return enteredKey.count >= 32 || store.hasPushServerAccessKey(for: pushServerSettings)
+        guard let proposedURL = try? PushServerConfiguration.normalizedServerOrigin(
+            pushServerSettings.customServerURL
+        ) else { return false }
+        let currentURL = try? store.pushServerSettings.resolvedServerURL()
+        if proposedURL == currentURL, enteredKey.isEmpty {
+            return pushServerSettings.serverMonitoringInterval
+                != store.pushServerSettings.serverMonitoringInterval
+        }
+        return enteredKey.count >= 32
+    }
+
+    private var pushServerActionTitle: String {
+        if pushServerSettings.mode == .disabled { return "Turn Off" }
+        let enteredKey = pushServerAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let proposedURL = try? PushServerConfiguration.normalizedServerOrigin(
+            pushServerSettings.customServerURL
+        )
+        let currentURL = try? store.pushServerSettings.resolvedServerURL()
+        return proposedURL == currentURL && enteredKey.isEmpty ? "Apply Interval" : "Review & Link"
+    }
+
+    private func applyPushServerAction() {
+        if pushServerSettings.mode == .disabled {
+            store.disablePushServer()
+            pushServerAccessKey = ""
+            return
+        }
+        do {
+            let serverURL = try PushServerConfiguration.normalizedServerOrigin(
+                pushServerSettings.customServerURL
+            )
+            let accessKey = pushServerAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            let currentURL = try? store.pushServerSettings.resolvedServerURL()
+            if serverURL == currentURL, accessKey.isEmpty {
+                store.updatePushServerMonitoringInterval(
+                    pushServerSettings.serverMonitoringInterval
+                )
+            } else {
+                guard accessKey.count >= 32 else { throw PushServerError.missingServerAccessKey }
+                onStageWorkerLink(.manual(
+                    id: UUID(),
+                    serverURL: serverURL,
+                    accessKey: accessKey
+                ))
+            }
+            pushServerAccessKey = ""
+        } catch {
+            pushServerActionError = error.localizedDescription
+        }
+    }
+}
+
+private struct WorkerLinkEntryView: View {
+    @Environment(\.dismiss) private var dismiss
+    let onLink: (WorkerLinkPayload) -> Void
+    @State private var pastedLink = ""
+    @State private var parseError: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    NavigationLink {
+                        WorkerQRScannerView { value in
+                            stage(value)
+                        }
+                    } label: {
+                        Label("Scan QR Code", systemImage: "qrcode.viewfinder")
+                    }
+                    .disabled(!WorkerQRScannerView.isAvailable)
+                } footer: {
+                    if !WorkerQRScannerView.isAvailable {
+                        Text("Camera scanning is unavailable on this device. Paste the link below.")
+                    }
+                }
+
+                Section("Paste Worker Link") {
+                    TextField("whenreset://link-worker?…", text: $pastedLink, axis: .vertical)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .lineLimit(3...6)
+                    Button("Review Pasted Link") { stage(pastedLink) }
+                        .disabled(pastedLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .navigationTitle("Link Worker")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .alert("Invalid Worker link", isPresented: Binding(
+                get: { parseError != nil },
+                set: { if !$0 { parseError = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(parseError ?? "Generate a new link from your Worker.")
+            }
+        }
+    }
+
+    private func stage(_ value: String) {
+        do {
+            let payload = try WorkerLinkPayload.parse(value)
+            onLink(payload)
+        } catch {
+            parseError = error.localizedDescription
+        }
+    }
+}
+
+private struct WorkerLinkReviewView: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let draft: WorkerLinkDraft
+    @State private var metadata: WorkerLinkMetadata?
+    @State private var validationError: String?
+    @State private var selectedAccountIDs: Set<UUID> = []
+    @State private var interval = RefreshInterval.fifteenMinutes
+    @State private var trustsWorker = false
+    @State private var isValidating = true
+    @State private var isCommitting = false
+    @State private var confirmingFinalLink = false
+
+    private var accounts: [MonitoredAccount] {
+        store.accounts.filter { !$0.isDemo }
+    }
+
+    private var host: String {
+        metadata?.serverURL.host ?? draft.serverURL.host ?? draft.serverURL.absoluteString
+    }
+
+    private var currentWorkerURL: URL? {
+        try? store.pushServerSettings.resolvedServerURL()
+    }
+
+    private var replacesCurrentWorker: Bool {
+        guard let currentWorkerURL else { return false }
+        return currentWorkerURL != draft.serverURL
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                if isValidating {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text("Verifying Worker…")
+                        }
+                    }
+                } else if let validationError {
+                    Section {
+                        Label(validationError, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                        Button("Try Again") { Task { await validateWorker() } }
+                    }
+                } else if let metadata {
+                    Section("Worker") {
+                        LabeledContent("Name", value: metadata.displayName)
+                        LabeledContent("Address") {
+                            Text(metadata.serverURL.absoluteString)
+                                .multilineTextAlignment(.trailing)
+                                .textSelection(.enabled)
+                        }
+                        if let expiresAt = metadata.expiresAt {
+                            LabeledContent("Link expires") {
+                                Text(expiresAt, style: .relative)
+                            }
+                        }
+                        if replacesCurrentWorker, let currentWorkerURL {
+                            Label(
+                                "\(currentWorkerURL.host ?? currentWorkerURL.absoluteString) will be disconnected before this Worker is linked.",
+                                systemImage: "arrow.triangle.2.circlepath"
+                            )
+                            .foregroundStyle(.orange)
+                        }
+                        Picker("Server monitoring", selection: $interval) {
+                            ForEach(RefreshInterval.backgroundOptions, id: \.self) { option in
+                                Text(option.title).tag(option)
+                            }
+                        }
+                    }
+
+                    Section("Data sent after confirmation") {
+                        Label("This device’s APNs token for silent refresh hints",
+                              systemImage: "bell.badge")
+                        Label("Provider and workspace identifiers, plan, and quota descriptors for selected accounts",
+                              systemImage: "list.bullet.rectangle")
+                        Label("Selected quota history is retained by the Worker for 35 days",
+                              systemImage: "clock.arrow.circlepath")
+                    }
+
+                    if !accounts.isEmpty {
+                        Section {
+                            ForEach(accounts) { account in
+                                if account.providerID.supportsOffDeviceMonitoring {
+                                    Toggle(isOn: accountSelection(account.id)) {
+                                        accountUploadLabel(account)
+                                    }
+                                } else {
+                                    HStack(alignment: .top, spacing: 12) {
+                                        ProviderIcon(providerID: account.providerID,
+                                                     symbolName: account.customSymbolName)
+                                            .frame(width: 26, height: 26)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(account.resolvedDisplayName)
+                                            Text("Credentials remain on this device")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "lock.fill")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        } header: {
+                            Text("Accounts to monitor")
+                        } footer: {
+                            Text("All accounts are off by default. GitHub Copilot is unavailable for off-device monitoring under App Review Guideline 5.1.1(v).")
+                        }
+                    }
+
+                    Section {
+                        Text("The Worker encrypts credentials stored in D1, but whoever controls \(host) can decrypt and use them. Continue only if this is your own Worker.")
+                            .foregroundStyle(.orange)
+                        Toggle("I trust this self-hosted Worker", isOn: $trustsWorker)
+                    } header: {
+                        Text("Trust confirmation")
+                    }
+
+                    Section {
+                        Button(finalButtonTitle) { confirmingFinalLink = true }
+                            .disabled(!trustsWorker || isCommitting)
+                    }
+                }
+            }
+            .navigationTitle("Review Worker Link")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .task {
+                interval = store.pushServerSettings.serverMonitoringInterval
+                await validateWorker()
+            }
+            .confirmationDialog(
+                selectedAccountIDs.isEmpty
+                    ? "Link this Worker?"
+                    : "Upload credentials for \(selectedAccountIDs.count) account\(selectedAccountIDs.count == 1 ? "" : "s")?",
+                isPresented: $confirmingFinalLink,
+                titleVisibility: .visible
+            ) {
+                Button(finalButtonTitle) { commitLink() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text(finalConfirmationMessage)
+            }
+        }
+    }
+
+    private var finalButtonTitle: String {
+        selectedAccountIDs.isEmpty
+            ? "Link Worker"
+            : "Link Worker & Upload \(selectedAccountIDs.count) Account\(selectedAccountIDs.count == 1 ? "" : "s")"
+    }
+
+    private var finalConfirmationMessage: String {
+        if selectedAccountIDs.isEmpty {
+            return "When Reset will send this device’s APNs token to \(host). No provider credentials will be uploaded."
+        }
+        return "When Reset will send this device’s APNs token and the selected access tokens, refresh tokens, ID tokens, or API keys to \(host)."
+    }
+
+    private func accountSelection(_ id: UUID) -> Binding<Bool> {
+        Binding {
+            selectedAccountIDs.contains(id)
+        } set: { selected in
+            if selected { selectedAccountIDs.insert(id) }
+            else { selectedAccountIDs.remove(id) }
+        }
+    }
+
+    private func accountUploadLabel(_ account: MonitoredAccount) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            ProviderIcon(providerID: account.providerID, symbolName: account.customSymbolName)
+                .frame(width: 26, height: 26)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(account.resolvedDisplayName)
+                Text(credentialCategories(for: account.providerID))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private func credentialCategories(for providerID: ProviderID) -> String {
+        switch providerID {
+        case .chatGPT, .claude, .kimi:
+            "Access token, refresh token, and ID token when available"
+        case .zai, .miniMax:
+            "API key"
+        case .githubCopilot:
+            "Credentials remain on this device"
+        }
+    }
+
+    private func validateWorker() async {
+        isValidating = true
+        validationError = nil
+        do {
+            metadata = try await PushServerClient.validate(draft)
+        } catch {
+            metadata = nil
+            validationError = error.localizedDescription
+        }
+        isValidating = false
+    }
+
+    private func commitLink() {
+        guard metadata != nil else { return }
+        isCommitting = true
+        do {
+            try store.confirmPushServerLink(
+                draft,
+                monitoringAccountIDs: selectedAccountIDs,
+                interval: interval,
+                userConfirmedCredentialUpload: true
+            )
+            dismiss()
+        } catch {
+            isCommitting = false
+            validationError = error.localizedDescription
+        }
     }
 }
 

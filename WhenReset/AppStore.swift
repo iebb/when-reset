@@ -3,6 +3,7 @@ import Foundation
 import Observation
 import Security
 @preconcurrency import UserNotifications
+import UIKit
 import WidgetKit
 
 struct DeviceLinkPresentation: Sendable {
@@ -10,6 +11,114 @@ struct DeviceLinkPresentation: Sendable {
     let verificationURL: URL
     let userCode: String
     let expiresAt: Date
+}
+
+actor ServerAccountOperationGate {
+    private var activeAccountIDs: Set<UUID> = []
+    private var waiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(accountID: UUID) async {
+        guard !activeAccountIDs.contains(accountID) else {
+            await withCheckedContinuation { continuation in
+                waiters[accountID, default: []].append(continuation)
+            }
+            return
+        }
+        activeAccountIDs.insert(accountID)
+    }
+
+    func release(accountID: UUID) {
+        guard var accountWaiters = waiters[accountID], !accountWaiters.isEmpty else {
+            activeAccountIDs.remove(accountID)
+            waiters.removeValue(forKey: accountID)
+            return
+        }
+        let next = accountWaiters.removeFirst()
+        if accountWaiters.isEmpty {
+            waiters.removeValue(forKey: accountID)
+        } else {
+            waiters[accountID] = accountWaiters
+        }
+        next.resume()
+    }
+}
+
+actor ServerRegistrationOperationGate {
+    private var activeOrigins: Set<String> = []
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func acquire(origin: String) async {
+        guard !activeOrigins.contains(origin) else {
+            await withCheckedContinuation { continuation in
+                waiters[origin, default: []].append(continuation)
+            }
+            return
+        }
+        activeOrigins.insert(origin)
+    }
+
+    func release(origin: String) {
+        guard var originWaiters = waiters[origin], !originWaiters.isEmpty else {
+            activeOrigins.remove(origin)
+            waiters.removeValue(forKey: origin)
+            return
+        }
+        let next = originWaiters.removeFirst()
+        if originWaiters.isEmpty {
+            waiters.removeValue(forKey: origin)
+        } else {
+            waiters[origin] = originWaiters
+        }
+        next.resume()
+    }
+}
+
+enum ServerMonitoringRecovery {
+    static func cleanupMatchesCurrentWorker(
+        cleanup: PushServerSettings,
+        current: PushServerSettings
+    ) -> Bool {
+        let cleanupURL = try? cleanup.resolvedServerURL()
+        let currentURL = try? current.resolvedServerURL()
+        return (cleanupURL != nil && cleanupURL == currentURL) || cleanup == current
+    }
+
+    static func reconcilingPendingDeletion(
+        in settings: AccountMonitorSettings,
+        serverURL: String,
+        pendingRevision: Int64
+    ) -> AccountMonitorSettings {
+        guard settings.monitorOnSelfHostedServer,
+              settings.selfHostedServerConsentURL == serverURL,
+              settings.selfHostedServerConsentRevision <= pendingRevision else {
+            return settings
+        }
+        var result = settings
+        result.monitorOnSelfHostedServer = false
+        result.selfHostedServerConsentURL = nil
+        result.selfHostedServerConsentRevision = pendingRevision
+        return result
+    }
+}
+
+enum LiveActivityLifecyclePolicy {
+    static let rotationInterval: TimeInterval = 7 * 60 * 60
+
+    static func isRunning(_ state: ActivityState) -> Bool {
+        if #available(iOS 26.0, *) {
+            return switch state {
+            case .pending, .active, .stale: true
+            case .ended, .dismissed: false
+            @unknown default: false
+            }
+        }
+        return state == .active || state == .stale
+    }
+
+    static func shouldRotate(startedAt: Date?, at date: Date = .now) -> Bool {
+        guard let startedAt else { return false }
+        return date.timeIntervalSince(startedAt) >= rotationInterval
+    }
 }
 
 struct AccountRefreshFailure: Equatable, Sendable {
@@ -146,10 +255,31 @@ final class AppStore {
     private let notificationSettingsKey = "globalNotificationSettings.v1"
     private let refreshSettingsKey = "globalRefreshSettings.v1"
     private let pushServerSettingsKey = "pushServerSettings.v1"
+    private let pendingPushServerCleanupKey = "pendingPushServerCleanup.v1"
+    private let pendingServerAccountDeletionsKey = "pendingServerAccountDeletions.v1"
+    private let pendingServerAccountDeletionURLKey = "pendingServerAccountDeletionURL.v1"
+    private let serverConsentHighWaterKey = "serverConsentHighWater.v1"
+    private let liveActivityStartedAtKey = "globalLiveActivityStartedAt.v1"
     private static let accountKeychainMigrationKey = "accounts.iCloudKeychainMigrated.v1"
     private let historyStore = UsageHistoryStore()
+    private let serverAccountOperationGate = ServerAccountOperationGate()
+    private let serverRegistrationOperationGate = ServerRegistrationOperationGate()
     private var hasStarted = false
+    private var liveActivityStartedAt: Date?
+    private var pendingPushServerEnrollment: PushServerEnrollment?
+    private var pendingPushServerCleanupSettings: PushServerSettings?
+    private var pendingServerAccountDeletions: [UUID: Int64] = [:]
+    private var pendingServerAccountDeletionURL: String?
+    private var serverConsentHighWater: [UUID: Int64] = [:]
+    private static let maximumServerConsentRevision: Int64 = 9_007_199_254_740_991
     private static let globalActivityID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+
+    private static var runningGlobalActivities: [Activity<UsageActivityAttributes>] {
+        Activity<UsageActivityAttributes>.activities.filter {
+            $0.attributes.accountID == globalActivityID
+                && LiveActivityLifecyclePolicy.isRunning($0.activityState)
+        }
+    }
 
     init() {
         let cachedAccounts = UserDefaults.standard.data(forKey: accountsKey)
@@ -174,18 +304,61 @@ final class AppStore {
            let saved = try? JSONDecoder().decode(GlobalRefreshSettings.self, from: data) {
             refreshSettings = saved
         }
-        hasLiveActivity = !Activity<UsageActivityAttributes>.activities.isEmpty
         if let data = UserDefaults.standard.data(forKey: pushServerSettingsKey),
            let saved = try? JSONDecoder().decode(PushServerSettings.self, from: data) {
             pushServerSettings = saved
             pushServerStatus = saved.mode == .disabled ? .disabled : .waitingForDeviceToken
+        }
+        if let data = UserDefaults.standard.data(forKey: pendingPushServerCleanupKey) {
+            pendingPushServerCleanupSettings = try? JSONDecoder().decode(
+                PushServerSettings.self,
+                from: data
+            )
+        }
+        if let data = UserDefaults.standard.data(forKey: pendingServerAccountDeletionsKey) {
+            if let revisions = try? JSONDecoder().decode([UUID: Int64].self, from: data) {
+                pendingServerAccountDeletions = revisions
+            } else if let legacyIDs = try? JSONDecoder().decode(Set<UUID>.self, from: data) {
+                pendingServerAccountDeletions = Dictionary(
+                    uniqueKeysWithValues: legacyIDs.map { ($0, 1) }
+                )
+            }
+        }
+        pendingServerAccountDeletionURL = UserDefaults.standard.string(
+            forKey: pendingServerAccountDeletionURLKey
+        )
+        if let data = UserDefaults.standard.data(forKey: serverConsentHighWaterKey),
+           let saved = try? JSONDecoder().decode([UUID: Int64].self, from: data) {
+            serverConsentHighWater = saved
+        }
+        if let pendingPushServerCleanupSettings {
+            let host = (try? pendingPushServerCleanupSettings.resolvedServerURL())?.host
+                ?? "the previous Worker"
+            pushServerStatus = .failed("Couldn’t confirm removal from \(host). Retry cleanup.")
+        }
+        normalizeServerConsentRevisions()
+        reconcilePendingServerAccountDeletionConsents()
+        let globalActivityIsRunning = !Self.runningGlobalActivities.isEmpty
+        hasLiveActivity = globalActivityIsRunning
+        if globalActivityIsRunning {
+            liveActivityStartedAt = UserDefaults.standard.object(
+                forKey: liveActivityStartedAtKey
+            ) as? Date ?? .now
+            persistLiveActivityStartedAt()
+        } else {
+            setLiveActivityStartedAt(nil)
         }
     }
 
     func start() async {
         guard !hasStarted else { return }
         hasStarted = true
-        RemotePushCoordinator.shared.requestRegistrationIfNeeded()
+        if let cleanup = pendingPushServerCleanupSettings {
+            let target = preparePushServerCleanupTarget(cleanup)
+            await transitionPushServer(from: cleanup, to: target)
+        } else {
+            RemotePushCoordinator.shared.requestRegistrationIfNeeded()
+        }
         var pendingNotifications: [UsageNotificationEvent] = []
         do {
             let loaded = try await historyStore.load()
@@ -217,6 +390,33 @@ final class AppStore {
             !account.isDemo && previousByID[account.id] != account
         }
 
+        let currentPushSettings = pushServerSettings
+        let currentServerURL = (try? currentPushSettings.resolvedServerURL())?.absoluteString
+        var serverDeletions: [(accountID: UUID, consentRevision: Int64)] = []
+        if currentServerURL != nil {
+            for id in removedIDs {
+                guard let removedAccount = previousByID[id] else { continue }
+                let accountSettings = settings(for: removedAccount)
+                let pendingRevision = pendingServerAccountDeletionURL == currentServerURL
+                    ? pendingServerAccountDeletions[id] : nil
+                guard hasServerConsent(accountSettings, account: removedAccount)
+                        || pendingRevision != nil else { continue }
+                let revision = nextServerConsentRevision(
+                    for: id,
+                    after: max(
+                        accountSettings.selfHostedServerConsentRevision,
+                        pendingRevision ?? 0
+                    )
+                )
+                recordServerAccountDeletionIntent(
+                    accountID: id,
+                    consentRevision: revision,
+                    serverSettings: currentPushSettings
+                )
+                serverDeletions.append((id, revision))
+            }
+        }
+
         accounts = updatedAccounts
         cacheAccounts()
         for id in removedIDs {
@@ -231,6 +431,24 @@ final class AppStore {
             }
         }
         persistMonitorSettings()
+
+        for deletion in serverDeletions {
+            do {
+                try await deleteServerAccount(
+                    settings: currentPushSettings,
+                    accountID: deletion.accountID,
+                    consentRevision: deletion.consentRevision
+                )
+                clearServerAccountDeletionIntent(
+                    accountID: deletion.accountID,
+                    through: deletion.consentRevision,
+                    serverSettings: currentPushSettings
+                )
+            } catch {
+                guard pendingServerAccountDeletionURL == currentServerURL else { continue }
+                errorMessage = "The account was removed from this device, but its Worker copy is still awaiting deletion: \(error.localizedDescription)"
+            }
+        }
 
         if hasStarted {
             for account in accountsToRefresh {
@@ -443,6 +661,9 @@ final class AppStore {
             }
             return true
         }
+        if isServerMonitoringEnabled(for: account) {
+            await syncServerAccount(account, publishChanges: publishChanges)
+        }
         do {
             var credentials = try KeychainStore.load(for: account.id)
             var effectiveAccount = accounts.first(where: { $0.id == account.id }) ?? account
@@ -510,6 +731,9 @@ final class AppStore {
             )
             snapshots[account.id] = snapshot
             refreshFailures.removeValue(forKey: account.id)
+            if isServerMonitoringEnabled(for: account) {
+                await uploadServerAccount(effectiveAccount)
+            }
             if publishChanges {
                 publishSnapshots()
                 await reconcileScheduledResetNotifications()
@@ -565,6 +789,27 @@ final class AppStore {
     }
 
     func remove(_ account: MonitoredAccount) {
+        let accountSettings = settings(for: account)
+        let currentPushSettings = pushServerSettings
+        let serverURL = (try? currentPushSettings.resolvedServerURL())?.absoluteString
+        let pendingRevision = pendingServerAccountDeletionURL == serverURL
+            ? pendingServerAccountDeletions[account.id] : nil
+        let shouldDeleteServerCopy = serverURL != nil
+            && (isServerMonitoringEnabled(for: account) || pendingRevision != nil)
+        let deletionRevision = nextServerConsentRevision(
+            for: account.id,
+            after: max(
+                accountSettings.selfHostedServerConsentRevision,
+                pendingRevision ?? 0
+            )
+        )
+        if shouldDeleteServerCopy {
+            recordServerAccountDeletionIntent(
+                accountID: account.id,
+                consentRevision: deletionRevision,
+                serverSettings: currentPushSettings
+            )
+        }
         accounts.removeAll { $0.id == account.id }
         snapshots.removeValue(forKey: account.id)
         refreshFailures.removeValue(forKey: account.id)
@@ -575,6 +820,27 @@ final class AppStore {
         }
         persistAccounts(); persistMonitorSettings(); publishSnapshots()
         Task {
+            if shouldDeleteServerCopy {
+                do {
+                    try await deleteServerAccount(
+                        settings: currentPushSettings,
+                        accountID: account.id,
+                        consentRevision: deletionRevision
+                    )
+                    clearServerAccountDeletionIntent(
+                        accountID: account.id,
+                        through: deletionRevision,
+                        serverSettings: currentPushSettings
+                    )
+                } catch {
+                    let currentURL = (try? pushServerSettings.resolvedServerURL())?.absoluteString
+                    if serverURL == currentURL {
+                        let message = "The account was removed locally, but its Worker copy could not be removed: \(error.localizedDescription)"
+                        errorMessage = message
+                        pushServerStatus = .failed(message)
+                    }
+                }
+            }
             do {
                 usageHistory = try await historyStore.remove(accountID: account.id)
                 historyStorageError = nil
@@ -602,6 +868,9 @@ final class AppStore {
         persistAccounts()
         publishSnapshots()
         Task {
+            if isServerMonitoringEnabled(for: account) {
+                await uploadServerAccount(account)
+            }
             await reconcileScheduledResetNotifications()
             await updateLiveActivity()
             await reconcileLiveActivity()
@@ -614,17 +883,21 @@ final class AppStore {
             await activity.end(finalContent, dismissalPolicy: .immediate)
         }
         hasLiveActivity = false
+        setLiveActivityStartedAt(nil)
     }
 
     private func startGlobalLiveActivity() async {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled, hasEligibleLiveActivityContent else { return }
+        guard UIApplication.shared.applicationState == .active,
+              ActivityAuthorizationInfo().areActivitiesEnabled,
+              hasEligibleLiveActivityContent else { return }
         let attributes = UsageActivityAttributes(accountID: Self.globalActivityID,
                                                   accountName: "All accounts", providerName: "When Reset")
         let state = activityState()
         do {
             _ = try Activity.request(attributes: attributes,
-                                     content: ActivityContent(state: state, staleDate: liveActivityStaleDate))
+                                     content: ActivityContent(state: state, staleDate: nil))
             hasLiveActivity = true
+            setLiveActivityStartedAt(.now)
         } catch {
             errorMessage = error.localizedDescription
             hasLiveActivity = false
@@ -633,12 +906,106 @@ final class AppStore {
 
     func settings(for account: MonitoredAccount) -> AccountMonitorSettings { monitorSettings[account.id] ?? .init() }
 
-    func setSettings(_ settings: AccountMonitorSettings, for account: MonitoredAccount) {
+    func isServerMonitoringEnabled(for account: MonitoredAccount) -> Bool {
+        serverMonitoringEnabled(settings(for: account), account: account)
+    }
+
+    private func serverMonitoringEnabled(_ settings: AccountMonitorSettings,
+                                         account: MonitoredAccount) -> Bool {
+        pendingPushServerCleanupSettings == nil
+            && hasServerConsent(settings, account: account)
+    }
+
+    private func hasServerConsent(_ settings: AccountMonitorSettings,
+                                  account: MonitoredAccount) -> Bool {
+        guard !account.isDemo,
+              account.providerID.supportsOffDeviceMonitoring,
+              settings.monitorOnSelfHostedServer,
+              let serverURL = try? pushServerSettings.resolvedServerURL() else { return false }
+        return settings.selfHostedServerConsentURL == serverURL.absoluteString
+    }
+
+    func setSettings(_ proposedSettings: AccountMonitorSettings, for account: MonitoredAccount) {
         let previousSettings = self.settings(for: account)
+        var settings = proposedSettings
+        if settings.monitorOnSelfHostedServer,
+           !hasServerConsent(settings, account: account) {
+            settings.monitorOnSelfHostedServer = false
+            settings.selfHostedServerConsentURL = nil
+        }
+        let wasServerMonitoring = hasServerConsent(previousSettings, account: account)
+        let isServerMonitoring = hasServerConsent(settings, account: account)
+        if wasServerMonitoring != isServerMonitoring {
+            settings.selfHostedServerConsentRevision = nextServerConsentRevision(
+                for: account.id,
+                after: previousSettings.selfHostedServerConsentRevision
+            )
+        } else if isServerMonitoring {
+            settings.selfHostedServerConsentRevision = max(
+                1,
+                max(
+                    previousSettings.selfHostedServerConsentRevision,
+                    serverConsentHighWater[account.id] ?? 0
+                )
+            )
+        } else {
+            settings.selfHostedServerConsentRevision = max(
+                settings.selfHostedServerConsentRevision,
+                max(
+                    previousSettings.selfHostedServerConsentRevision,
+                    serverConsentHighWater[account.id] ?? 0
+                )
+            )
+        }
+        let consentRevision = settings.selfHostedServerConsentRevision
+        recordServerConsentHighWater(accountID: account.id, revision: consentRevision)
+        let serverSettingsAtChange = pushServerSettings
+        let serverURLAtChange = (try? serverSettingsAtChange.resolvedServerURL())?.absoluteString
+        if wasServerMonitoring, !isServerMonitoring {
+            recordServerAccountDeletionIntent(
+                accountID: account.id,
+                consentRevision: consentRevision,
+                serverSettings: serverSettingsAtChange
+            )
+        }
         monitorSettings[account.id] = settings
         persistMonitorSettings()
         publishSnapshots()
         Task {
+            if wasServerMonitoring != isServerMonitoring {
+                if isServerMonitoring {
+                    await uploadServerAccount(account)
+                } else if serverSettingsAtChange.mode != .disabled {
+                    do {
+                        try await deleteServerAccount(
+                            settings: serverSettingsAtChange,
+                            accountID: account.id,
+                            consentRevision: consentRevision
+                        )
+                        clearServerAccountDeletionIntent(
+                            accountID: account.id,
+                            through: consentRevision,
+                            serverSettings: serverSettingsAtChange
+                        )
+                    } catch {
+                        guard let currentAccount = accounts.first(where: { $0.id == account.id })
+                        else { return }
+                        let currentSettings = self.settings(for: currentAccount)
+                        let currentServerURL = (try? pushServerSettings.resolvedServerURL())?
+                            .absoluteString
+                        guard currentSettings.selfHostedServerConsentRevision == consentRevision,
+                              !hasServerConsent(currentSettings, account: currentAccount),
+                              currentServerURL == serverURLAtChange else { return }
+                        let message = "Monitoring is off locally, but the Worker copy could not be removed: \(error.localizedDescription)"
+                        errorMessage = message
+                        pushServerStatus = .failed(message)
+                    }
+                }
+            } else if isServerMonitoring,
+                      previousSettings.missingQuotaHistoryBehaviors
+                        != settings.missingQuotaHistoryBehaviors {
+                await uploadServerAccount(account)
+            }
             if previousSettings.notifyAboutResets != settings.notifyAboutResets {
                 if settings.notifyAboutResets, !account.isDemo {
                     await UsageNotificationService.requestProminentAuthorization()
@@ -691,39 +1058,185 @@ final class AppStore {
         Task { await updateLiveActivity() }
     }
 
-    func setPushServerSettings(_ settings: PushServerSettings, accessKey: String = "") {
-        if settings.mode != .disabled {
-            do {
-                guard let serverURL = try settings.resolvedServerURL() else { return }
-                let trimmedKey = accessKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmedKey.isEmpty {
-                    guard trimmedKey.count >= 32 else {
-                        throw PushServerError.missingServerAccessKey
-                    }
-                    try KeychainStore.savePushServerAccessKey(trimmedKey, for: serverURL)
-                }
-                _ = try KeychainStore.loadPushServerAccessKey(for: serverURL)
-            } catch {
-                pushServerStatus = .failed(error.localizedDescription)
-                return
+    func confirmPushServerLink(
+        _ draft: WorkerLinkDraft,
+        monitoringAccountIDs: Set<UUID>,
+        interval: RefreshInterval,
+        userConfirmedCredentialUpload: Bool
+    ) throws {
+        guard userConfirmedCredentialUpload else {
+            throw PushServerError.userConfirmationRequired
+        }
+        guard pendingPushServerCleanupSettings == nil else {
+            throw PushServerError.serverCleanupRequired
+        }
+        let serverURL = draft.serverURL
+        if case let .pairing(payload) = draft {
+            try payload.validateNotExpired()
+        }
+
+        let enrollment: PushServerEnrollment
+        switch draft {
+        case let .pairing(payload):
+            enrollment = .pairing(payload)
+        case let .manual(_, _, accessKey):
+            let normalizedKey = accessKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard normalizedKey.count >= 32 else { throw PushServerError.missingServerAccessKey }
+            try KeychainStore.savePushServerAccessKey(normalizedKey, for: serverURL)
+            enrollment = .accessKey(normalizedKey)
+        }
+
+        let previousSettings = pushServerSettings
+        let previousURL = try? previousSettings.resolvedServerURL()
+        let previouslyEnabled = Set(
+            accounts.filter { isServerMonitoringEnabled(for: $0) }.map(\.id)
+        )
+        let eligibleIDs = Set(accounts.compactMap { account -> UUID? in
+            guard monitoringAccountIDs.contains(account.id),
+                  !account.isDemo,
+                  account.providerID.supportsOffDeviceMonitoring else { return nil }
+            return account.id
+        })
+        if previousSettings.mode != .disabled, previousURL != serverURL {
+            pendingPushServerCleanupSettings = previousSettings
+            persistPendingServerCleanup()
+        }
+
+        var newAccountDeletions: [UUID: Int64] = [:]
+        for account in accounts {
+            var accountSettings = settings(for: account)
+            let enabled = eligibleIDs.contains(account.id)
+            let hadConsentForThisServer = accountSettings.monitorOnSelfHostedServer
+                && accountSettings.selfHostedServerConsentURL == serverURL.absoluteString
+            let previousRevision = max(
+                accountSettings.selfHostedServerConsentRevision,
+                serverConsentHighWater[account.id] ?? 0
+            )
+            if enabled {
+                accountSettings.selfHostedServerConsentRevision = hadConsentForThisServer
+                    ? max(1, previousRevision)
+                    : nextServerConsentRevision(
+                        for: account.id,
+                        after: previousRevision
+                    )
+            } else if accountSettings.monitorOnSelfHostedServer {
+                accountSettings.selfHostedServerConsentRevision = nextServerConsentRevision(
+                    for: account.id,
+                    after: previousRevision
+                )
+            } else {
+                accountSettings.selfHostedServerConsentRevision = previousRevision
+            }
+            recordServerConsentHighWater(
+                accountID: account.id,
+                revision: accountSettings.selfHostedServerConsentRevision
+            )
+            if previousURL == serverURL,
+               previouslyEnabled.contains(account.id),
+               !enabled {
+                recordServerAccountDeletionIntent(
+                    accountID: account.id,
+                    consentRevision: accountSettings.selfHostedServerConsentRevision,
+                    serverSettings: previousSettings
+                )
+            }
+            accountSettings.monitorOnSelfHostedServer = enabled
+            accountSettings.selfHostedServerConsentURL = enabled ? serverURL.absoluteString : nil
+            monitorSettings[account.id] = accountSettings
+            if previousURL == serverURL,
+               previouslyEnabled.contains(account.id),
+               !enabled {
+                newAccountDeletions[account.id] = accountSettings
+                    .selfHostedServerConsentRevision
             }
         }
-        let previousSettings = pushServerSettings
+        persistMonitorSettings()
+        publishSnapshots()
+
+        let settings = PushServerSettings(
+            mode: .custom,
+            customServerURL: serverURL.absoluteString,
+            serverMonitoringInterval: interval
+        )
         pushServerSettings = settings
         UserDefaults.standard.set(
             try? JSONEncoder().encode(settings),
             forKey: pushServerSettingsKey
         )
-        pushServerStatus = settings.mode == .disabled ? .disabled : .waitingForDeviceToken
+        pendingPushServerEnrollment = enrollment
+        var accountDeletions = newAccountDeletions
+        if pendingServerAccountDeletionURL == serverURL.absoluteString {
+            for (accountID, revision) in pendingServerAccountDeletions {
+                accountDeletions[accountID] = max(
+                    accountDeletions[accountID] ?? 0,
+                    revision
+                )
+            }
+        }
+        pendingServerAccountDeletions = accountDeletions
+        pendingServerAccountDeletionURL = pendingServerAccountDeletions.isEmpty
+            ? nil : serverURL.absoluteString
+        persistPendingServerCleanup()
+        pushServerStatus = .waitingForDeviceToken
         Task { await transitionPushServer(from: previousSettings, to: settings) }
     }
 
-    func hasPushServerAccessKey(for settings: PushServerSettings) -> Bool {
-        guard let serverURL = try? settings.resolvedServerURL() else { return false }
-        return (try? KeychainStore.loadPushServerAccessKey(for: serverURL)) != nil
+    func updatePushServerMonitoringInterval(_ interval: RefreshInterval) {
+        guard pushServerSettings.mode != .disabled else { return }
+        pushServerSettings.serverMonitoringInterval = interval
+        UserDefaults.standard.set(
+            try? JSONEncoder().encode(pushServerSettings),
+            forKey: pushServerSettingsKey
+        )
+        Task {
+            for account in accounts where isServerMonitoringEnabled(for: account) {
+                await uploadServerAccount(account)
+            }
+        }
+    }
+
+    func disablePushServer() {
+        let previousSettings = pushServerSettings
+        let cleanupSettings = pendingPushServerCleanupSettings ?? previousSettings
+        if cleanupSettings.mode != .disabled {
+            pendingPushServerCleanupSettings = cleanupSettings
+            persistPendingServerCleanup()
+        }
+        for account in accounts {
+            var accountSettings = settings(for: account)
+            if accountSettings.monitorOnSelfHostedServer {
+                accountSettings.selfHostedServerConsentRevision = nextServerConsentRevision(
+                    for: account.id,
+                    after: accountSettings.selfHostedServerConsentRevision
+                )
+            }
+            accountSettings.monitorOnSelfHostedServer = false
+            accountSettings.selfHostedServerConsentURL = nil
+            monitorSettings[account.id] = accountSettings
+        }
+        persistMonitorSettings()
+        publishSnapshots()
+        pendingPushServerEnrollment = nil
+        pendingServerAccountDeletions = [:]
+        pendingServerAccountDeletionURL = nil
+        let disabledSettings = PushServerSettings()
+        pushServerSettings = disabledSettings
+        UserDefaults.standard.set(
+            try? JSONEncoder().encode(pushServerSettings),
+            forKey: pushServerSettingsKey
+        )
+        persistPendingServerCleanup()
+        pushServerStatus = cleanupSettings.mode == .disabled ? .disabled : .disconnecting
+        Task { await transitionPushServer(from: cleanupSettings, to: disabledSettings) }
     }
 
     func retryPushRegistration() {
+        if let cleanup = pendingPushServerCleanupSettings {
+            pushServerStatus = .disconnecting
+            let target = preparePushServerCleanupTarget(cleanup)
+            Task { await transitionPushServer(from: cleanup, to: target) }
+            return
+        }
         guard pushServerSettings.mode != .disabled else { return }
         pushServerStatus = .waitingForDeviceToken
         RemotePushCoordinator.shared.requestRegistrationIfNeeded()
@@ -749,13 +1262,95 @@ final class AppStore {
             pushServerStatus = .disabled
             return
         }
+        guard let serverURL = try? settings.resolvedServerURL() else {
+            pushServerStatus = .failed(PushServerError.invalidServerURL.localizedDescription)
+            return
+        }
+        let origin = serverURL.absoluteString
+        await serverRegistrationOperationGate.acquire(origin: origin)
+        guard (try? pushServerSettings.resolvedServerURL()) == serverURL else {
+            await serverRegistrationOperationGate.release(origin: origin)
+            return
+        }
+        await performPushRegistration(
+            deviceToken: deviceToken,
+            settings: pushServerSettings,
+            serverURL: serverURL,
+            origin: origin
+        )
+        await serverRegistrationOperationGate.release(origin: origin)
+    }
+
+    private func performPushRegistration(
+        deviceToken: Data,
+        settings: PushServerSettings,
+        serverURL: URL,
+        origin: String
+    ) async {
+        let enrollment = pendingPushServerEnrollment
         pushServerStatus = .registering
         do {
-            try await PushServerClient.register(settings: settings, deviceToken: deviceToken)
-            guard pushServerSettings == settings else { return }
-            pushServerStatus = .registered
+            try await PushServerClient.register(
+                settings: settings,
+                deviceToken: deviceToken,
+                enrollment: enrollment
+            )
+            guard (try? pushServerSettings.resolvedServerURL()) == serverURL else { return }
+            if pendingPushServerEnrollment == enrollment {
+                pendingPushServerEnrollment = nil
+                KeychainStore.deletePushServerAccessKey(for: serverURL)
+            }
+            var cleanupFailure: Error?
+            if pendingServerAccountDeletionURL == origin {
+                for (accountID, consentRevision) in Array(pendingServerAccountDeletions) {
+                    do {
+                        try await deleteServerAccount(
+                            settings: settings,
+                            accountID: accountID,
+                            consentRevision: consentRevision
+                        )
+                        clearServerAccountDeletionIntent(
+                            accountID: accountID,
+                            through: consentRevision,
+                            serverSettings: settings
+                        )
+                    } catch let PushServerError.serverRejected(code) where code == 409 {
+                        if let currentAccount = accounts.first(where: { $0.id == accountID }) {
+                            let currentSettings = self.settings(for: currentAccount)
+                            if hasServerConsent(currentSettings, account: currentAccount),
+                               currentSettings.selfHostedServerConsentRevision
+                                > consentRevision {
+                                clearServerAccountDeletionIntent(
+                                    accountID: accountID,
+                                    through: consentRevision,
+                                    serverSettings: settings
+                                )
+                                continue
+                            }
+                        }
+                        cleanupFailure = PushServerError.serverRejected(code)
+                    } catch {
+                        cleanupFailure = error
+                    }
+                }
+            }
+            if pendingServerAccountDeletions.isEmpty {
+                pendingServerAccountDeletionURL = nil
+            }
+            persistPendingServerCleanup()
+            for account in accounts where isServerMonitoringEnabled(for: account) {
+                await uploadServerAccount(account)
+            }
+            guard (try? pushServerSettings.resolvedServerURL()) == serverURL else { return }
+            if let cleanupFailure {
+                let message = "Worker linked, but old account credentials could not be removed: \(cleanupFailure.localizedDescription)"
+                errorMessage = message
+                pushServerStatus = .failed(message)
+            } else {
+                pushServerStatus = .registered
+            }
         } catch {
-            guard pushServerSettings == settings else { return }
+            guard (try? pushServerSettings.resolvedServerURL()) == serverURL else { return }
             pushServerStatus = .failed(error.localizedDescription)
         }
     }
@@ -771,9 +1366,32 @@ final class AppStore {
         let newURL = try? settings.resolvedServerURL()
         if previousSettings.mode != .disabled,
            (settings.mode == .disabled || previousURL != newURL) {
-            try? await PushServerClient.unregister(settings: previousSettings)
+            if pendingPushServerCleanupSettings == nil {
+                pendingPushServerCleanupSettings = previousSettings
+                persistPendingServerCleanup()
+            }
+            guard pendingPushServerCleanupSettings == previousSettings else { return }
+            pushServerStatus = .disconnecting
+            do {
+                try await unregisterPushServer(settings: previousSettings)
+                guard pendingPushServerCleanupSettings == previousSettings else { return }
+                pendingPushServerCleanupSettings = nil
+                if pendingServerAccountDeletionURL == previousURL?.absoluteString {
+                    pendingServerAccountDeletions = [:]
+                    pendingServerAccountDeletionURL = nil
+                }
+                persistPendingServerCleanup()
+            } catch {
+                guard pendingPushServerCleanupSettings == previousSettings else { return }
+                let host = previousURL?.host ?? "the previous Worker"
+                let message = "Couldn’t confirm removal from \(host): \(error.localizedDescription)"
+                pushServerStatus = .failed(message)
+                errorMessage = message
+                return
+            }
         }
-        guard pushServerSettings == settings, settings.mode != .disabled else {
+        guard settings.mode != .disabled,
+              (try? pushServerSettings.resolvedServerURL()) == newURL else {
             if pushServerSettings.mode == .disabled { pushServerStatus = .disabled }
             return
         }
@@ -785,21 +1403,83 @@ final class AppStore {
         }
     }
 
+    private func preparePushServerCleanupTarget(
+        _ cleanup: PushServerSettings
+    ) -> PushServerSettings {
+        guard ServerMonitoringRecovery.cleanupMatchesCurrentWorker(
+            cleanup: cleanup,
+            current: pushServerSettings
+        ) else {
+            return pushServerSettings
+        }
+
+        // A crash can occur after the old Worker cleanup receipt is persisted but before the
+        // new target is. The intended target cannot be reconstructed safely, so fail closed:
+        // unregister the known Worker and require the user to review the new link again.
+        for account in accounts {
+            var accountSettings = settings(for: account)
+            accountSettings.monitorOnSelfHostedServer = false
+            accountSettings.selfHostedServerConsentURL = nil
+            monitorSettings[account.id] = accountSettings
+        }
+        persistMonitorSettings()
+        publishSnapshots()
+        pendingPushServerEnrollment = nil
+        let disabledSettings = PushServerSettings()
+        pushServerSettings = disabledSettings
+        UserDefaults.standard.set(
+            try? JSONEncoder().encode(disabledSettings),
+            forKey: pushServerSettingsKey
+        )
+        pushServerStatus = .disconnecting
+        return disabledSettings
+    }
+
+    private func unregisterPushServer(settings: PushServerSettings) async throws {
+        guard let serverURL = try settings.resolvedServerURL() else {
+            throw PushServerError.invalidServerURL
+        }
+        let origin = serverURL.absoluteString
+        await serverRegistrationOperationGate.acquire(origin: origin)
+        do {
+            try await PushServerClient.unregister(settings: settings)
+            await serverRegistrationOperationGate.release(origin: origin)
+        } catch {
+            await serverRegistrationOperationGate.release(origin: origin)
+            throw error
+        }
+    }
+
+    func reconcileLiveActivityAfterForegroundActivation() async {
+        await updateLiveActivity()
+        await reconcileLiveActivity()
+    }
 
     private func reconcileLiveActivity(at date: Date = .now) async {
-        let running = !Activity<UsageActivityAttributes>.activities.isEmpty
+        let running = !Self.runningGlobalActivities.isEmpty
         let shouldRun: Bool
         switch liveActivitySettings.mode {
         case .automatic: shouldRun = !activityEvents(at: date, matchingRules: true).isEmpty
         case .always: shouldRun = !activityEvents(at: date, matchingRules: false).isEmpty
         case .disabled: shouldRun = false
         }
-        if shouldRun, !running {
+        if shouldRun, !running, UIApplication.shared.applicationState == .active {
             await startGlobalLiveActivity()
         } else if !shouldRun, running {
             await endGlobalLiveActivity()
+        } else if shouldRun, running,
+                  UIApplication.shared.applicationState == .active,
+                  LiveActivityLifecyclePolicy.shouldRotate(startedAt: liveActivityStartedAt,
+                                                           at: date) {
+            await endGlobalLiveActivity()
+            await startGlobalLiveActivity()
         } else {
             hasLiveActivity = running
+            if running, liveActivityStartedAt == nil {
+                setLiveActivityStartedAt(date)
+            } else if !running {
+                setLiveActivityStartedAt(nil)
+            }
         }
     }
 
@@ -902,17 +1582,177 @@ final class AppStore {
         for activity in legacyActivities {
             await activity.end(ActivityContent(state: state, staleDate: nil), dismissalPolicy: .immediate)
         }
-        let globalActivities = Activity<UsageActivityAttributes>.activities.filter {
-            $0.attributes.accountID == Self.globalActivityID
-        }
+        let globalActivities = Self.runningGlobalActivities
         for activity in globalActivities {
-            await activity.update(ActivityContent(state: state, staleDate: liveActivityStaleDate))
+            await activity.update(ActivityContent(state: state, staleDate: nil))
         }
-        hasLiveActivity = !Activity<UsageActivityAttributes>.activities.isEmpty
+        hasLiveActivity = !globalActivities.isEmpty
+        if hasLiveActivity, liveActivityStartedAt == nil {
+            setLiveActivityStartedAt(.now)
+        } else if !hasLiveActivity {
+            setLiveActivityStartedAt(nil)
+        }
     }
 
-    private var liveActivityStaleDate: Date? {
-        refreshSettings.backgroundInterval.timeInterval.map { Date.now.addingTimeInterval($0) }
+    private func setLiveActivityStartedAt(_ date: Date?) {
+        liveActivityStartedAt = date
+        persistLiveActivityStartedAt()
+    }
+
+    private func persistLiveActivityStartedAt() {
+        if let liveActivityStartedAt {
+            UserDefaults.standard.set(liveActivityStartedAt, forKey: liveActivityStartedAtKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: liveActivityStartedAtKey)
+        }
+    }
+
+    private func persistPendingServerCleanup() {
+        if let pendingPushServerCleanupSettings {
+            UserDefaults.standard.set(
+                try? JSONEncoder().encode(pendingPushServerCleanupSettings),
+                forKey: pendingPushServerCleanupKey
+            )
+        } else {
+            UserDefaults.standard.removeObject(forKey: pendingPushServerCleanupKey)
+        }
+        if pendingServerAccountDeletions.isEmpty {
+            UserDefaults.standard.removeObject(forKey: pendingServerAccountDeletionsKey)
+        } else {
+            UserDefaults.standard.set(
+                try? JSONEncoder().encode(pendingServerAccountDeletions),
+                forKey: pendingServerAccountDeletionsKey
+            )
+        }
+        if let pendingServerAccountDeletionURL {
+            UserDefaults.standard.set(
+                pendingServerAccountDeletionURL,
+                forKey: pendingServerAccountDeletionURLKey
+            )
+        } else {
+            UserDefaults.standard.removeObject(forKey: pendingServerAccountDeletionURLKey)
+        }
+    }
+
+    private func recordServerAccountDeletionIntent(
+        accountID: UUID,
+        consentRevision: Int64,
+        serverSettings: PushServerSettings
+    ) {
+        guard consentRevision > 0,
+              let serverURL = try? serverSettings.resolvedServerURL() else { return }
+        let normalizedURL = serverURL.absoluteString
+        guard pendingServerAccountDeletions.isEmpty
+                || pendingServerAccountDeletionURL == normalizedURL else {
+            return
+        }
+        pendingServerAccountDeletions[accountID] = max(
+            pendingServerAccountDeletions[accountID] ?? 0,
+            consentRevision
+        )
+        recordServerConsentHighWater(accountID: accountID, revision: consentRevision)
+        pendingServerAccountDeletionURL = normalizedURL
+        persistPendingServerCleanup()
+    }
+
+    private func clearServerAccountDeletionIntent(
+        accountID: UUID,
+        through consentRevision: Int64,
+        serverSettings: PushServerSettings
+    ) {
+        guard let serverURL = try? serverSettings.resolvedServerURL(),
+              pendingServerAccountDeletionURL == serverURL.absoluteString,
+              (pendingServerAccountDeletions[accountID] ?? .max)
+                <= consentRevision else { return }
+        pendingServerAccountDeletions.removeValue(forKey: accountID)
+        if pendingServerAccountDeletions.isEmpty {
+            pendingServerAccountDeletionURL = nil
+        }
+        persistPendingServerCleanup()
+    }
+
+    private func deleteServerAccount(
+        settings: PushServerSettings,
+        accountID: UUID,
+        consentRevision: Int64
+    ) async throws {
+        await serverAccountOperationGate.acquire(accountID: accountID)
+        do {
+            try await PushServerClient.deleteAccount(
+                settings: settings,
+                accountID: accountID,
+                consentRevision: consentRevision
+            )
+            await serverAccountOperationGate.release(accountID: accountID)
+        } catch {
+            await serverAccountOperationGate.release(accountID: accountID)
+            throw error
+        }
+    }
+
+    private func nextServerConsentRevision(for accountID: UUID, after revision: Int64) -> Int64 {
+        let highWater = max(
+            revision,
+            max(
+                serverConsentHighWater[accountID] ?? 0,
+                pendingServerAccountDeletions[accountID] ?? 0
+            )
+        )
+        let normalized = max(0, min(highWater, Self.maximumServerConsentRevision - 1))
+        let next = normalized + 1
+        recordServerConsentHighWater(accountID: accountID, revision: next)
+        return next
+    }
+
+    private func recordServerConsentHighWater(accountID: UUID, revision: Int64) {
+        guard revision > (serverConsentHighWater[accountID] ?? 0) else { return }
+        serverConsentHighWater[accountID] = revision
+        UserDefaults.standard.set(
+            try? JSONEncoder().encode(serverConsentHighWater),
+            forKey: serverConsentHighWaterKey
+        )
+    }
+
+    private func normalizeServerConsentRevisions() {
+        var changed = false
+        for accountID in Array(monitorSettings.keys) {
+            guard var settings = monitorSettings[accountID],
+                  settings.monitorOnSelfHostedServer,
+                  settings.selfHostedServerConsentRevision <= 0 else { continue }
+            settings.selfHostedServerConsentRevision = 1
+            monitorSettings[accountID] = settings
+            recordServerConsentHighWater(accountID: accountID, revision: 1)
+            changed = true
+        }
+        for (accountID, settings) in monitorSettings {
+            recordServerConsentHighWater(
+                accountID: accountID,
+                revision: settings.selfHostedServerConsentRevision
+            )
+        }
+        for (accountID, revision) in pendingServerAccountDeletions {
+            recordServerConsentHighWater(accountID: accountID, revision: revision)
+        }
+        if changed { persistMonitorSettings() }
+    }
+
+    private func reconcilePendingServerAccountDeletionConsents() {
+        guard let serverURL = try? pushServerSettings.resolvedServerURL(),
+              pendingServerAccountDeletionURL == serverURL.absoluteString else { return }
+        var changed = false
+        for (accountID, pendingRevision) in pendingServerAccountDeletions {
+            guard let settings = monitorSettings[accountID] else { continue }
+            let reconciled = ServerMonitoringRecovery.reconcilingPendingDeletion(
+                in: settings,
+                serverURL: serverURL.absoluteString,
+                pendingRevision: pendingRevision
+            )
+            guard reconciled != settings else { continue }
+            monitorSettings[accountID] = reconciled
+            recordServerConsentHighWater(accountID: accountID, revision: pendingRevision)
+            changed = true
+        }
+        if changed { persistMonitorSettings() }
     }
 
     private func persistAccounts() {
@@ -1024,6 +1864,188 @@ final class AppStore {
             // History is supplementary: a storage problem must not turn a successful provider
             // refresh into an authentication or update failure.
             historyStorageError = error.localizedDescription
+        }
+    }
+
+    private func uploadServerAccount(_ account: MonitoredAccount) async {
+        await serverAccountOperationGate.acquire(accountID: account.id)
+        await performServerAccountUpload(account)
+        await serverAccountOperationGate.release(accountID: account.id)
+    }
+
+    private func performServerAccountUpload(_ account: MonitoredAccount) async {
+        var accountSettings = settings(for: account)
+        guard !account.isDemo,
+              serverMonitoringEnabled(accountSettings, account: account),
+              pushServerSettings.mode != .disabled,
+              let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
+        accountSettings.selfHostedServerConsentRevision = nextServerConsentRevision(
+            for: account.id,
+            after: accountSettings.selfHostedServerConsentRevision
+        )
+        let consentRevision = accountSettings.selfHostedServerConsentRevision
+        monitorSettings[account.id] = accountSettings
+        persistMonitorSettings()
+        let activeServerSettings = pushServerSettings
+        do {
+            let credentials = try KeychainStore.load(for: account.id)
+            let result = try await PushServerClient.uploadAccount(
+                settings: activeServerSettings,
+                account: currentAccount,
+                credentials: credentials,
+                missingQuotas: serverMissingQuotaDescriptors(for: currentAccount),
+                consentRevision: consentRevision
+            )
+            let currentServerURL = (try? activeServerSettings
+                .resolvedServerURL())?.absoluteString
+            if pendingServerAccountDeletionURL == currentServerURL,
+               let pendingRevision = pendingServerAccountDeletions[account.id],
+               pendingRevision < consentRevision {
+                clearServerAccountDeletionIntent(
+                    accountID: account.id,
+                    through: pendingRevision,
+                    serverSettings: activeServerSettings
+                )
+            }
+            await consumeServerResult(
+                result,
+                for: currentAccount,
+                consentRevision: consentRevision,
+                deliverNotifications: false
+            )
+        } catch {
+            guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
+            let currentSettings = settings(for: currentAccount)
+            guard serverMonitoringEnabled(currentSettings, account: currentAccount),
+                  currentSettings.selfHostedServerConsentRevision == consentRevision else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func syncServerAccount(_ account: MonitoredAccount,
+                                   publishChanges: Bool) async {
+        await serverAccountOperationGate.acquire(accountID: account.id)
+        await performServerAccountSync(account, publishChanges: publishChanges)
+        await serverAccountOperationGate.release(accountID: account.id)
+    }
+
+    private func performServerAccountSync(_ account: MonitoredAccount,
+                                          publishChanges: Bool) async {
+        let accountSettings = settings(for: account)
+        guard !account.isDemo,
+              serverMonitoringEnabled(accountSettings, account: account),
+              pushServerSettings.mode != .disabled,
+              accounts.contains(where: { $0.id == account.id }) else { return }
+        let consentRevision = accountSettings.selfHostedServerConsentRevision
+        let earliest = Date.now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
+        let latestServerPoint = usageHistory.lazy
+            .filter { $0.accountID == account.id && $0.source == .server }
+            .map(\.recordedAt)
+            .max()
+        let since = max(earliest, latestServerPoint?.addingTimeInterval(-60) ?? earliest)
+        do {
+            let currentAccount = accounts.first(where: { $0.id == account.id }) ?? account
+            let result = try await PushServerClient.syncAccount(
+                settings: pushServerSettings,
+                account: currentAccount,
+                since: since
+            )
+            await consumeServerResult(
+                result,
+                for: currentAccount,
+                consentRevision: consentRevision,
+                deliverNotifications: publishChanges
+            )
+        } catch let PushServerError.serverRejected(code) where code == 404 {
+            // A newly enabled account may not have reached the Worker yet. The upload after the
+            // local refresh creates it without turning a normal refresh into a failure.
+        } catch {
+            guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
+            let currentSettings = settings(for: currentAccount)
+            guard serverMonitoringEnabled(currentSettings, account: currentAccount),
+                  currentSettings.selfHostedServerConsentRevision == consentRevision else { return }
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func serverMissingQuotaDescriptors(for account: MonitoredAccount)
+        -> [ServerMissingQuotaDescriptor] {
+        let selectedIDs = settings(for: account).missingQuotaHistoryBehaviors
+            .filter { $0.value == .recordAsFull }
+            .map(\.key)
+            .sorted()
+        let windowsByID = Dictionary(
+            uniqueKeysWithValues: (snapshots[account.id]?.usageWindows ?? []).map { ($0.metricID, $0) }
+        )
+        let latestHistoryByID = usageHistory
+            .filter { $0.accountID == account.id }
+            .reduce(into: [String: UsageHistoryPoint]()) { result, point in
+                if (result[point.metricID]?.recordedAt ?? .distantPast) < point.recordedAt {
+                    result[point.metricID] = point
+                }
+            }
+        return selectedIDs.compactMap { metricID in
+            if let window = windowsByID[metricID] {
+                return ServerMissingQuotaDescriptor(
+                    metricID: metricID,
+                    title: window.displayTitle,
+                    kind: window.kind,
+                    windowMinutes: window.windowMinutes,
+                    resetsAt: window.resetsAt
+                )
+            }
+            guard let point = latestHistoryByID[metricID] else { return nil }
+            return ServerMissingQuotaDescriptor(
+                metricID: metricID,
+                title: point.metricTitle,
+                kind: point.kind,
+                windowMinutes: point.windowMinutes,
+                resetsAt: point.resetsAt
+            )
+        }
+    }
+
+    private func consumeServerResult(_ result: ServerAccountSyncResult,
+                                     for account: MonitoredAccount,
+                                     consentRevision: Int64,
+                                     deliverNotifications: Bool) async {
+        guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
+        let currentSettings = settings(for: currentAccount)
+        guard serverMonitoringEnabled(currentSettings, account: currentAccount),
+              currentSettings.selfHostedServerConsentRevision == consentRevision,
+              result.consentRevision == consentRevision else { return }
+        do {
+            usageHistory = try await historyStore.mergeServerHistory(
+                result.history,
+                account: account
+            )
+            historyStorageError = nil
+        } catch {
+            historyStorageError = error.localizedDescription
+        }
+
+        guard let snapshot = result.snapshot,
+              snapshot.fetchedAt > (snapshots[account.id]?.fetchedAt ?? .distantPast),
+              accounts.contains(where: { $0.id == account.id }) else {
+            if let lastError = result.lastError, !lastError.isEmpty {
+                errorMessage = lastError
+            }
+            return
+        }
+        mergeLatestPlan(snapshot.plan, for: account.id)
+        await recordSuccessfulSnapshot(
+            snapshot,
+            for: currentAccount,
+            source: .server,
+            deliverNotifications: deliverNotifications
+        )
+        snapshots[account.id] = snapshot
+        refreshFailures.removeValue(forKey: account.id)
+        if deliverNotifications {
+            publishSnapshots()
+            await reconcileScheduledResetNotifications()
+            await updateLiveActivity()
+            await reconcileLiveActivity()
         }
     }
 

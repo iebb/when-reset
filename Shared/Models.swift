@@ -21,6 +21,10 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
 
     var supportsBankedResets: Bool { self == .chatGPT }
 
+    /// Keep Copilot credentials on-device to satisfy App Review Guideline 5.1.1(v).
+    /// The account remains fully available for on-device refreshes.
+    var supportsOffDeviceMonitoring: Bool { self != .githubCopilot }
+
     func sectionTitle(plan: String?) -> String {
         guard let plan = planDisplayName(plan) else { return displayName }
         if plan.localizedCaseInsensitiveCompare(displayName) == .orderedSame
@@ -177,6 +181,9 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     var liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:]
     var bankedResetLiveActivityRule = LiveActivityQuotaRule()
     var missingQuotaHistoryBehaviors: [String: MissingQuotaHistoryBehavior] = [:]
+    var monitorOnSelfHostedServer = false
+    var selfHostedServerConsentURL: String?
+    var selfHostedServerConsentRevision: Int64 = 0
 
     init(notifyAboutResets: Bool = true, notifyAtScheduledReset: Bool = true,
          showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
@@ -185,7 +192,10 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
          defaultLiveActivityRule: LiveActivityQuotaRule = .init(),
          liveActivityQuotaRules: [String: LiveActivityQuotaRule] = [:],
          bankedResetLiveActivityRule: LiveActivityQuotaRule = .init(),
-         missingQuotaHistoryBehaviors: [String: MissingQuotaHistoryBehavior] = [:]) {
+         missingQuotaHistoryBehaviors: [String: MissingQuotaHistoryBehavior] = [:],
+         monitorOnSelfHostedServer: Bool = false,
+         selfHostedServerConsentURL: String? = nil,
+         selfHostedServerConsentRevision: Int64 = 0) {
         self.notifyAboutResets = notifyAboutResets
         self.notifyAtScheduledReset = notifyAtScheduledReset
         self.showBankedResets = showBankedResets
@@ -197,6 +207,9 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         self.liveActivityQuotaRules = liveActivityQuotaRules
         self.bankedResetLiveActivityRule = bankedResetLiveActivityRule
         self.missingQuotaHistoryBehaviors = missingQuotaHistoryBehaviors
+        self.monitorOnSelfHostedServer = monitorOnSelfHostedServer
+        self.selfHostedServerConsentURL = selfHostedServerConsentURL
+        self.selfHostedServerConsentRevision = selfHostedServerConsentRevision
     }
 
     init(from decoder: Decoder) throws {
@@ -222,6 +235,18 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
             [String: MissingQuotaHistoryBehavior].self,
             forKey: .missingQuotaHistoryBehaviors
         ) ?? [:]
+        monitorOnSelfHostedServer = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .monitorOnSelfHostedServer
+        ) ?? false
+        selfHostedServerConsentURL = try values.decodeIfPresent(
+            String.self,
+            forKey: .selfHostedServerConsentURL
+        )
+        selfHostedServerConsentRevision = try values.decodeIfPresent(
+            Int64.self,
+            forKey: .selfHostedServerConsentRevision
+        ) ?? 0
     }
 
     func shows(_ window: UsageWindow) -> Bool { !hiddenMetricIDs.contains(window.metricID) }
@@ -245,6 +270,8 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         case pinnedLiveActivityMetricIDs
         case defaultLiveActivityRule, liveActivityQuotaRules, bankedResetLiveActivityRule
         case missingQuotaHistoryBehaviors
+        case monitorOnSelfHostedServer, selfHostedServerConsentURL
+        case selfHostedServerConsentRevision
     }
 }
 

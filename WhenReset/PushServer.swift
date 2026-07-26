@@ -17,16 +17,23 @@ enum PushServerMode: String, Codable, CaseIterable, Hashable, Sendable {
 struct PushServerSettings: Codable, Hashable, Sendable {
     var mode: PushServerMode = .disabled
     var customServerURL = ""
+    var serverMonitoringInterval: RefreshInterval = .fifteenMinutes
 
-    init(mode: PushServerMode = .disabled, customServerURL: String = "") {
+    init(mode: PushServerMode = .disabled, customServerURL: String = "",
+         serverMonitoringInterval: RefreshInterval = .fifteenMinutes) {
         self.mode = mode
         self.customServerURL = customServerURL
+        self.serverMonitoringInterval = serverMonitoringInterval
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         mode = try values.decodeIfPresent(PushServerMode.self, forKey: .mode) ?? .disabled
         customServerURL = try values.decodeIfPresent(String.self, forKey: .customServerURL) ?? ""
+        serverMonitoringInterval = try values.decodeIfPresent(
+            RefreshInterval.self,
+            forKey: .serverMonitoringInterval
+        ) ?? .fifteenMinutes
     }
 
     func resolvedServerURL() throws -> URL? {
@@ -43,6 +50,7 @@ enum PushServerStatus: Equatable, Sendable {
     case disabled
     case waitingForDeviceToken
     case registering
+    case disconnecting
     case registered
     case failed(String)
 
@@ -51,6 +59,7 @@ enum PushServerStatus: Equatable, Sendable {
         case .disabled: "Off"
         case .waitingForDeviceToken: "Waiting for APNs"
         case .registering: "Registering…"
+        case .disconnecting: "Removing old Worker data…"
         case .registered: "Registered"
         case let .failed(message): message
         }
@@ -59,20 +68,36 @@ enum PushServerStatus: Equatable, Sendable {
 
 enum PushServerError: LocalizedError {
     case invalidServerURL
+    case invalidWorkerLink
+    case expiredWorkerLink
+    case workerIdentityMismatch
     case invalidResponse
+    case responseTooLarge
     case serverRejected(Int)
+    case userConfirmationRequired
+    case serverCleanupRequired
     case missingRegistration
     case missingServerAccessKey
     case randomGenerationFailed(OSStatus)
+    case accountMonitoringUnavailable
 
     var errorDescription: String? {
         switch self {
         case .invalidServerURL: "Enter a valid HTTPS server URL."
+        case .invalidWorkerLink: "This isn’t a valid When Reset Worker link."
+        case .expiredWorkerLink: "This Worker link has expired. Generate a new QR code."
+        case .workerIdentityMismatch: "The Worker identity does not match this link."
         case .invalidResponse: "The push server returned an invalid response."
+        case .responseTooLarge: "The push server returned too much data."
         case let .serverRejected(code): "The push server returned HTTP \(code)."
+        case .userConfirmationRequired: "Confirm the Worker link before continuing."
+        case .serverCleanupRequired:
+            "Finish removing the previous Worker before linking another one. Retry cleanup first."
         case .missingRegistration: "Register this device before sending a test refresh."
         case .missingServerAccessKey: "Enter the access key for this self-hosted server."
         case let .randomGenerationFailed(status): "Couldn’t create the device secret (\(status))."
+        case .accountMonitoringUnavailable:
+            "Register this device with the self-hosted server before enabling server monitoring."
         }
     }
 }
@@ -99,6 +124,130 @@ enum PushServerConfiguration {
         guard let url = components.url else { throw PushServerError.invalidServerURL }
         return url
     }
+
+    static func normalizedServerOrigin(_ value: String) throws -> URL {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              components.scheme?.lowercased() == "https",
+              let host = components.host, !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil,
+              components.path.isEmpty || components.path == "/" else {
+            throw PushServerError.invalidServerURL
+        }
+        components.scheme = "https"
+        components.host = host.lowercased()
+        components.path = ""
+        guard let url = components.url else { throw PushServerError.invalidServerURL }
+        return url
+    }
+}
+
+struct WorkerLinkPayload: Identifiable, Hashable, Sendable {
+    static let scheme = "whenreset"
+    static let host = "link-worker"
+    static let maximumURLBytes = 2_048
+
+    var id: UUID { sessionID }
+    let serverURL: URL
+    let sessionID: UUID
+    let token: String
+    let expiresAt: Date
+
+    static func parse(_ value: String, now: Date = .now) throws -> WorkerLinkPayload {
+        guard value.utf8.count <= maximumURLBytes,
+              let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            throw PushServerError.invalidWorkerLink
+        }
+        return try parse(url, now: now)
+    }
+
+    static func parse(_ url: URL, now: Date = .now) throws -> WorkerLinkPayload {
+        guard url.absoluteString.utf8.count <= maximumURLBytes,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == scheme,
+              components.host?.lowercased() == host,
+              components.user == nil, components.password == nil,
+              components.port == nil,
+              components.path.isEmpty || components.path == "/",
+              components.fragment == nil else {
+            throw PushServerError.invalidWorkerLink
+        }
+
+        let items = components.queryItems ?? []
+        let expectedNames: Set<String> = ["v", "server", "session", "token", "expires"]
+        guard items.count == expectedNames.count,
+              Set(items.map(\.name)) == expectedNames else {
+            throw PushServerError.invalidWorkerLink
+        }
+        let values = Dictionary(uniqueKeysWithValues: items.compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
+        guard values.count == expectedNames.count,
+              values["v"] == "1",
+              let server = values["server"],
+              let session = values["session"],
+              let token = values["token"],
+              let expires = values["expires"],
+              let sessionID = UUID(uuidString: session),
+              session == sessionID.uuidString.lowercased(),
+              token.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil,
+              let expirationSeconds = Int64(expires),
+              String(expirationSeconds) == expires else {
+            throw PushServerError.invalidWorkerLink
+        }
+        let expiresAt = Date(timeIntervalSince1970: TimeInterval(expirationSeconds))
+        guard expiresAt > now else { throw PushServerError.expiredWorkerLink }
+        guard expiresAt.timeIntervalSince(now) <= 10 * 60 else {
+            throw PushServerError.invalidWorkerLink
+        }
+        let serverURL: URL
+        do {
+            serverURL = try PushServerConfiguration.normalizedServerOrigin(server)
+        } catch {
+            throw PushServerError.invalidWorkerLink
+        }
+        return WorkerLinkPayload(
+            serverURL: serverURL,
+            sessionID: sessionID,
+            token: token,
+            expiresAt: expiresAt
+        )
+    }
+
+    func validateNotExpired(at date: Date = .now) throws {
+        guard expiresAt > date else { throw PushServerError.expiredWorkerLink }
+    }
+}
+
+enum WorkerLinkDraft: Identifiable, Hashable, Sendable {
+    case pairing(WorkerLinkPayload)
+    case manual(id: UUID, serverURL: URL, accessKey: String)
+
+    var id: UUID {
+        switch self {
+        case let .pairing(payload): payload.id
+        case let .manual(id, _, _): id
+        }
+    }
+
+    var serverURL: URL {
+        switch self {
+        case let .pairing(payload): payload.serverURL
+        case let .manual(_, serverURL, _): serverURL
+        }
+    }
+}
+
+struct WorkerLinkMetadata: Equatable, Sendable {
+    var displayName: String
+    var serverURL: URL
+    var expiresAt: Date?
+}
+
+enum PushServerEnrollment: Hashable, Sendable {
+    case pairing(WorkerLinkPayload)
+    case accessKey(String)
 }
 
 struct PushRegistrationCredentials: Codable, Equatable, Sendable {
@@ -107,7 +256,26 @@ struct PushRegistrationCredentials: Codable, Equatable, Sendable {
     var serverURL: URL
 }
 
+struct ServerAccountSyncResult: Sendable {
+    var consentRevision: Int64
+    var snapshot: UsageSnapshot?
+    var history: [UsageHistoryPoint]
+    var lastSuccessAt: Date?
+    var lastError: String?
+}
+
+struct ServerMissingQuotaDescriptor: Sendable {
+    var metricID: String
+    var title: String
+    var kind: UsageWindowKind?
+    var windowMinutes: Int?
+    var resetsAt: Date?
+}
+
 enum PushServerClient {
+    private static let smallResponseLimit = 16 * 1_024
+    private static let accountResponseLimit = 1_048_576
+
     private struct RegistrationRequest: Encodable {
         var deviceID: String
         var deviceSecret: String
@@ -120,24 +288,486 @@ enum PushServerClient {
         }
     }
 
-    static func register(settings: PushServerSettings, deviceToken: Data) async throws {
+    private struct TokenRotationRequest: Encodable {
+        var apnsToken: String
+
+        enum CodingKeys: String, CodingKey {
+            case apnsToken = "apns_token"
+        }
+    }
+
+    private struct LinkMetadataResponse: Decodable {
+        var version: Int
+        var mode: String
+        var topic: String
+        var serverOrigin: String
+        var displayName: String
+        var expiresAt: TimeInterval
+
+        enum CodingKeys: String, CodingKey {
+            case version, mode, topic
+            case serverOrigin = "server_origin"
+            case displayName = "display_name"
+            case expiresAt = "expires_at"
+        }
+    }
+
+    private struct HealthResponse: Decodable {
+        var ok: Bool
+        var mode: String
+        var topic: String
+    }
+
+    private struct AcknowledgementResponse: Decodable {
+        var ok: Bool
+    }
+
+    private struct CredentialPayload: Encodable {
+        var accessToken: String
+        var refreshToken: String
+        var idToken: String
+        var expiresAt: TimeInterval?
+
+        enum CodingKeys: String, CodingKey {
+            case accessToken = "access_token"
+            case refreshToken = "refresh_token"
+            case idToken = "id_token"
+            case expiresAt = "expires_at"
+        }
+
+        init(_ credentials: AccountCredentials) {
+            accessToken = credentials.accessToken
+            refreshToken = credentials.refreshToken
+            idToken = credentials.idToken
+            expiresAt = credentials.expiresAt?.timeIntervalSince1970
+        }
+
+    }
+
+    private struct AccountUploadRequest: Encodable {
+        var providerID: String
+        var workspaceID: String
+        var plan: String?
+        var refreshIntervalSeconds: Int
+        var consentRevision: Int64
+        var credentials: CredentialPayload
+        var missingQuotas: [MissingQuotaPayload]
+
+        enum CodingKeys: String, CodingKey {
+            case providerID = "provider_id"
+            case workspaceID = "workspace_id"
+            case plan
+            case refreshIntervalSeconds = "refresh_interval_seconds"
+            case consentRevision = "consent_revision"
+            case credentials
+            case missingQuotas = "missing_quotas"
+        }
+    }
+
+    private struct MissingQuotaPayload: Encodable {
+        var metricID: String
+        var title: String
+        var kind: UsageWindowKind?
+        var windowMinutes: Int?
+        var resetsAt: TimeInterval?
+
+        enum CodingKeys: String, CodingKey {
+            case metricID = "metric_id"
+            case title, kind
+            case windowMinutes = "window_minutes"
+            case resetsAt = "resets_at"
+        }
+
+        init(_ descriptor: ServerMissingQuotaDescriptor) {
+            metricID = descriptor.metricID
+            title = descriptor.title
+            kind = descriptor.kind
+            windowMinutes = descriptor.windowMinutes
+            resetsAt = descriptor.resetsAt?.timeIntervalSince1970
+        }
+    }
+
+    private struct RemoteWindow: Decodable {
+        var position: Int
+        var metricID: String
+        var title: String
+        var kind: UsageWindowKind?
+        var windowMinutes: Int?
+        var remainingPercent: Double
+        var resetsAt: TimeInterval
+
+        enum CodingKeys: String, CodingKey {
+            case position
+            case metricID = "metric_id"
+            case title, kind
+            case windowMinutes = "window_minutes"
+            case remainingPercent = "remaining_percent"
+            case resetsAt = "resets_at"
+        }
+
+        var usageWindow: UsageWindow {
+            UsageWindow(
+                title: title,
+                usedPercent: 100 - max(0, min(100, remainingPercent)),
+                resetsAt: Date(timeIntervalSince1970: resetsAt),
+                windowMinutes: windowMinutes,
+                kind: kind,
+                identifier: metricID
+            )
+        }
+    }
+
+    private struct RemoteResetCredit: Decodable {
+        var id: String
+        var expiresAt: TimeInterval?
+        var status: String?
+        var grantedAt: TimeInterval?
+
+        enum CodingKeys: String, CodingKey {
+            case id, status
+            case expiresAt = "expires_at"
+            case grantedAt = "granted_at"
+        }
+
+        var resetCredit: ResetCredit {
+            ResetCredit(
+                id: id,
+                expiresAt: expiresAt.map(Date.init(timeIntervalSince1970:)),
+                status: status,
+                grantedAt: grantedAt.map(Date.init(timeIntervalSince1970:))
+            )
+        }
+    }
+
+    private struct RemoteSnapshot: Decodable {
+        var providerID: ProviderID
+        var plan: String?
+        var fetchedAt: TimeInterval
+        var windows: [RemoteWindow]
+        var availableResetCount: Int
+        var resetCredits: [RemoteResetCredit]
+
+        enum CodingKeys: String, CodingKey {
+            case providerID = "provider_id"
+            case plan
+            case fetchedAt = "fetched_at"
+            case windows
+            case availableResetCount = "available_reset_count"
+            case resetCredits = "reset_credits"
+        }
+
+        func usageSnapshot(account: MonitoredAccount) -> UsageSnapshot? {
+            guard providerID == account.providerID else { return nil }
+            let sorted = windows.sorted { $0.position < $1.position }
+            let converted = sorted.map(\.usageWindow)
+            return UsageSnapshot(
+                accountID: account.id,
+                providerName: account.providerID.displayName,
+                accountName: account.resolvedDisplayName,
+                accountProviderID: account.providerID,
+                accountSymbolName: account.customSymbolName,
+                plan: plan ?? account.plan,
+                primary: converted.first,
+                secondary: converted.dropFirst().first,
+                availableResetCount: availableResetCount,
+                resetCredits: resetCredits.map(\.resetCredit),
+                fetchedAt: Date(timeIntervalSince1970: fetchedAt),
+                extraWindows: converted.count > 2 ? Array(converted.dropFirst(2)) : nil
+            )
+        }
+    }
+
+    private struct RemoteHistoryPoint: Decodable {
+        var providerID: ProviderID
+        var metricID: String
+        var metricTitle: String
+        var kind: UsageWindowKind?
+        var windowMinutes: Int?
+        var remainingPercent: Double
+        var recordedAt: TimeInterval
+        var resetsAt: TimeInterval
+        var secondsUntilReset: TimeInterval
+        var plan: String?
+
+        enum CodingKeys: String, CodingKey {
+            case providerID = "provider_id"
+            case metricID = "metric_id"
+            case metricTitle = "metric_title"
+            case kind
+            case windowMinutes = "window_minutes"
+            case remainingPercent = "remaining_percent"
+            case recordedAt = "recorded_at"
+            case resetsAt = "resets_at"
+            case secondsUntilReset = "seconds_until_reset"
+            case plan
+        }
+
+        func historyPoint(accountID: UUID) -> UsageHistoryPoint {
+            UsageHistoryPoint(
+                accountID: accountID,
+                providerID: providerID,
+                metricID: metricID,
+                metricTitle: metricTitle,
+                kind: kind,
+                windowMinutes: windowMinutes,
+                remainingPercent: remainingPercent,
+                recordedAt: Date(timeIntervalSince1970: recordedAt),
+                resetsAt: Date(timeIntervalSince1970: resetsAt),
+                secondsUntilReset: secondsUntilReset,
+                source: .server,
+                plan: plan
+            )
+        }
+    }
+
+    private struct AccountSyncPage: Decodable {
+        var consentRevision: Int64
+        var snapshot: RemoteSnapshot?
+        var history: [RemoteHistoryPoint]
+        var nextCursor: String?
+        var lastSuccessAt: TimeInterval?
+        var lastError: String?
+
+        enum CodingKeys: String, CodingKey {
+            case snapshot, history
+            case consentRevision = "consent_revision"
+            case nextCursor = "next_cursor"
+            case lastSuccessAt = "last_success_at"
+            case lastError = "last_error"
+        }
+    }
+
+    static func validate(_ draft: WorkerLinkDraft, now: Date = .now) async throws
+        -> WorkerLinkMetadata {
+        switch draft {
+        case let .pairing(payload):
+            try payload.validateNotExpired(at: now)
+            var request = URLRequest(
+                url: payload.serverURL.appending(
+                    path: "v1/link-sessions/\(payload.sessionID.uuidString.lowercased())"
+                )
+            )
+            request.timeoutInterval = 15
+            request.setValue("Bearer \(payload.token)", forHTTPHeaderField: "Authorization")
+            request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+            let (data, response) = try await send(
+                request,
+                maximumResponseBytes: smallResponseLimit,
+                acceptedStatusCodes: [200]
+            )
+            guard response.url == request.url,
+                  response.value(forHTTPHeaderField: "Cache-Control")?
+                    .lowercased().contains("no-store") == true,
+                  let metadata = try? JSONDecoder().decode(LinkMetadataResponse.self, from: data),
+                  metadata.version == 1,
+                  metadata.mode == "self_hosted",
+                  metadata.topic == "ad.neko.when",
+                  metadata.displayName.utf8.count <= 128,
+                  !metadata.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  metadata.expiresAt.isFinite else {
+                throw PushServerError.invalidResponse
+            }
+            let reportedOrigin = try PushServerConfiguration.normalizedServerOrigin(
+                metadata.serverOrigin
+            )
+            let reportedExpiry = Date(timeIntervalSince1970: metadata.expiresAt)
+            guard reportedOrigin == payload.serverURL,
+                  metadata.expiresAt == payload.expiresAt.timeIntervalSince1970 else {
+                throw PushServerError.workerIdentityMismatch
+            }
+            guard reportedExpiry > now else { throw PushServerError.expiredWorkerLink }
+            return WorkerLinkMetadata(
+                displayName: metadata.displayName,
+                serverURL: reportedOrigin,
+                expiresAt: reportedExpiry
+            )
+
+        case let .manual(_, serverURL, accessKey):
+            guard accessKey.trimmingCharacters(in: .whitespacesAndNewlines).count >= 32 else {
+                throw PushServerError.missingServerAccessKey
+            }
+            var request = URLRequest(url: serverURL.appending(path: "healthz"))
+            request.timeoutInterval = 15
+            request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+            let (data, response) = try await send(
+                request,
+                maximumResponseBytes: smallResponseLimit,
+                acceptedStatusCodes: [200]
+            )
+            guard response.url == request.url,
+                  let health = try? JSONDecoder().decode(HealthResponse.self, from: data),
+                  health.ok,
+                  health.mode == "self_hosted",
+                  health.topic == "ad.neko.when" else {
+                throw PushServerError.workerIdentityMismatch
+            }
+            return WorkerLinkMetadata(
+                displayName: serverURL.host ?? serverURL.absoluteString,
+                serverURL: serverURL,
+                expiresAt: nil
+            )
+        }
+    }
+
+    static func register(settings: PushServerSettings, deviceToken: Data,
+                         enrollment: PushServerEnrollment? = nil) async throws {
         guard let serverURL = try settings.resolvedServerURL() else { return }
-        guard let serverAccessKey = try? KeychainStore.loadPushServerAccessKey(for: serverURL),
-              serverAccessKey.count >= 32 else {
+        let existing = try? KeychainStore.loadPushRegistration(for: serverURL)
+        if case let .pairing(payload) = enrollment {
+            guard payload.serverURL == serverURL else {
+                throw PushServerError.workerIdentityMismatch
+            }
+            let credentials: PushRegistrationCredentials
+            if let existing {
+                credentials = existing
+            } else {
+                credentials = try registrationCredentials(for: serverURL)
+            }
+            do {
+                try await claim(payload, credentials: credentials, deviceToken: deviceToken)
+            } catch let PushServerError.serverRejected(code) where code == 409 {
+                // A lost 201 response leaves the one-time session consumed. Prove that this
+                // device owns the resulting registration before treating the retry as success.
+                try await rotateDeviceToken(
+                    serverURL: serverURL,
+                    credentials: credentials,
+                    deviceToken: deviceToken
+                )
+            }
+            return
+        }
+        if let existing {
+            do {
+                try await rotateDeviceToken(
+                    serverURL: serverURL,
+                    credentials: existing,
+                    deviceToken: deviceToken
+                )
+                return
+            } catch let PushServerError.serverRejected(code)
+                where (code == 401 || code == 404) && enrollment != nil {
+                // The app may have created its local registration before the Worker accepted it.
+                // Continue with the explicitly confirmed enrollment method below.
+            }
+        }
+
+        let credentials: PushRegistrationCredentials
+        if let existing {
+            credentials = existing
+        } else {
+            credentials = try registrationCredentials(for: serverURL)
+        }
+        let resolvedEnrollment: PushServerEnrollment?
+        if let enrollment {
+            resolvedEnrollment = enrollment
+        } else if let key = try? KeychainStore.loadPushServerAccessKey(for: serverURL) {
+            resolvedEnrollment = .accessKey(key)
+        } else {
+            resolvedEnrollment = nil
+        }
+
+        switch resolvedEnrollment {
+        case .pairing:
+            throw PushServerError.invalidWorkerLink
+        case let .accessKey(key):
+            try await registerWithAccessKey(
+                key,
+                serverURL: serverURL,
+                credentials: credentials,
+                deviceToken: deviceToken
+            )
+        case nil:
             throw PushServerError.missingServerAccessKey
         }
-        let credentials = try registrationCredentials(for: serverURL)
-        var request = URLRequest(url: serverURL.appending(path: "v1/devices"))
+    }
+
+    static func claim(_ payload: WorkerLinkPayload, credentials: PushRegistrationCredentials,
+                      deviceToken: Data, now: Date = .now) async throws {
+        try payload.validateNotExpired(at: now)
+        guard credentials.serverURL == payload.serverURL else {
+            throw PushServerError.workerIdentityMismatch
+        }
+        var request = URLRequest(
+            url: payload.serverURL.appending(
+                path: "v1/link-sessions/\(payload.sessionID.uuidString.lowercased())/claim"
+            )
+        )
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(serverAccessKey, forHTTPHeaderField: "X-When-Reset-Server-Key")
+        request.setValue("Bearer \(payload.token)", forHTTPHeaderField: "Authorization")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.httpBody = try JSONEncoder().encode(RegistrationRequest(
             deviceID: credentials.deviceID.uuidString.lowercased(),
             deviceSecret: credentials.deviceSecret,
             apnsToken: deviceToken.hexadecimalString
         ))
-        _ = try await send(request)
+        let (data, _) = try await send(
+            request,
+            maximumResponseBytes: smallResponseLimit,
+            acceptedStatusCodes: [201]
+        )
+        guard (try? JSONDecoder().decode(AcknowledgementResponse.self, from: data))?.ok == true else {
+            throw PushServerError.invalidResponse
+        }
+    }
+
+    private static func registerWithAccessKey(
+        _ key: String,
+        serverURL: URL,
+        credentials: PushRegistrationCredentials,
+        deviceToken: Data
+    ) async throws {
+        let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard normalizedKey.count >= 32 else { throw PushServerError.missingServerAccessKey }
+        var request = URLRequest(url: serverURL.appending(path: "v1/devices"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(normalizedKey, forHTTPHeaderField: "X-When-Reset-Server-Key")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.httpBody = try JSONEncoder().encode(RegistrationRequest(
+            deviceID: credentials.deviceID.uuidString.lowercased(),
+            deviceSecret: credentials.deviceSecret,
+            apnsToken: deviceToken.hexadecimalString
+        ))
+        let (data, _) = try await send(
+            request,
+            maximumResponseBytes: smallResponseLimit,
+            acceptedStatusCodes: [200, 201]
+        )
+        guard data.isEmpty
+                || (try? JSONDecoder().decode(AcknowledgementResponse.self, from: data))?.ok == true else {
+            throw PushServerError.invalidResponse
+        }
+    }
+
+    private static func rotateDeviceToken(
+        serverURL: URL,
+        credentials: PushRegistrationCredentials,
+        deviceToken: Data
+    ) async throws {
+        var request = URLRequest(
+            url: serverURL.appending(
+                path: "v1/devices/\(credentials.deviceID.uuidString.lowercased())"
+            )
+        )
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 15
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(credentials.deviceSecret)", forHTTPHeaderField: "Authorization")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.httpBody = try JSONEncoder().encode(TokenRotationRequest(
+            apnsToken: deviceToken.hexadecimalString
+        ))
+        let (data, _) = try await send(
+            request,
+            maximumResponseBytes: smallResponseLimit,
+            acceptedStatusCodes: [200]
+        )
+        guard (try? JSONDecoder().decode(AcknowledgementResponse.self, from: data))?.ok == true else {
+            throw PushServerError.invalidResponse
+        }
     }
 
     static func unregister(settings: PushServerSettings) async throws {
@@ -152,7 +782,11 @@ enum PushServerClient {
         request.httpMethod = "DELETE"
         request.timeoutInterval = 15
         request.setValue("Bearer \(credentials.deviceSecret)", forHTTPHeaderField: "Authorization")
-        _ = try await send(request)
+        do {
+            _ = try await send(request)
+        } catch let PushServerError.serverRejected(code) where code == 404 {
+            // The Worker already removed this registration.
+        }
         KeychainStore.deletePushRegistration(for: serverURL)
         KeychainStore.deletePushServerAccessKey(for: serverURL)
     }
@@ -170,6 +804,109 @@ enum PushServerClient {
         request.httpMethod = "POST"
         request.timeoutInterval = 15
         request.setValue("Bearer \(credentials.deviceSecret)", forHTTPHeaderField: "Authorization")
+        _ = try await send(request)
+    }
+
+    static func uploadAccount(settings: PushServerSettings, account: MonitoredAccount,
+                              credentials: AccountCredentials,
+                              missingQuotas: [ServerMissingQuotaDescriptor],
+                              consentRevision: Int64) async throws
+        -> ServerAccountSyncResult {
+        guard consentRevision > 0 else { throw PushServerError.accountMonitoringUnavailable }
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        let interval = settings.serverMonitoringInterval.timeInterval
+            ?? RefreshInterval.fifteenMinutes.timeInterval!
+        var request = URLRequest(url: accountURL(serverURL: serverURL,
+                                                 registration: registration,
+                                                 accountID: account.id))
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue("Bearer \(registration.deviceSecret)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONEncoder().encode(AccountUploadRequest(
+            providerID: account.providerID.rawValue,
+            workspaceID: account.workspaceID,
+            plan: account.plan,
+            refreshIntervalSeconds: Int(interval),
+            consentRevision: consentRevision,
+            credentials: CredentialPayload(credentials),
+            missingQuotas: missingQuotas.map(MissingQuotaPayload.init)
+        ))
+        let (data, _) = try await send(request)
+        return try decodeAccountResponse(data, account: account)
+    }
+
+    static func syncAccount(settings: PushServerSettings, account: MonitoredAccount,
+                            since: Date) async throws -> ServerAccountSyncResult {
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        var cursor: String?
+        var seenCursors: Set<String> = []
+        var pageCount = 0
+        var points: [UsageHistoryPoint] = []
+        var latestPage: AccountSyncPage?
+        var responseConsentRevision: Int64?
+        repeat {
+            pageCount += 1
+            guard pageCount <= 100 else { throw PushServerError.invalidResponse }
+            var components = URLComponents(
+                url: accountURL(serverURL: serverURL, registration: registration,
+                                accountID: account.id).appending(path: "sync"),
+                resolvingAgainstBaseURL: false
+            )!
+            components.queryItems = [
+                URLQueryItem(name: "since", value: String(Int64(since.timeIntervalSince1970)))
+            ]
+            if let cursor { components.queryItems?.append(URLQueryItem(name: "cursor", value: cursor)) }
+            guard let url = components.url else { throw PushServerError.invalidServerURL }
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 20
+            request.setValue("Bearer \(registration.deviceSecret)", forHTTPHeaderField: "Authorization")
+            request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+            let (data, _) = try await send(request)
+            let page = try JSONDecoder().decode(AccountSyncPage.self, from: data)
+            guard page.consentRevision > 0,
+                  page.history.count <= 1_000,
+                  responseConsentRevision == nil
+                    || responseConsentRevision == page.consentRevision else {
+                throw PushServerError.invalidResponse
+            }
+            responseConsentRevision = page.consentRevision
+            points.append(contentsOf: page.history.map { $0.historyPoint(accountID: account.id) })
+            if let nextCursor = page.nextCursor {
+                guard nextCursor != cursor, seenCursors.insert(nextCursor).inserted else {
+                    throw PushServerError.invalidResponse
+                }
+            }
+            cursor = page.nextCursor
+            latestPage = page
+        } while cursor != nil
+
+        guard var result = latestPage.map({ makeSyncResult(page: $0, account: account) }) else {
+            throw PushServerError.invalidResponse
+        }
+        result.history = points
+        return result
+    }
+
+    static func deleteAccount(settings: PushServerSettings, accountID: UUID,
+                              consentRevision: Int64) async throws {
+        guard consentRevision > 0 else { throw PushServerError.invalidResponse }
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        var components = URLComponents(
+            url: accountURL(serverURL: serverURL,
+                            registration: registration,
+                            accountID: accountID),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "consent_revision", value: String(consentRevision))
+        ]
+        guard let url = components.url else { throw PushServerError.invalidServerURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(registration.deviceSecret)", forHTTPHeaderField: "Authorization")
         _ = try await send(request)
     }
 
@@ -194,18 +931,93 @@ enum PushServerClient {
         return credentials
     }
 
-    private static func send(_ request: URLRequest) async throws -> HTTPURLResponse {
+    private static func monitoringContext(settings: PushServerSettings) throws
+        -> (URL, PushRegistrationCredentials) {
+        guard let serverURL = try settings.resolvedServerURL(),
+              let registration = try? KeychainStore.loadPushRegistration(for: serverURL) else {
+            throw PushServerError.accountMonitoringUnavailable
+        }
+        return (serverURL, registration)
+    }
+
+    private static func accountURL(serverURL: URL, registration: PushRegistrationCredentials,
+                                   accountID: UUID) -> URL {
+        serverURL.appending(
+            path: "v1/devices/\(registration.deviceID.uuidString.lowercased())/accounts/\(accountID.uuidString.lowercased())"
+        )
+    }
+
+    static func decodeAccountResponse(_ data: Data,
+                                      account: MonitoredAccount) throws -> ServerAccountSyncResult {
+        let page = try JSONDecoder().decode(AccountSyncPage.self, from: data)
+        return makeSyncResult(page: page, account: account)
+    }
+
+    private static func makeSyncResult(page: AccountSyncPage,
+                                       account: MonitoredAccount) -> ServerAccountSyncResult {
+        ServerAccountSyncResult(
+            consentRevision: page.consentRevision,
+            snapshot: page.snapshot?.usageSnapshot(account: account),
+            history: page.history.map { $0.historyPoint(accountID: account.id) },
+            lastSuccessAt: page.lastSuccessAt.map(Date.init(timeIntervalSince1970:)),
+            lastError: page.lastError
+        )
+    }
+
+    private static func send(
+        _ request: URLRequest,
+        maximumResponseBytes: Int = accountResponseLimit,
+        acceptedStatusCodes: Set<Int> = Set(200..<300)
+    ) async throws -> (Data, HTTPURLResponse) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 20
-        let (_, response) = try await URLSession(configuration: configuration).data(for: request)
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        let session = URLSession(
+            configuration: configuration,
+            delegate: NoRedirectSessionDelegate.shared,
+            delegateQueue: nil
+        )
+        defer { session.invalidateAndCancel() }
+        let (bytes, response) = try await session.bytes(for: request)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw PushServerError.invalidResponse
         }
-        guard (200..<300).contains(httpResponse.statusCode) else {
+        guard acceptedStatusCodes.contains(httpResponse.statusCode) else {
             throw PushServerError.serverRejected(httpResponse.statusCode)
         }
-        return httpResponse
+        if httpResponse.expectedContentLength > Int64(maximumResponseBytes) {
+            throw PushServerError.responseTooLarge
+        }
+        var data = Data()
+        if httpResponse.expectedContentLength > 0 {
+            data.reserveCapacity(min(maximumResponseBytes, Int(httpResponse.expectedContentLength)))
+        }
+        for try await byte in bytes {
+            guard data.count < maximumResponseBytes else {
+                throw PushServerError.responseTooLarge
+            }
+            data.append(byte)
+        }
+        return (data, httpResponse)
+    }
+}
+
+private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate,
+    @unchecked Sendable {
+    static let shared = NoRedirectSessionDelegate()
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
     }
 }
 

@@ -12,6 +12,7 @@
 		2B37DECABBB04ED510C81E4F /* SharedSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93F9A2ACBFE25C6459321176 /* SharedSnapshotStore.swift */; };
 		36B6CF1C3DB0A652813653F1 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9483198499BE8FA9AAA70721 /* ContentView.swift */; };
 		393F4567BEF465E1D32AE77D /* UsageActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 35B1ED29CC24FF3E9CB18061 /* UsageActivityAttributes.swift */; };
+		4186BCB8B741AB69E497D9DB /* WorkerQRScannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9A2AE0B7FC1E0DCA65EA4D1F /* WorkerQRScannerView.swift */; };
 		470977A5FD4664C1703C0CC3 /* DemoUsageFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9967789DE61B27E5AC4B515A /* DemoUsageFactory.swift */; };
 		586C76E55FD35C564D47BB8E /* ChatGPTProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E6C4F8E3B98131AA7CCACE2 /* ChatGPTProvider.swift */; };
 		5A013D8470C4039A25FBD8A1 /* WhenResetWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2BC303AE3A75F5DEF32ABF4C /* WhenResetWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
@@ -96,6 +97,7 @@
 		93F9A2ACBFE25C6459321176 /* SharedSnapshotStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedSnapshotStore.swift; sourceTree = "<group>"; };
 		9483198499BE8FA9AAA70721 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		9967789DE61B27E5AC4B515A /* DemoUsageFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DemoUsageFactory.swift; sourceTree = "<group>"; };
+		9A2AE0B7FC1E0DCA65EA4D1F /* WorkerQRScannerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkerQRScannerView.swift; sourceTree = "<group>"; };
 		A0584614E923036E4057D702 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		A5C077CFD7AD29040852C250 /* KimiProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KimiProviderTests.swift; sourceTree = "<group>"; };
 		C1BC256FA84ACAA97F0D2E84 /* WhenResetApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhenResetApp.swift; sourceTree = "<group>"; };
@@ -129,6 +131,7 @@
 				44C03C63FA5B98872D5DD44C /* PushServer.swift */,
 				E85CC39EC256C4C92F2F5EFC /* WhenReset.entitlements */,
 				C1BC256FA84ACAA97F0D2E84 /* WhenResetApp.swift */,
+				9A2AE0B7FC1E0DCA65EA4D1F /* WorkerQRScannerView.swift */,
 				0AD0CC240637ABF3167FD5BD /* ZAIProvider.swift */,
 			);
 			path = WhenReset;
@@ -345,6 +348,7 @@
 				6D9179AC2BD6056648C505BE /* SharedSnapshotStore.swift in Sources */,
 				C36D23A198139285166851C1 /* UsageActivityAttributes.swift in Sources */,
 				E32EFCA194476E9D30ACF43E /* WhenResetApp.swift in Sources */,
+				4186BCB8B741AB69E497D9DB /* WorkerQRScannerView.swift in Sources */,
 				9C7F6EE1DEB3AE4669603A8E /* ZAIProvider.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

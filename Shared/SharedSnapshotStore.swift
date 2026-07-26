@@ -20,6 +20,7 @@ enum UsageRefreshSource: String, Codable, Hashable, Sendable {
     case manual
     case accountLink
     case background
+    case server
     case demo
 }
 
@@ -335,6 +336,42 @@ actor UsageHistoryStore {
         archive.points.removeAll { $0.accountID == accountID }
         archive.detectorStates.removeValue(forKey: accountID)
         archive.pendingNotifications.removeAll { $0.accountID == accountID }
+        prune(&archive, now: now)
+        try persist(archive)
+        cachedArchive = archive
+        return archive.points
+    }
+
+    func mergeServerHistory(_ incomingPoints: [UsageHistoryPoint],
+                            account: MonitoredAccount,
+                            now: Date = .now) throws -> [UsageHistoryPoint] {
+        var archive = try loadedArchive()
+        prune(&archive, now: now)
+        let earliest = now.addingTimeInterval(-Self.retentionInterval)
+        let accepted = incomingPoints.filter { point in
+            point.accountID == account.id
+                && point.providerID == account.providerID
+                && point.recordedAt >= earliest
+                && point.recordedAt <= now.addingTimeInterval(5 * 60)
+                && point.resetsAt >= point.recordedAt.addingTimeInterval(-5 * 60)
+                && point.remainingPercent.isFinite
+        }.map { point in
+            var normalized = point
+            normalized.remainingPercent = max(0, min(100, point.remainingPercent))
+            normalized.source = .server
+            return normalized
+        }
+
+        let acceptedIDs = Set(accepted.map(\.id))
+        archive.points.removeAll { acceptedIDs.contains($0.id) }
+        archive.points.append(contentsOf: accepted)
+        archive.points.sort {
+            if $0.recordedAt != $1.recordedAt { return $0.recordedAt < $1.recordedAt }
+            if $0.accountID != $1.accountID {
+                return $0.accountID.uuidString < $1.accountID.uuidString
+            }
+            return $0.metricID < $1.metricID
+        }
         prune(&archive, now: now)
         try persist(archive)
         cachedArchive = archive

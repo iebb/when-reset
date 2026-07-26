@@ -16,7 +16,8 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 - Nearest banked reset expiry with a day-aware countdown and exact local time
 - Home Screen, Lock Screen, Dynamic Island, and Live Activity views
 - Accounts and tokens synchronized through iCloud Keychain; sanitized snapshots in an App Group
-- Optional hourly silent refresh hints through a self-hosted Cloudflare Worker
+- Optional encrypted server-side quota monitoring and hourly silent refresh hints through a self-hosted Cloudflare Worker
+- Per-quota usage charts for the last 24 hours, 7 days, or 30 days
 
 ## Build
 
@@ -46,6 +47,6 @@ The OpenAI Blossom is used only to identify the ChatGPT provider. OpenAI, ChatGP
 
 ## Push refresh server
 
-The optional [Cloudflare Worker](server/README.md) is self-hosted in the user’s Cloudflare account and sends silent refresh hints without receiving provider credentials or quota data. When Reset does not operate an official push server.
+The optional [Cloudflare Worker](server/README.md) is self-hosted in the user’s Cloudflare account. It sends hourly silent refresh hints and can, only for accounts individually opted in by the user, encrypt provider credentials in D1 and record quota every 15 minutes or longer. Credential upload is write-only through the Worker API, and overlapping client accounts are fetched once per credential scope and cron occurrence. When Reset does not operate an official server.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iebb/when-reset/tree/master/server)

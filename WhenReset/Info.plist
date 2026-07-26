@@ -9,6 +9,13 @@
   <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
   <key>ITSAppUsesNonExemptEncryption</key><false/>
+  <key>NSCameraUsageDescription</key><string>Scan a QR code from your self-hosted When Reset Worker.</string>
+  <key>CFBundleURLTypes</key><array>
+    <dict>
+      <key>CFBundleURLName</key><string>ad.neko.when.worker-link</string>
+      <key>CFBundleURLSchemes</key><array><string>whenreset</string></array>
+    </dict>
+  </array>
   <key>BGTaskSchedulerPermittedIdentifiers</key><array>
     <string>ad.neko.when.refresh</string>
   </array>

@@ -98,6 +98,8 @@ struct WhenResetApp: App {
                         BackgroundRefreshScheduler.scheduleNext(
                             after: store.refreshSettings.backgroundInterval
                         )
+                    } else if newPhase == .active {
+                        Task { await store.reconcileLiveActivityAfterForegroundActivation() }
                     }
                 }
         }

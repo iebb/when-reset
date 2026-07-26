@@ -2,6 +2,30 @@ import Security
 import XCTest
 @testable import WhenReset
 
+private actor TestAsyncLatch {
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func open() {
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        pending.forEach { $0.resume() }
+    }
+}
+
+private actor TestEventRecorder {
+    private var events: [String] = []
+
+    func append(_ event: String) { events.append(event) }
+    func snapshot() -> [String] { events }
+}
+
 final class ParsingTests: XCTestCase {
     func testPublicGitHubLinksTargetWhenResetRepository() {
         XCTAssertEqual(AppLinks.sourceCode.scheme, "https")
@@ -528,6 +552,136 @@ final class ParsingTests: XCTestCase {
         )
     }
 
+    func testWorkerLinkParserAcceptsStrictVersionOnePayload() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let session = UUID(uuidString: "019f724a-3414-4d52-ae37-0c7024a1ab97")!
+        let link = try makeWorkerLink(
+            server: "https://Push.Example.com/",
+            session: session.uuidString.lowercased(),
+            token: String(repeating: "a", count: 43),
+            expires: Int64(now.timeIntervalSince1970) + 300
+        )
+
+        let payload = try WorkerLinkPayload.parse(link, now: now)
+
+        XCTAssertEqual(payload.serverURL.absoluteString, "https://push.example.com")
+        XCTAssertEqual(payload.sessionID, session)
+        XCTAssertEqual(payload.token, String(repeating: "a", count: 43))
+        XCTAssertEqual(payload.expiresAt, now.addingTimeInterval(300))
+    }
+
+    func testWorkerLinkParserRejectsExpiredFarFutureAndMalformedPayloads() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let session = "019f724a-3414-4d52-ae37-0c7024a1ab97"
+        let token = String(repeating: "a", count: 43)
+
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            makeWorkerLink(server: "https://push.example.com", session: session,
+                           token: token, expires: Int64(now.timeIntervalSince1970)),
+            now: now
+        ))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            makeWorkerLink(server: "https://push.example.com", session: session,
+                           token: token, expires: Int64(now.timeIntervalSince1970) + 601),
+            now: now
+        ))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            makeWorkerLink(server: "http://push.example.com", session: session,
+                           token: token, expires: Int64(now.timeIntervalSince1970) + 300),
+            now: now
+        ))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            makeWorkerLink(server: "https://push.example.com/path", session: session,
+                           token: token, expires: Int64(now.timeIntervalSince1970) + 300),
+            now: now
+        ))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            makeWorkerLink(server: "https://push.example.com", session: session.uppercased(),
+                           token: token, expires: Int64(now.timeIntervalSince1970) + 300),
+            now: now
+        ))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            makeWorkerLink(server: "https://push.example.com", session: session,
+                           token: String(repeating: "a", count: 42),
+                           expires: Int64(now.timeIntervalSince1970) + 300),
+            now: now
+        ))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            makeWorkerLink(server: "https://push.example.com", session: session,
+                           token: token, expires: Int64(now.timeIntervalSince1970) + 300,
+                           version: "2"),
+            now: now
+        ))
+    }
+
+    func testWorkerLinkParserRejectsDuplicateAndExtraQueryItems() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let valid = try makeWorkerLink(
+            server: "https://push.example.com",
+            session: "019f724a-3414-4d52-ae37-0c7024a1ab97",
+            token: String(repeating: "a", count: 43),
+            expires: Int64(now.timeIntervalSince1970) + 300
+        )
+
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(valid + "&token="
+            + String(repeating: "b", count: 43), now: now))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(valid + "&unexpected=1", now: now))
+        XCTAssertThrowsError(try WorkerLinkPayload.parse(
+            String(repeating: "x", count: WorkerLinkPayload.maximumURLBytes + 1),
+            now: now
+        ))
+    }
+
+    func testCopilotCredentialsCannotBeSelectedForOffDeviceMonitoring() {
+        XCTAssertFalse(ProviderID.githubCopilot.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.chatGPT.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.claude.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.kimi.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.zai.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.miniMax.supportsOffDeviceMonitoring)
+    }
+
+    func testWorkerAccountResponseIgnoresReturnedCredentials() throws {
+        let account = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Work account",
+            workspaceID: "workspace", plan: "Pro", addedAt: .now
+        )
+        let response = Data(#"""
+        {
+          "consent_revision": 7,
+          "credentials": {
+            "access_token": 123,
+            "refresh_token": ["must", "not", "decode"],
+            "id_token": {"or": "reach Keychain"}
+          },
+          "history": []
+        }
+        """#.utf8)
+
+        let result = try PushServerClient.decodeAccountResponse(response, account: account)
+
+        XCTAssertEqual(result.consentRevision, 7)
+        XCTAssertNil(result.snapshot)
+        XCTAssertTrue(result.history.isEmpty)
+    }
+
+    func testLiveActivityRotatesBeforeSystemEightHourLimit() {
+        let startedAt = Date(timeIntervalSince1970: 2_000_000_000)
+
+        XCTAssertFalse(LiveActivityLifecyclePolicy.shouldRotate(startedAt: nil, at: startedAt))
+        XCTAssertFalse(LiveActivityLifecyclePolicy.shouldRotate(
+            startedAt: startedAt,
+            at: startedAt.addingTimeInterval(7 * 60 * 60 - 1)
+        ))
+        XCTAssertTrue(LiveActivityLifecyclePolicy.shouldRotate(
+            startedAt: startedAt,
+            at: startedAt.addingTimeInterval(7 * 60 * 60)
+        ))
+        XCTAssertTrue(LiveActivityLifecyclePolicy.isRunning(.active))
+        XCTAssertTrue(LiveActivityLifecyclePolicy.isRunning(.stale))
+        XCTAssertFalse(LiveActivityLifecyclePolicy.isRunning(.ended))
+        XCTAssertFalse(LiveActivityLifecyclePolicy.isRunning(.dismissed))
+    }
 
     func testPerQuotaLiveActivityRulesMatchExactBoundaries() throws {
         let now = Date(timeIntervalSince1970: 1_000)
@@ -723,6 +877,26 @@ final class ParsingTests: XCTestCase {
         XCTAssertNil(try KeychainStore.loadAccounts().first(where: { $0.id == account.id }))
     }
 
+    private func makeWorkerLink(
+        server: String,
+        session: String,
+        token: String,
+        expires: Int64,
+        version: String = "1"
+    ) throws -> String {
+        var components = URLComponents()
+        components.scheme = WorkerLinkPayload.scheme
+        components.host = WorkerLinkPayload.host
+        components.queryItems = [
+            URLQueryItem(name: "v", value: version),
+            URLQueryItem(name: "server", value: server),
+            URLQueryItem(name: "session", value: session),
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "expires", value: String(expires))
+        ]
+        return try XCTUnwrap(components.url?.absoluteString)
+    }
+
     private func keychainStatus(service: String, id: UUID, synchronizable: Bool) -> OSStatus {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -775,6 +949,94 @@ final class ParsingTests: XCTestCase {
         XCTAssertTrue(failure.requiresRelink)
         XCTAssertEqual(failure.title, "Sign-in failed")
         XCTAssertFalse(failure.message.contains("provider response"))
+    }
+
+    func testServerAccountOperationGateSerializesOneAccount() async {
+        let gate = ServerAccountOperationGate()
+        let accountID = UUID()
+        let firstHasLock = expectation(description: "first operation acquired account lock")
+        let releaseFirst = TestAsyncLatch()
+        let recorder = TestEventRecorder()
+
+        let first = Task {
+            await gate.acquire(accountID: accountID)
+            await recorder.append("first-start")
+            firstHasLock.fulfill()
+            await releaseFirst.wait()
+            await recorder.append("first-end")
+            await gate.release(accountID: accountID)
+        }
+        await fulfillment(of: [firstHasLock], timeout: 1)
+
+        let second = Task {
+            await gate.acquire(accountID: accountID)
+            await recorder.append("second-start")
+            await gate.release(accountID: accountID)
+        }
+        await Task.yield()
+        let eventsWhileFirstIsHeld = await recorder.snapshot()
+        XCTAssertEqual(eventsWhileFirstIsHeld, ["first-start"])
+
+        await releaseFirst.open()
+        await first.value
+        await second.value
+        let completedEvents = await recorder.snapshot()
+        XCTAssertEqual(completedEvents, ["first-start", "first-end", "second-start"])
+    }
+
+    func testPendingServerDeletionFailsClosedUnlessConsentIsNewer() {
+        let serverURL = "https://push.example.com"
+        let pending = AccountMonitorSettings(
+            monitorOnSelfHostedServer: true,
+            selfHostedServerConsentURL: serverURL,
+            selfHostedServerConsentRevision: 4
+        )
+        let reconciled = ServerMonitoringRecovery.reconcilingPendingDeletion(
+            in: pending,
+            serverURL: serverURL,
+            pendingRevision: 5
+        )
+        XCTAssertFalse(reconciled.monitorOnSelfHostedServer)
+        XCTAssertNil(reconciled.selfHostedServerConsentURL)
+        XCTAssertEqual(reconciled.selfHostedServerConsentRevision, 5)
+
+        var newerConsent = pending
+        newerConsent.selfHostedServerConsentRevision = 6
+        XCTAssertEqual(
+            ServerMonitoringRecovery.reconcilingPendingDeletion(
+                in: newerConsent,
+                serverURL: serverURL,
+                pendingRevision: 5
+            ),
+            newerConsent
+        )
+    }
+
+    func testCleanupRecoveryMatchesWorkerOriginDespiteIntervalChange() {
+        let cleanup = PushServerSettings(
+            mode: .custom,
+            customServerURL: "https://push.example.com",
+            serverMonitoringInterval: .fifteenMinutes
+        )
+        let sameWorker = PushServerSettings(
+            mode: .custom,
+            customServerURL: "https://push.example.com/",
+            serverMonitoringInterval: .oneHour
+        )
+        let otherWorker = PushServerSettings(
+            mode: .custom,
+            customServerURL: "https://other.example.com",
+            serverMonitoringInterval: .fifteenMinutes
+        )
+
+        XCTAssertTrue(ServerMonitoringRecovery.cleanupMatchesCurrentWorker(
+            cleanup: cleanup,
+            current: sameWorker
+        ))
+        XCTAssertFalse(ServerMonitoringRecovery.cleanupMatchesCurrentWorker(
+            cleanup: cleanup,
+            current: otherWorker
+        ))
     }
 }
 
@@ -1525,6 +1787,62 @@ final class UsageHistoryTests: XCTestCase {
         let result = try await store.record(snapshot: detailed, account: account,
                                             source: .background, now: nextDate)
         XCTAssertFalse(result.pendingNotifications.contains { $0.kind == .newBankedReset })
+    }
+
+    func testLegacyMonitorSettingsDoNotUploadCredentialsByDefault() throws {
+        let decoded = try JSONDecoder().decode(AccountMonitorSettings.self, from: Data("{}".utf8))
+
+        XCTAssertFalse(decoded.monitorOnSelfHostedServer)
+        XCTAssertNil(decoded.selfHostedServerConsentURL)
+        XCTAssertEqual(decoded.selfHostedServerConsentRevision, 0)
+    }
+
+    func testServerConsentRevisionSurvivesSettingsPersistence() throws {
+        let settings = AccountMonitorSettings(
+            monitorOnSelfHostedServer: true,
+            selfHostedServerConsentURL: "https://push.example",
+            selfHostedServerConsentRevision: 42
+        )
+
+        let decoded = try JSONDecoder().decode(
+            AccountMonitorSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+        XCTAssertEqual(decoded.selfHostedServerConsentRevision, 42)
+        XCTAssertEqual(decoded.selfHostedServerConsentURL, "https://push.example")
+        XCTAssertTrue(decoded.monitorOnSelfHostedServer)
+    }
+
+    func testServerHistoryMergeKeepsOnlyMatchingAccountAndProvider() async throws {
+        let store = try makeStore()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .claude)
+        let accepted = UsageHistoryPoint(
+            accountID: account.id,
+            providerID: .claude,
+            metricID: "weekly",
+            metricTitle: "Weekly limit",
+            kind: .weekly,
+            windowMinutes: 10_080,
+            remainingPercent: 105,
+            recordedAt: now.addingTimeInterval(-900),
+            resetsAt: now.addingTimeInterval(5 * 86_400),
+            secondsUntilReset: 5 * 86_400 + 900,
+            source: .server,
+            plan: "Max"
+        )
+        var rejected = accepted
+        rejected.accountID = UUID()
+
+        let points = try await store.mergeServerHistory(
+            [accepted, rejected],
+            account: account,
+            now: now
+        )
+
+        XCTAssertEqual(points.count, 1)
+        XCTAssertEqual(points.first?.remainingPercent, 100)
+        XCTAssertEqual(points.first?.source, .server)
     }
 
     private func makeStore() throws -> UsageHistoryStore {
