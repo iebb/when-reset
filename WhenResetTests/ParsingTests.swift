@@ -126,6 +126,24 @@ final class ParsingTests: XCTestCase {
                        .days(days: 2, hours: 0))
     }
 
+    func testLiveActivityCountdownEmphasizesOnlyPositiveTimesBelowThirtyMinutes() {
+        let now = Date(timeIntervalSince1970: 1_000)
+
+        XCTAssertFalse(CountdownDisplay.shouldEmphasizeLiveActivityCountdown(
+            until: now.addingTimeInterval(30 * 60 + 1), from: now
+        ))
+        XCTAssertFalse(CountdownDisplay.shouldEmphasizeLiveActivityCountdown(
+            until: now.addingTimeInterval(30 * 60), from: now
+        ))
+        XCTAssertTrue(CountdownDisplay.shouldEmphasizeLiveActivityCountdown(
+            until: now.addingTimeInterval(30 * 60 - 1), from: now
+        ))
+        XCTAssertTrue(CountdownDisplay.shouldEmphasizeLiveActivityCountdown(
+            until: now.addingTimeInterval(1), from: now
+        ))
+        XCTAssertFalse(CountdownDisplay.shouldEmphasizeLiveActivityCountdown(until: now, from: now))
+    }
+
     func testLockScreenCountdownPadsHoursAfterDays() {
         let now = Date(timeIntervalSince1970: 1_000)
         XCTAssertEqual(CountdownDisplay.widgetString(

@@ -56,6 +56,7 @@ private struct UsageTabView: View {
     @State private var showingAddAccount = false
     @State private var relinkingAccount: MonitoredAccount?
     @State private var accountPendingRemoval: MonitoredAccount?
+    @State private var isPreparingDemo = false
 
     var body: some View {
         NavigationStack {
@@ -63,7 +64,7 @@ private struct UsageTabView: View {
                 if store.accounts.isEmpty { emptyState }
                 else { accountList }
             }
-            .navigationTitle("Usage")
+            .navigationTitle(store.accounts.isEmpty ? "When Reset" : "Usage")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !store.accounts.isEmpty {
@@ -88,7 +89,7 @@ private struct UsageTabView: View {
                 titleVisibility: .visible
             ) {
                 if let account = accountPendingRemoval {
-                    Button("Remove \(account.providerID.displayName) account", role: .destructive) {
+                    Button("Remove \(account.providerDisplayName) account", role: .destructive) {
                         store.remove(account)
                         accountPendingRemoval = nil
                     }
@@ -104,21 +105,18 @@ private struct UsageTabView: View {
     }
 
     private var emptyState: some View {
-        ContentUnavailableView {
-            Label("Monitor your limits", systemImage: "gauge.with.dots.needle.33percent")
-        } description: {
-            Text("Link a provider account to see usage windows and reset countdowns.")
-        } actions: {
-            Button {
-                showingAddAccount = true
-            } label: {
-                Text("Link account")
-                    .font(.headline)
-                    .frame(minWidth: 160)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
+        FirstRunExperienceView(
+            isPreparingDemo: isPreparingDemo,
+            openDemo: {
+                guard !isPreparingDemo else { return }
+                isPreparingDemo = true
+                Task {
+                    await store.addDemoAccount()
+                    isPreparingDemo = false
+                }
+            },
+            connectAccount: { showingAddAccount = true }
+        )
     }
 
     private var accountList: some View {
@@ -160,6 +158,247 @@ private struct UsageTabView: View {
     }
 }
 
+private struct FirstRunExperienceView: View {
+    let isPreparingDemo: Bool
+    let openDemo: () -> Void
+    let connectAccount: () -> Void
+
+    private let features = [
+        FirstRunFeature(icon: "waveform.path.ecg.rectangle.fill", title: "Live countdowns",
+                        detail: "Lock Screen and Dynamic Island"),
+        FirstRunFeature(icon: "square.grid.2x2.fill", title: "Home Screen widgets",
+                        detail: "Choose an account and quota"),
+        FirstRunFeature(icon: "bell.badge.fill", title: "Reset alerts",
+                        detail: "Scheduled and detected resets"),
+        FirstRunFeature(icon: "chart.xyaxis.line", title: "Usage history",
+                        detail: "24 hours, 7 days, and 30 days")
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                VStack(spacing: 12) {
+                    Image(systemName: "gauge.with.dots.needle.50percent")
+                        .font(.system(size: 38, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 72, height: 72)
+                        .background(Color.accentColor.gradient, in: .rect(cornerRadius: 22))
+                        .shadow(color: Color.accentColor.opacity(0.25), radius: 18, y: 8)
+
+                    Text("Know what resets next")
+                        .font(.largeTitle.bold())
+                        .multilineTextAlignment(.center)
+                    Text("Follow coding-plan quotas, countdowns, and trends in one native dashboard.")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .frame(maxWidth: 560)
+                }
+
+                FirstRunDashboardPreview()
+
+                VStack(spacing: 10) {
+                    Button(action: openDemo) {
+                        HStack {
+                            if isPreparingDemo { ProgressView().tint(.white) }
+                            Text(isPreparingDemo ? "Preparing dashboard…" : "Explore interactive demo")
+                                .fontWeight(.semibold)
+                            Spacer()
+                            Image(systemName: "arrow.right")
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 15))
+                    .controlSize(.large)
+                    .disabled(isPreparingDemo)
+                    .accessibilityIdentifier("open-demo-button")
+
+                    Button(action: connectAccount) {
+                        Label("Connect an account", systemImage: "person.crop.circle.badge.plus")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .buttonStyle(.bordered)
+                    .buttonBorderShape(.roundedRectangle(radius: 15))
+                    .controlSize(.large)
+                    .disabled(isPreparingDemo)
+                    .accessibilityIdentifier("connect-account-button")
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 12)], spacing: 12) {
+                    ForEach(features) { feature in
+                        FirstRunFeatureCard(feature: feature)
+                    }
+                }
+
+                Label("The demo needs no account and uses generated data stored on this device.",
+                      systemImage: "lock.shield.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: 720)
+            .padding(.horizontal, 18)
+            .padding(.top, 12)
+            .padding(.bottom, 30)
+            .frame(maxWidth: .infinity)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+}
+
+private struct FirstRunFeature: Identifiable {
+    var id: String { title }
+    let icon: String
+    let title: String
+    let detail: String
+}
+
+private struct FirstRunFeatureCard: View {
+    let feature: FirstRunFeature
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: feature.icon)
+                .font(.headline)
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 34, height: 34)
+                .background(Color.accentColor.opacity(0.12), in: .rect(cornerRadius: 10))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(feature.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                Text(feature.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
+        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 17))
+    }
+}
+
+private struct FirstRunDashboardPreview: View {
+    private struct Point: Identifiable {
+        let id: Int
+        let remaining: Double
+    }
+
+    @State private var nextReset = Date.now.addingTimeInterval(5_430)
+    private let chartPoints = [82.0, 79, 74, 63, 59, 54, 48, 42].enumerated().map {
+        Point(id: $0.offset, remaining: $0.element)
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 10) {
+                Image(systemName: "timer.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Sample workspace")
+                        .font(.headline)
+                    Text("Coding plan overview")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("Next reset")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text(timerInterval: Date.now...nextReset, countsDown: true, showsHours: true)
+                        .font(.headline)
+                        .monospacedDigit()
+                }
+            }
+
+            Divider()
+
+            FirstRunQuotaPreview(title: "5h limit", remaining: 42, tint: .blue,
+                                 reset: "Resets in 1h 30m")
+            FirstRunQuotaPreview(title: "Weekly limit", remaining: 71, tint: .purple,
+                                 reset: "Resets in 5d 18h")
+
+            HStack(alignment: .bottom, spacing: 14) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Last 24 hours")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Usage trend")
+                        .font(.subheadline.weight(.semibold))
+                }
+                Chart(chartPoints) { point in
+                    AreaMark(
+                        x: .value("Sample", point.id),
+                        y: .value("Remaining", point.remaining)
+                    )
+                    .interpolationMethod(.catmullRom)
+                    .foregroundStyle(
+                        .linearGradient(
+                            colors: [Color.accentColor.opacity(0.34), Color.accentColor.opacity(0.02)],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    LineMark(
+                        x: .value("Sample", point.id),
+                        y: .value("Remaining", point.remaining)
+                    )
+                    .interpolationMethod(.catmullRom)
+                    .foregroundStyle(Color.accentColor)
+                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                }
+                .chartXScale(domain: 0...7)
+                .chartYScale(domain: 0...100)
+                .chartXAxis(.hidden)
+                .chartYAxis(.hidden)
+                .frame(height: 58)
+                .accessibilityLabel("Sample 24-hour usage trend")
+            }
+        }
+        .padding(18)
+        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 24))
+        .overlay {
+            RoundedRectangle(cornerRadius: 24)
+                .stroke(Color(.separator).opacity(0.28), lineWidth: 1)
+        }
+        .shadow(color: .black.opacity(0.06), radius: 18, y: 8)
+    }
+}
+
+private struct FirstRunQuotaPreview: View {
+    let title: String
+    let remaining: Int
+    let tint: Color
+    let reset: String
+
+    var body: some View {
+        VStack(spacing: 7) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("\(remaining)% left")
+                    .font(.subheadline.weight(.semibold).monospacedDigit())
+            }
+            ProgressView(value: Double(remaining), total: 100)
+                .tint(tint)
+            HStack {
+                Label(reset, systemImage: "arrow.clockwise")
+                Spacer()
+                Image(systemName: "bell.fill")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+    }
+}
+
 private struct ProviderSectionHeader: View {
     let account: MonitoredAccount
     let plan: String?
@@ -174,7 +413,7 @@ private struct ProviderSectionHeader: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(account.providerID.sectionTitle(plan: plan))
+                Text(account.providerSectionTitle(plan: plan))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -190,7 +429,7 @@ private struct ProviderSectionHeader: View {
             } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.body)
-                    .accessibilityLabel("\(account.providerID.displayName) account settings")
+                    .accessibilityLabel("\(account.providerDisplayName) account settings")
             }
             .buttonStyle(.plain)
         }
@@ -350,9 +589,10 @@ struct AccountSettingsView: View {
                 }
             } header: {
                 HStack(spacing: 7) {
-                    ProviderIcon(providerID: currentAccount.providerID)
+                    ProviderIcon(providerID: currentAccount.providerID,
+                                 symbolName: currentAccount.customSymbolName)
                         .frame(width: 15, height: 15)
-                    Text(currentAccount.providerID.displayName)
+                    Text(currentAccount.providerDisplayName)
                 }
             } footer: {
                 Text("Provider-reported details update during refresh. The account and its credentials sync through iCloud Keychain.")

@@ -3,7 +3,7 @@ import UIKit
 @testable import WhenReset
 
 final class DemoModeTests: XCTestCase {
-    func testDemoSnapshotContainsAllChatGPTReviewContent() throws {
+    func testDemoSnapshotContainsCompleteNativeReviewContent() throws {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let account = MonitoredAccount(
             id: UUID(),
@@ -19,13 +19,38 @@ final class DemoModeTests: XCTestCase {
 
         XCTAssertTrue(account.isDemo)
         XCTAssertEqual(snapshot.accountID, account.id)
-        XCTAssertEqual(snapshot.providerName, "ChatGPT")
-        XCTAssertEqual(snapshot.usageWindows.map(\.displayTitle), ["5h limit", "Weekly limit", "GPT-5.3-Codex-Spark"])
+        XCTAssertEqual(snapshot.providerName, "Sample coding plan")
+        XCTAssertEqual(snapshot.usageWindows.map(\.displayTitle), ["5h limit", "Weekly limit", "Monthly coding limit"])
         XCTAssertTrue(snapshot.usageWindows.allSatisfy { (0...100).contains($0.usedPercent) })
         XCTAssertTrue((2...4).contains(snapshot.availableResetCount))
         XCTAssertEqual(snapshot.availableResetCredits.count, snapshot.availableResetCount)
         XCTAssertTrue(snapshot.availableResetCredits.allSatisfy { ($0.expiresAt ?? .distantPast) > now })
         XCTAssertLessThanOrEqual(try XCTUnwrap(snapshot.primary?.resetsAt).timeIntervalSince(now), 4 * 3_600)
+    }
+
+    func testDemoHistoryShowsBothDailyAndWeeklyChartRanges() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Sample workspace",
+            workspaceID: MonitoredAccount.demoWorkspaceID, plan: "Sample Pro", addedAt: now
+        )
+
+        let snapshots = DemoUsageFactory.historySnapshots(for: account, endingAt: now)
+
+        XCTAssertGreaterThanOrEqual(snapshots.count, 20)
+        XCTAssertTrue(snapshots.contains { $0.fetchedAt >= now.addingTimeInterval(-24 * 3_600) })
+        XCTAssertTrue(snapshots.contains { $0.fetchedAt <= now.addingTimeInterval(-6 * 24 * 3_600) })
+        XCTAssertTrue(snapshots.allSatisfy { $0.providerName == DemoUsageFactory.providerName })
+    }
+
+    func testChinaRegionExcludesChatGPTAccountAddition() {
+        let china = Locale(identifier: "zh-Hans-CN")
+        let unitedStates = Locale(identifier: "en-US")
+
+        XCTAssertFalse(ProviderAvailability.allowsAccountAddition(.chatGPT, locale: china))
+        XCTAssertFalse(ProviderAvailability.availableProviders(locale: china).contains(.chatGPT))
+        XCTAssertTrue(ProviderAvailability.allowsAccountAddition(.chatGPT, locale: unitedStates))
+        XCTAssertTrue(ProviderAvailability.availableProviders(locale: china).contains(.claude))
     }
 
     func testDefaultLiveActivityStartsAutomaticallyWithinFourHours() {
@@ -36,6 +61,15 @@ final class DemoModeTests: XCTestCase {
         XCTAssertFalse(GlobalNotificationSettings().notifyAtScheduledReset)
         XCTAssertEqual(AccountMonitorSettings().defaultLiveActivityRule.remainingHours, 4)
         XCTAssertTrue(AccountMonitorSettings().notifyAtScheduledReset)
+    }
+
+    func testAutomaticRefreshesDoNotPresentFetchFailureAlerts() {
+        XCTAssertFalse(UsageRefreshSource.launch.presentsFetchFailureAlerts)
+        XCTAssertFalse(UsageRefreshSource.background.presentsFetchFailureAlerts)
+        XCTAssertFalse(UsageRefreshSource.server.presentsFetchFailureAlerts)
+        XCTAssertFalse(UsageRefreshSource.demo.presentsFetchFailureAlerts)
+        XCTAssertTrue(UsageRefreshSource.manual.presentsFetchFailureAlerts)
+        XCTAssertTrue(UsageRefreshSource.accountLink.presentsFetchFailureAlerts)
     }
 
     func testMultipleLiveActivityPinsRoundTrip() throws {

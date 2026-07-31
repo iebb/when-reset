@@ -82,6 +82,18 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     }
 }
 
+enum ProviderAvailability {
+    static func allowsAccountAddition(_ providerID: ProviderID, locale: Locale) -> Bool {
+        guard providerID == .chatGPT else { return true }
+        guard let region = locale.region?.identifier.uppercased() else { return true }
+        return region != "CN" && region != "CHN"
+    }
+
+    static func availableProviders(locale: Locale) -> [ProviderID] {
+        ProviderID.allCases.filter { allowsAccountAddition($0, locale: locale) }
+    }
+}
+
 enum LiveActivityMode: String, Codable, CaseIterable, Sendable {
     case automatic, always, disabled
 
@@ -353,8 +365,16 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     var planExpiresAt: Date? = nil
     var trialExpiresAt: Date? = nil
 
-    var isDemo: Bool {
-        providerID == .chatGPT && workspaceID == Self.demoWorkspaceID
+    var isDemo: Bool { workspaceID == Self.demoWorkspaceID }
+
+    var providerDisplayName: String {
+        isDemo ? "Sample coding plan" : providerID.displayName
+    }
+
+    func providerSectionTitle(plan: String?) -> String {
+        guard isDemo else { return providerID.sectionTitle(plan: plan) }
+        guard let plan = providerID.planDisplayName(plan) else { return providerDisplayName }
+        return "\(providerDisplayName) · \(plan)"
     }
 
     var resolvedDisplayName: String {
@@ -565,6 +585,12 @@ enum CountdownDisplay {
             return .hours(hours: totalMinutes / 60, minutes: totalMinutes % 60)
         }
         return .timer
+    }
+
+    static func shouldEmphasizeLiveActivityCountdown(until expiry: Date,
+                                                     from date: Date = .now) -> Bool {
+        let remaining = expiry.timeIntervalSince(date)
+        return remaining > 0 && remaining < 30 * 60
     }
 
     static func widgetString(until expiry: Date, from date: Date = .now) -> String {

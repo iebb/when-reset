@@ -3,6 +3,7 @@ import SwiftUI
 struct AddAccountView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
     @Environment(\.openURL) private var openURL
     let relinkingAccount: MonitoredAccount?
     @State private var completionTask: Task<Void, Never>?
@@ -49,10 +50,10 @@ struct AddAccountView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(relinkingAccount == nil ? "See every reset at a glance" : "Reconnect \(relinkingAccount?.providerID.displayName ?? "account")")
+                    Text(relinkingAccount == nil ? "Connect a coding plan" : "Reconnect \(relinkingAccount?.providerDisplayName ?? "account")")
                         .font(.title2.bold())
                     Text(relinkingAccount == nil
-                         ? "Connect a provider, or explore the complete experience without signing in."
+                         ? "Choose a provider to securely import its quota and reset schedule."
                          : "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.")
                         .font(.body)
                         .foregroundStyle(.secondary)
@@ -62,37 +63,47 @@ struct AddAccountView: View {
                     demoCard
                 }
 
-                VStack(alignment: .leading, spacing: 12) {
-                    Text(relinkingAccount == nil ? "Connect a provider" : "Account provider")
-                        .font(.title3.bold())
+                if isRelinkUnavailable {
+                    ContentUnavailableView {
+                        Label("Unavailable in your region", systemImage: "globe.asia.australia.fill")
+                    } description: {
+                        Text("This account provider cannot be linked while the device region is set to China.")
+                    }
+                }
 
-                    ForEach(availableProviders, id: \.self) { provider in
-                        VStack(spacing: 0) {
-                            Button {
-                                withAnimation(.snappy) {
-                                    if relinkingAccount == nil {
-                                        selectedProvider = selectedProvider == provider ? nil : provider
-                                    } else {
-                                        selectedProvider = provider
+                if !availableProviders.isEmpty {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(relinkingAccount == nil ? "Connect a provider" : "Account provider")
+                            .font(.title3.bold())
+
+                        ForEach(availableProviders, id: \.self) { provider in
+                            VStack(spacing: 0) {
+                                Button {
+                                    withAnimation(.snappy) {
+                                        if relinkingAccount == nil {
+                                            selectedProvider = selectedProvider == provider ? nil : provider
+                                        } else {
+                                            selectedProvider = provider
+                                        }
                                     }
+                                } label: {
+                                    ProviderCard(provider: provider, selected: selectedProvider == provider)
                                 }
-                            } label: {
-                                ProviderCard(provider: provider, selected: selectedProvider == provider)
-                            }
-                            .buttonStyle(.plain)
+                                .buttonStyle(.plain)
 
-                            if selectedProvider == provider {
-                                Divider().padding(.horizontal, 16)
-                                providerLinker(provider)
-                                    .padding(16)
-                                    .transition(.opacity.combined(with: .move(edge: .top)))
+                                if selectedProvider == provider {
+                                    Divider().padding(.horizontal, 16)
+                                    providerLinker(provider)
+                                        .padding(16)
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
+                                }
                             }
-                        }
-                        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 20))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 20)
-                                .stroke(selectedProvider == provider ? Color.accentColor : Color(.separator).opacity(0.35),
-                                        lineWidth: selectedProvider == provider ? 2 : 1)
+                            .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 20))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 20)
+                                    .stroke(selectedProvider == provider ? Color.accentColor : Color(.separator).opacity(0.35),
+                                            lineWidth: selectedProvider == provider ? 2 : 1)
+                            }
                         }
                     }
                 }
@@ -104,7 +115,17 @@ struct AddAccountView: View {
     }
 
     private var availableProviders: [ProviderID] {
-        relinkingAccount.map { [$0.providerID] } ?? ProviderID.allCases
+        if let relinkingAccount {
+            return ProviderAvailability.allowsAccountAddition(relinkingAccount.providerID, locale: locale)
+                ? [relinkingAccount.providerID]
+                : []
+        }
+        return ProviderAvailability.availableProviders(locale: locale)
+    }
+
+    private var isRelinkUnavailable: Bool {
+        guard let relinkingAccount else { return false }
+        return !ProviderAvailability.allowsAccountAddition(relinkingAccount.providerID, locale: locale)
     }
 
     private var demoCard: some View {
@@ -118,7 +139,7 @@ struct AddAccountView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Preview the experience")
                         .font(.headline)
-                    Text("Randomized ChatGPT limits, banked resets, widgets, and Live Activity.")
+                    Text("Interactive limits, banked resets, charts, widgets, and Live Activity.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }

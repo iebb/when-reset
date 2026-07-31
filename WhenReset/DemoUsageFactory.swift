@@ -1,6 +1,8 @@
 import Foundation
 
 enum DemoUsageFactory {
+    static let providerName = "Sample coding plan"
+
     static func snapshot(for account: MonitoredAccount, at date: Date = .now) -> UsageSnapshot {
         var generator = SystemRandomNumberGenerator()
         return snapshot(for: account, at: date, using: &generator)
@@ -35,7 +37,7 @@ enum DemoUsageFactory {
 
         return UsageSnapshot(
             accountID: account.id,
-            providerName: ProviderID.chatGPT.displayName,
+            providerName: providerName,
             accountName: account.resolvedDisplayName,
             accountProviderID: account.providerID,
             accountSymbolName: account.customSymbolName,
@@ -61,7 +63,7 @@ enum DemoUsageFactory {
             fetchedAt: date,
             extraWindows: [
                 UsageWindow(
-                    title: "GPT-5.3-Codex-Spark",
+                    title: "Monthly coding limit",
                     usedPercent: sparkUsed,
                     resetsAt: date.addingTimeInterval(Double((weeklyResetHours + 6) * 3_600)),
                     windowMinutes: 10_080,
@@ -70,5 +72,32 @@ enum DemoUsageFactory {
                 )
             ]
         )
+    }
+
+    static func historySnapshots(for account: MonitoredAccount,
+                                 endingAt date: Date = .now) -> [UsageSnapshot] {
+        var generator = DemoRandomNumberGenerator(seed: 0x5748_454E_5245_5345)
+        let recentOffsets = stride(from: -24, through: -2, by: 2)
+        let olderOffsets = stride(from: -156, through: -36, by: 12)
+        return (Array(olderOffsets) + Array(recentOffsets)).map { hours in
+            snapshot(
+                for: account,
+                at: date.addingTimeInterval(TimeInterval(hours * 3_600)),
+                using: &generator
+            )
+        }
+    }
+}
+
+private struct DemoRandomNumberGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        state = state &* 6_364_136_223_846_793_005 &+ 1
+        return state
     }
 }

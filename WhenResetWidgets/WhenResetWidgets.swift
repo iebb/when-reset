@@ -582,24 +582,46 @@ private struct ProviderMark: View {
 }
 
 private struct LiveActivityCountdown: View {
+    enum Style {
+        case standard
+        case hero
+    }
+
     let expiry: Date
+    var style = Style.standard
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 60)) { context in
-            switch CountdownDisplay.liveActivityValue(until: expiry, from: context.date) {
-            case let .days(days, hours):
-                Text("\(days)d \(hours)h")
-            case let .hours(hours, minutes):
-                Text(String(format: "%dh %02dm", hours, minutes))
-            case .timer:
-                Text(timerInterval: expiry.addingTimeInterval(-7_200)...expiry,
-                     countsDown: true, showsHours: true)
-                    .contentTransition(.numericText(countsDown: true))
-            case .expired:
-                Text("0:00")
+        TimelineView(.periodic(from: .now, by: style == .hero ? 1 : 60)) { context in
+            if style == .hero {
+                countdownValue(at: context.date)
+                    .font(CountdownDisplay.shouldEmphasizeLiveActivityCountdown(
+                        until: expiry,
+                        from: context.date
+                    ) ? .title2.weight(.semibold) : .headline)
+                    .fontDesign(.monospaced)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .multilineTextAlignment(.trailing)
+            } else {
+                countdownValue(at: context.date)
             }
         }
         .monospacedDigit().lineLimit(1).minimumScaleFactor(0.55)
+    }
+
+    @ViewBuilder
+    private func countdownValue(at date: Date) -> some View {
+        switch CountdownDisplay.liveActivityValue(until: expiry, from: date) {
+        case let .days(days, hours):
+            Text("\(days)d \(hours)h")
+        case let .hours(hours, minutes):
+            Text(String(format: "%dh %02dm", hours, minutes))
+        case .timer:
+            Text(timerInterval: expiry.addingTimeInterval(-7_200)...expiry,
+                 countsDown: true, showsHours: true)
+                .contentTransition(.numericText(countsDown: true))
+        case .expired:
+            Text("0:00")
+        }
     }
 }
 
@@ -642,8 +664,8 @@ private struct LiveHeroTargetCard: View {
                     .frame(width: 19, height: 19)
                 Text(target.accountName).font(.headline).lineLimit(1)
                 Spacer(minLength: 8)
-                LiveActivityCountdown(expiry: target.expiresAt)
-                    .font(.headline).layoutPriority(1)
+                LiveActivityCountdown(expiry: target.expiresAt, style: .hero)
+                    .layoutPriority(1)
             }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if target.isPinned { LiveActivityPinnedMarker() }

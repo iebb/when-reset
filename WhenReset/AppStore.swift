@@ -220,6 +220,12 @@ struct AccountRefreshFailure: Equatable, Sendable {
     }
 }
 
+extension UsageRefreshSource {
+    var presentsFetchFailureAlerts: Bool {
+        self == .manual || self == .accountLink
+    }
+}
+
 @MainActor @Observable
 final class AppStore {
     private(set) var accounts: [MonitoredAccount] = []
@@ -470,18 +476,48 @@ final class AppStore {
         let account = MonitoredAccount(
             id: UUID(),
             providerID: .chatGPT,
-            displayName: "Demo account",
+            displayName: "Sample workspace",
             workspaceID: MonitoredAccount.demoWorkspaceID,
-            plan: "Pro · Demo",
-            addedAt: .now
+            plan: "Sample Pro",
+            addedAt: .now,
+            customSymbolName: "timer.circle.fill"
         )
         accounts.append(account)
         persistAccounts()
+        await seedDemoHistory(for: account)
         await refresh(account, source: .demo)
         return account
     }
 
+    private func seedDemoHistory(for account: MonitoredAccount, endingAt date: Date = .now) async {
+        do {
+            var latestResult: UsageHistoryRecordResult?
+            for snapshot in DemoUsageFactory.historySnapshots(for: account, endingAt: date) {
+                latestResult = try await historyStore.record(
+                    snapshot: snapshot,
+                    account: account,
+                    source: .demo,
+                    notificationsEnabled: false,
+                    now: date
+                )
+            }
+            if let latestResult {
+                usageHistory = latestResult.points
+                historyStorageError = nil
+            }
+        } catch {
+            historyStorageError = error.localizedDescription
+        }
+    }
+
     func beginDeviceLink(for providerID: ProviderID) async {
+        guard ProviderAvailability.allowsAccountAddition(
+            providerID,
+            locale: .autoupdatingCurrent
+        ) else {
+            errorMessage = "This account provider cannot be linked while the device region is set to China."
+            return
+        }
         isLinking = true; errorMessage = nil
         do {
             switch providerID {
@@ -662,7 +698,11 @@ final class AppStore {
             return true
         }
         if isServerMonitoringEnabled(for: account) {
-            await syncServerAccount(account, publishChanges: publishChanges)
+            await syncServerAccount(
+                account,
+                publishChanges: publishChanges,
+                presentErrors: source.presentsFetchFailureAlerts
+            )
         }
         do {
             var credentials = try KeychainStore.load(for: account.id)
@@ -732,7 +772,10 @@ final class AppStore {
             snapshots[account.id] = snapshot
             refreshFailures.removeValue(forKey: account.id)
             if isServerMonitoringEnabled(for: account) {
-                await uploadServerAccount(effectiveAccount)
+                await uploadServerAccount(
+                    effectiveAccount,
+                    presentErrors: source.presentsFetchFailureAlerts
+                )
             }
             if publishChanges {
                 publishSnapshots()
@@ -1780,9 +1823,24 @@ final class AppStore {
                 }
                 UserDefaults.standard.set(true, forKey: accountKeychainMigrationKey)
             }
-            return mergeSyncedAccounts(try KeychainStore.loadAccounts(), localAccounts: cachedAccounts)
+            return normalizeDemoPresentation(
+                mergeSyncedAccounts(try KeychainStore.loadAccounts(), localAccounts: cachedAccounts)
+            )
         } catch {
-            return KeychainStore.orderedAccounts(cachedAccounts)
+            return normalizeDemoPresentation(KeychainStore.orderedAccounts(cachedAccounts))
+        }
+    }
+
+    private static func normalizeDemoPresentation(_ accounts: [MonitoredAccount]) -> [MonitoredAccount] {
+        accounts.map { value in
+            guard value.isDemo else { return value }
+            var account = value
+            account.displayName = "Sample workspace"
+            account.plan = "Sample Pro"
+            if account.customSymbolName == nil {
+                account.customSymbolName = "timer.circle.fill"
+            }
+            return account
         }
     }
 
@@ -1867,13 +1925,15 @@ final class AppStore {
         }
     }
 
-    private func uploadServerAccount(_ account: MonitoredAccount) async {
+    private func uploadServerAccount(_ account: MonitoredAccount,
+                                     presentErrors: Bool = true) async {
         await serverAccountOperationGate.acquire(accountID: account.id)
-        await performServerAccountUpload(account)
+        await performServerAccountUpload(account, presentErrors: presentErrors)
         await serverAccountOperationGate.release(accountID: account.id)
     }
 
-    private func performServerAccountUpload(_ account: MonitoredAccount) async {
+    private func performServerAccountUpload(_ account: MonitoredAccount,
+                                            presentErrors: Bool) async {
         var accountSettings = settings(for: account)
         guard !account.isDemo,
               serverMonitoringEnabled(accountSettings, account: account),
@@ -1911,26 +1971,35 @@ final class AppStore {
                 result,
                 for: currentAccount,
                 consentRevision: consentRevision,
-                deliverNotifications: false
+                deliverNotifications: false,
+                presentErrors: presentErrors
             )
         } catch {
             guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
             let currentSettings = settings(for: currentAccount)
             guard serverMonitoringEnabled(currentSettings, account: currentAccount),
                   currentSettings.selfHostedServerConsentRevision == consentRevision else { return }
-            errorMessage = error.localizedDescription
+            if presentErrors {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
     private func syncServerAccount(_ account: MonitoredAccount,
-                                   publishChanges: Bool) async {
+                                   publishChanges: Bool,
+                                   presentErrors: Bool) async {
         await serverAccountOperationGate.acquire(accountID: account.id)
-        await performServerAccountSync(account, publishChanges: publishChanges)
+        await performServerAccountSync(
+            account,
+            publishChanges: publishChanges,
+            presentErrors: presentErrors
+        )
         await serverAccountOperationGate.release(accountID: account.id)
     }
 
     private func performServerAccountSync(_ account: MonitoredAccount,
-                                          publishChanges: Bool) async {
+                                          publishChanges: Bool,
+                                          presentErrors: Bool) async {
         let accountSettings = settings(for: account)
         guard !account.isDemo,
               serverMonitoringEnabled(accountSettings, account: account),
@@ -1954,7 +2023,8 @@ final class AppStore {
                 result,
                 for: currentAccount,
                 consentRevision: consentRevision,
-                deliverNotifications: publishChanges
+                deliverNotifications: publishChanges,
+                presentErrors: presentErrors
             )
         } catch let PushServerError.serverRejected(code) where code == 404 {
             // A newly enabled account may not have reached the Worker yet. The upload after the
@@ -1964,7 +2034,9 @@ final class AppStore {
             let currentSettings = settings(for: currentAccount)
             guard serverMonitoringEnabled(currentSettings, account: currentAccount),
                   currentSettings.selfHostedServerConsentRevision == consentRevision else { return }
-            errorMessage = error.localizedDescription
+            if presentErrors {
+                errorMessage = error.localizedDescription
+            }
         }
     }
 
@@ -2008,7 +2080,8 @@ final class AppStore {
     private func consumeServerResult(_ result: ServerAccountSyncResult,
                                      for account: MonitoredAccount,
                                      consentRevision: Int64,
-                                     deliverNotifications: Bool) async {
+                                     deliverNotifications: Bool,
+                                     presentErrors: Bool) async {
         guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
         let currentSettings = settings(for: currentAccount)
         guard serverMonitoringEnabled(currentSettings, account: currentAccount),
@@ -2027,7 +2100,7 @@ final class AppStore {
         guard let snapshot = result.snapshot,
               snapshot.fetchedAt > (snapshots[account.id]?.fetchedAt ?? .distantPast),
               accounts.contains(where: { $0.id == account.id }) else {
-            if let lastError = result.lastError, !lastError.isEmpty {
+            if presentErrors, let lastError = result.lastError, !lastError.isEmpty {
                 errorMessage = lastError
             }
             return
