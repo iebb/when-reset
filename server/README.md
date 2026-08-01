@@ -27,7 +27,7 @@ Bundled key SHA-256: `9512a4e0063a0aa9ca5974d458c0d4fff6abd936c0d97e97d1814cd919
 
 ## Deploy
 
-Click the button above, sign in to Cloudflare, and choose names for the Worker, D1 database, and Queue. Cloudflare provisions and binds those resources from `wrangler.jsonc`; the deploy script applies the D1 migration automatically.
+Click the button above, sign in to Cloudflare, and choose names for the Worker, D1 database, and Queue. Cloudflare provisions and binds those resources from `wrangler.jsonc`; the deploy script initializes the new D1 database directly from `schema.sql` before deploying the Worker. This first release has no upgrade or migration path because there are no existing deployments to preserve.
 
 The deployment form asks for two independent secrets:
 
@@ -55,7 +55,7 @@ npx wrangler d1 create when-reset-push
 npx wrangler queues create when-reset-push
 ```
 
-Put the returned D1 ID in `wrangler.jsonc`, set the enrollment secret, then deploy:
+Put the returned D1 ID in `wrangler.jsonc`, set both secrets, then deploy. The deploy command initializes the new database directly from `schema.sql`:
 
 ```sh
 npx wrangler secret put REGISTRATION_ACCESS_KEY
@@ -89,7 +89,7 @@ Account monitoring uses a monotonic consent tombstone per device and account so 
 - a `DELETE` is accepted at the current or a newer revision, and repeating the current disabled revision is idempotent; and
 - stale requests return `409 consent_revision_conflict` without changing credentials, history, or the tombstone.
 
-Migration `0004` seeds accounts that were already monitored at enabled revision 1. For compatibility, an older app that omits the revision is treated as revision 1. This allows an initial legacy enable or disable, but an omitted revision can never cross an existing disabled or newer tombstone. A newer explicit revision is required to re-enable monitoring after deletion.
+Because this is a fresh deployment, there are no existing monitored accounts to seed. For client compatibility, an older app that omits the revision is treated as revision 1. This allows an initial legacy enable or disable, but an omitted revision can never cross an existing disabled or newer tombstone. A newer explicit revision is required to re-enable monitoring after deletion.
 
 Cron enqueues devices seen within the last 45 days. Provider-monitoring messages are deduplicated by cron occurrence and credential scope before they enter the Queue. Queue consumers retry result fan-out without repeating the provider request, and delete registrations rejected by APNs as invalid or unregistered. A short-lived APNs provider JWT is cached in D1 and rotated after 50 minutes.
 

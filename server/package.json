@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
-    "db:migrate": "wrangler d1 migrations apply DB --remote",
-    "deploy": "npm run db:migrate && wrangler deploy",
+    "db:initialize": "wrangler d1 execute DB --remote --file=./schema.sql",
+    "deploy": "npm run db:initialize && wrangler deploy",
     "test": "vitest run",
     "types": "wrangler types"
   },
