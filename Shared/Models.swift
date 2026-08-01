@@ -441,6 +441,10 @@ enum RefreshInterval: Int, Codable, CaseIterable, Hashable, Sendable {
     static let backgroundOptions: [Self] = [
         .fifteenMinutes, .thirtyMinutes, .oneHour, .twoHours, .fourHours, .eightHours
     ]
+    static let serverMonitoringOptions: [Self] = [
+        .fiveMinutes, .fifteenMinutes, .thirtyMinutes, .oneHour, .twoHours, .fourHours,
+        .eightHours
+    ]
 
     var title: String {
         switch self {

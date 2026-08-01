@@ -5,7 +5,7 @@
 This isolated Cloudflare Worker template can:
 
 - send hourly silent APNs refresh hints to your own devices;
-- optionally monitor selected linked accounts every 15 minutes or longer; and
+- optionally monitor selected linked accounts every 5 minutes or longer; and
 - retain 35 days of per-quota history for higher-resolution 24-hour, 7-day, and 30-day charts.
 
 When Reset does not operate an official server. Server monitoring is off for every account by default. When you enable it for an account, the app uploads that account’s Keychain credentials only to the self-hosted Worker URL you configured.
@@ -43,7 +43,7 @@ After deployment:
 
 The QR contains only the Worker HTTPS origin and a random, five-minute, one-use token. It never contains either deployment secret or any provider credential. Scanning only loads authenticated Worker metadata. When Reset does not register the device, save the Worker configuration, or upload any selected account credentials until the user confirms. The confirmation explains that the Worker operator is inside the credential trust boundary and identifies every account that will be uploaded.
 
-After the device registers, enable **Monitor on Self-hosted Server** in each account that you want the Worker to fetch. The global **Server monitoring** picker controls the selected accounts’ cadence. Per-quota “Show as 100%” choices are sent as minimal metric descriptors so server-side chart samples preserve that behavior when a provider omits a quota. The Worker cron runs every 15 minutes, while silent device refresh hints remain hourly. APNs background delivery is best-effort: iOS may coalesce, delay, or suppress it, so a server sample can reach the on-device chart later than it was recorded.
+After the device registers, enable **Monitor on Self-hosted Server** in each account that you want the Worker to fetch. The global **Server monitoring** picker controls the selected accounts’ cadence, starting at 5 minutes. Per-quota “Show as 100%” choices are sent as minimal metric descriptors so server-side chart samples preserve that behavior when a provider omits a quota. The Worker cron runs every 5 minutes and writes each successful per-quota sample to D1; When Reset merges downloaded server samples into the same 24-hour, 7-day, and 30-day charts as on-device refreshes. Silent device refresh hints remain hourly. APNs background delivery is best-effort: iOS may coalesce, delay, or suppress it, so a server sample can reach the on-device chart later than it was recorded.
 
 ### Manual deployment
 

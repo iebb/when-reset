@@ -17,10 +17,10 @@ enum PushServerMode: String, Codable, CaseIterable, Hashable, Sendable {
 struct PushServerSettings: Codable, Hashable, Sendable {
     var mode: PushServerMode = .disabled
     var customServerURL = ""
-    var serverMonitoringInterval: RefreshInterval = .fifteenMinutes
+    var serverMonitoringInterval: RefreshInterval = .fiveMinutes
 
     init(mode: PushServerMode = .disabled, customServerURL: String = "",
-         serverMonitoringInterval: RefreshInterval = .fifteenMinutes) {
+         serverMonitoringInterval: RefreshInterval = .fiveMinutes) {
         self.mode = mode
         self.customServerURL = customServerURL
         self.serverMonitoringInterval = serverMonitoringInterval
@@ -33,7 +33,7 @@ struct PushServerSettings: Codable, Hashable, Sendable {
         serverMonitoringInterval = try values.decodeIfPresent(
             RefreshInterval.self,
             forKey: .serverMonitoringInterval
-        ) ?? .fifteenMinutes
+        ) ?? .fiveMinutes
     }
 
     func resolvedServerURL() throws -> URL? {
@@ -815,7 +815,7 @@ enum PushServerClient {
         guard consentRevision > 0 else { throw PushServerError.accountMonitoringUnavailable }
         let (serverURL, registration) = try monitoringContext(settings: settings)
         let interval = settings.serverMonitoringInterval.timeInterval
-            ?? RefreshInterval.fifteenMinutes.timeInterval!
+            ?? RefreshInterval.fiveMinutes.timeInterval!
         var request = URLRequest(url: accountURL(serverURL: serverURL,
                                                  registration: registration,
                                                  accountID: account.id))

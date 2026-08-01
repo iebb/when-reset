@@ -5,7 +5,7 @@
   "compatibility_date": "2026-07-26",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
-  "triggers": { "crons": ["*/15 * * * *"] },
+  "triggers": { "crons": ["*/5 * * * *"] },
   "rules": [
     { "type": "Text", "globs": ["**/*.p8"], "fallthrough": true }
   ],

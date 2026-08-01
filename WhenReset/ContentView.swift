@@ -970,6 +970,13 @@ private struct UsageHistorySeries: Identifiable {
 
     var latest: UsageHistoryPoint { points[points.count - 1] }
 
+    var includesServerSamples: Bool { points.contains { $0.source == .server } }
+
+    var sourceSummary: String {
+        let includesDeviceSamples = points.contains { $0.source != .server }
+        return includesDeviceSamples ? "Device + self-hosted Worker" : "Self-hosted Worker"
+    }
+
     var planSummary: String {
         var plans: [String] = []
         var previousKey: String?
@@ -1083,6 +1090,11 @@ private struct AccountUsageHistorySections: View {
                             .multilineTextAlignment(.trailing)
                     }
                     .font(.caption)
+                    if item.includesServerSamples {
+                        LabeledContent("Source", value: item.sourceSummary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     UsageHistoryChart(series: item, range: range, start: start, end: end)
                     HStack(alignment: .firstTextBaseline) {
                         Text("Last recorded")
@@ -1379,7 +1391,7 @@ struct SettingsView: View {
                             .autocorrectionDisabled()
                         Picker("Server monitoring",
                                selection: $pushServerSettings.serverMonitoringInterval) {
-                            ForEach(RefreshInterval.backgroundOptions, id: \.self) { interval in
+                            ForEach(RefreshInterval.serverMonitoringOptions, id: \.self) { interval in
                                 Text(interval.title).tag(interval)
                             }
                         }
@@ -1602,7 +1614,7 @@ private struct WorkerLinkReviewView: View {
     @State private var metadata: WorkerLinkMetadata?
     @State private var validationError: String?
     @State private var selectedAccountIDs: Set<UUID> = []
-    @State private var interval = RefreshInterval.fifteenMinutes
+    @State private var interval = RefreshInterval.fiveMinutes
     @State private var trustsWorker = false
     @State private var isValidating = true
     @State private var isCommitting = false
@@ -1662,7 +1674,7 @@ private struct WorkerLinkReviewView: View {
                             .foregroundStyle(.orange)
                         }
                         Picker("Server monitoring", selection: $interval) {
-                            ForEach(RefreshInterval.backgroundOptions, id: \.self) { option in
+                            ForEach(RefreshInterval.serverMonitoringOptions, id: \.self) { option in
                                 Text(option.title).tag(option)
                             }
                         }

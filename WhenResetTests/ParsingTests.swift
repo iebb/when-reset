@@ -541,6 +541,8 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(defaults.backgroundInterval, .fifteenMinutes)
         XCTAssertNil(RefreshInterval.off.timeInterval)
         XCTAssertEqual(RefreshInterval.twoHours.timeInterval, 7_200)
+        XCTAssertEqual(RefreshInterval.serverMonitoringOptions.first, .fiveMinutes)
+        XCTAssertFalse(RefreshInterval.backgroundOptions.contains(.fiveMinutes))
     }
 
     func testPushServerSettingsDecodeDisabledByDefault() throws {
@@ -551,6 +553,7 @@ final class ParsingTests: XCTestCase {
 
         XCTAssertEqual(settings.mode, .disabled)
         XCTAssertEqual(settings.customServerURL, "")
+        XCTAssertEqual(settings.serverMonitoringInterval, .fiveMinutes)
         XCTAssertNil(try settings.resolvedServerURL())
     }
 
@@ -1835,7 +1838,7 @@ final class UsageHistoryTests: XCTestCase {
         let store = try makeStore()
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let account = makeAccount(provider: .claude)
-        let accepted = UsageHistoryPoint(
+        let older = UsageHistoryPoint(
             accountID: account.id,
             providerID: .claude,
             metricID: "weekly",
@@ -1843,24 +1846,36 @@ final class UsageHistoryTests: XCTestCase {
             kind: .weekly,
             windowMinutes: 10_080,
             remainingPercent: 105,
-            recordedAt: now.addingTimeInterval(-900),
+            recordedAt: now.addingTimeInterval(-600),
             resetsAt: now.addingTimeInterval(5 * 86_400),
-            secondsUntilReset: 5 * 86_400 + 900,
+            secondsUntilReset: 5 * 86_400 + 600,
             source: .server,
             plan: "Max"
         )
-        var rejected = accepted
+        var latest = older
+        latest.remainingPercent = 84
+        latest.recordedAt = older.recordedAt.addingTimeInterval(5 * 60)
+        latest.secondsUntilReset -= 5 * 60
+        var rejected = older
         rejected.accountID = UUID()
 
         let points = try await store.mergeServerHistory(
-            [accepted, rejected],
+            [older, latest, rejected],
             account: account,
             now: now
         )
 
-        XCTAssertEqual(points.count, 1)
-        XCTAssertEqual(points.first?.remainingPercent, 100)
-        XCTAssertEqual(points.first?.source, .server)
+        XCTAssertEqual(points.count, 2)
+        let first = try XCTUnwrap(points.first)
+        let last = try XCTUnwrap(points.last)
+        XCTAssertEqual(first.remainingPercent, 100)
+        XCTAssertEqual(last.remainingPercent, 84)
+        XCTAssertEqual(
+            last.recordedAt.timeIntervalSince(first.recordedAt),
+            5 * 60,
+            accuracy: 0.001
+        )
+        XCTAssertTrue(points.allSatisfy { $0.source == .server && $0.plan == "Max" })
     }
 
     private func makeStore() throws -> UsageHistoryStore {

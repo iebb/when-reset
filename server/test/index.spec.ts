@@ -5,6 +5,8 @@ import { testing } from "../src/index";
 const deviceID = "019f724a-3414-4d52-ae37-0c7024a1ab97";
 const deviceSecret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 const apnsToken = "a".repeat(64);
+const FIVE_MINUTES_SECONDS = 5 * 60;
+const FIVE_MINUTES_MILLISECONDS = FIVE_MINUTES_SECONDS * 1_000;
 
 beforeEach(async () => {
   await env.DB.batch([
@@ -168,7 +170,7 @@ function accountRequestBody(providerID = "chatgpt", consentRevision?: number) {
     provider_id: providerID,
     workspace_id: "workspace-123",
     plan: "Plus",
-    refresh_interval_seconds: 900,
+    refresh_interval_seconds: FIVE_MINUTES_SECONDS,
     ...(consentRevision === undefined ? {} : { consent_revision: consentRevision }),
     missing_quotas: [{
       metric_id: "weekly",
@@ -1090,22 +1092,29 @@ describe("self-hosted account monitoring API", () => {
     }
   });
 
-  it("returns high-resolution history and deletes it with the account", async () => {
+  it("returns five-minute D1 history and deletes it with the account", async () => {
     await registerDevice();
     await SELF.fetch(accountURL, {
       method: "PUT",
       headers: { authorization: `Bearer ${deviceSecret}` },
       body: JSON.stringify(accountRequestBody("claude")),
     });
-    await env.DB.prepare(
+    const insertHistory = env.DB.prepare(
       `INSERT INTO usage_history (
          device_id, account_id, provider_id, metric_id, metric_title, kind, window_minutes,
          remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(
-      deviceID, accountID, "claude", "weekly", "Weekly limit", "weekly", 10_080,
-      72.5, 2_000_000_000, 2_000_086_400, 86_400, "Max"
-    ).run();
+    );
+    await env.DB.batch([
+      insertHistory.bind(
+        deviceID, accountID, "claude", "weekly", "Weekly limit", "weekly", 10_080,
+        72.5, 2_000_000_000, 2_000_086_400, 86_400, "Max",
+      ),
+      insertHistory.bind(
+        deviceID, accountID, "claude", "weekly", "Weekly limit", "weekly", 10_080,
+        70, 2_000_000_300, 2_000_086_400, 86_100, "Max",
+      ),
+    ]);
     await env.DB.prepare(
       `UPDATE monitored_accounts SET encrypted_credentials = 'unreadable-by-design'
        WHERE device_id = ? AND account_id = ?`
@@ -1117,12 +1126,22 @@ describe("self-hosted account monitoring API", () => {
     expect(response.status).toBe(200);
     const responseBody = await response.json<Record<string, unknown>>();
     expect(responseBody).toMatchObject({
-      history: [{
-        provider_id: "claude",
-        metric_id: "weekly",
-        remaining_percent: 72.5,
-        plan: "Max",
-      }],
+      history: [
+        {
+          provider_id: "claude",
+          metric_id: "weekly",
+          remaining_percent: 72.5,
+          recorded_at: 2_000_000_000,
+          plan: "Max",
+        },
+        {
+          provider_id: "claude",
+          metric_id: "weekly",
+          remaining_percent: 70,
+          recorded_at: 2_000_000_300,
+          plan: "Max",
+        },
+      ],
     });
     expect(responseBody).not.toHaveProperty("credentials");
     expect(JSON.stringify(responseBody)).not.toContain("access-secret");
@@ -1138,7 +1157,7 @@ describe("self-hosted account monitoring API", () => {
     ).bind(deviceID, accountID).first<{ count: number }>()).toMatchObject({ count: 0 });
   });
 
-  it("rejects unknown providers, intervals below cron resolution, and unauthorized access", async () => {
+  it("accepts five-minute monitoring and rejects intervals below cron resolution", async () => {
     await registerDevice();
     const unknown = await SELF.fetch(accountURL, {
       method: "PUT",
@@ -1148,12 +1167,20 @@ describe("self-hosted account monitoring API", () => {
     expect(unknown.status).toBe(400);
 
     const tooFrequent = accountRequestBody();
-    tooFrequent.refresh_interval_seconds = 300;
+    tooFrequent.refresh_interval_seconds = FIVE_MINUTES_SECONDS - 1;
     expect((await SELF.fetch(accountURL, {
       method: "PUT",
       headers: { authorization: `Bearer ${deviceSecret}` },
       body: JSON.stringify(tooFrequent),
     })).status).toBe(400);
+
+    const minimumInterval = accountRequestBody();
+    minimumInterval.refresh_interval_seconds = FIVE_MINUTES_SECONDS;
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(minimumInterval),
+    })).status).toBe(201);
 
     expect((await SELF.fetch(`${accountURL}/sync`)).status).toBe(401);
   });
@@ -1168,7 +1195,7 @@ describe("self-hosted account monitoring API", () => {
     }, 2_000_000_001)).toBe(2_000_604_800);
   });
 
-  it("enqueues due account monitors from the 15-minute cron", async () => {
+  it("enqueues due account monitors from the five-minute cron", async () => {
     await registerDevice();
     await SELF.fetch(accountURL, {
       method: "PUT",
@@ -1187,7 +1214,7 @@ describe("self-hosted account monitoring API", () => {
       },
     } as unknown as Env;
 
-    const occurrence = Date.UTC(2033, 4, 18, 3, 15);
+    const occurrence = Date.UTC(2033, 4, 18, 3, 5);
     await testing.runScheduledRefresh(testEnv, occurrence);
 
     expect(queued).toHaveLength(1);
@@ -1205,7 +1232,7 @@ describe("self-hosted account monitoring API", () => {
        WHERE device_id = ? AND account_id = ?`
     ).bind(deviceID, accountID).first()).toEqual({
       scheduled_monitor_at: occurrence / 1_000,
-      next_refresh_at: occurrence / 1_000 + 900,
+      next_refresh_at: occurrence / 1_000 + FIVE_MINUTES_SECONDS,
     });
     expect(queued).not.toContainEqual(expect.objectContaining({ kind: "push" }));
   });
@@ -1228,13 +1255,14 @@ describe("self-hosted account monitoring API", () => {
         },
       },
     } as unknown as Env;
-    const firstOccurrence = Math.ceil(Date.now() / 900_000) * 900_000;
+    const firstOccurrence = Math.ceil(Date.now() / FIVE_MINUTES_MILLISECONDS)
+      * FIVE_MINUTES_MILLISECONDS;
     await testing.runScheduledRefresh(testEnv, firstOccurrence);
     const firstRun = queued.find((body) => body.kind === "monitor_run")?.run_id;
     expect(firstRun).toBeTruthy();
 
     queued.length = 0;
-    await testing.runScheduledRefresh(testEnv, firstOccurrence + 900_000);
+    await testing.runScheduledRefresh(testEnv, firstOccurrence + FIVE_MINUTES_MILLISECONDS);
     const recoveredRuns = queued.filter((body) => body.kind === "monitor_run");
     expect(recoveredRuns).toEqual([{ kind: "monitor_run", run_id: firstRun }]);
     expect(await env.DB.prepare(
@@ -1260,7 +1288,8 @@ describe("self-hosted account monitoring API", () => {
         },
       },
     } as unknown as Env;
-    const occurrence = Math.ceil(Date.now() / 900_000) * 900_000;
+    const occurrence = Math.ceil(Date.now() / FIVE_MINUTES_MILLISECONDS)
+      * FIVE_MINUTES_MILLISECONDS;
     await testing.runScheduledRefresh(testEnv, occurrence);
     const runID = queued.find((body) => body.kind === "monitor_run")!.run_id!;
     await env.DB.prepare(
@@ -1306,7 +1335,8 @@ describe("self-hosted account monitoring API", () => {
         },
       },
     } as unknown as Env;
-    const occurrence = Math.ceil(Date.now() / 900_000) * 900_000;
+    const occurrence = Math.ceil(Date.now() / FIVE_MINUTES_MILLISECONDS)
+      * FIVE_MINUTES_MILLISECONDS;
     await testing.runScheduledRefresh(testEnv, occurrence);
     const runID = queued.find((body) => body.kind === "monitor_run")!.run_id!;
     await env.DB.batch([
@@ -1352,7 +1382,8 @@ describe("self-hosted account monitoring API", () => {
         },
       },
     } as unknown as Env;
-    const firstOccurrence = Math.ceil(Date.now() / 900_000) * 900_000;
+    const firstOccurrence = Math.ceil(Date.now() / FIVE_MINUTES_MILLISECONDS)
+      * FIVE_MINUTES_MILLISECONDS;
     await testing.runScheduledRefresh(testEnv, firstOccurrence);
     const runID = queued.find((body) => body.kind === "monitor_run")!.run_id!;
     await env.DB.prepare(
@@ -1360,7 +1391,7 @@ describe("self-hosted account monitoring API", () => {
     ).bind(firstOccurrence / 1_000 - 1_000, runID).run();
 
     queued.length = 0;
-    await testing.runScheduledRefresh(testEnv, firstOccurrence + 900_000);
+    await testing.runScheduledRefresh(testEnv, firstOccurrence + 3 * FIVE_MINUTES_MILLISECONDS);
     expect(queued.filter((body) => body.kind === "monitor_run"))
       .toContainEqual({ kind: "monitor_run", run_id: runID });
     let fetchCount = 0;
@@ -1408,7 +1439,8 @@ describe("self-hosted account monitoring API", () => {
         },
       },
     } as unknown as Env;
-    const occurrence = Math.ceil(Date.now() / 900_000) * 900_000;
+    const occurrence = Math.ceil(Date.now() / FIVE_MINUTES_MILLISECONDS)
+      * FIVE_MINUTES_MILLISECONDS;
     await testing.runScheduledRefresh(testEnv, occurrence);
     const runID = queued.find((body) => body.kind === "monitor_run")!.run_id!;
 
@@ -1513,7 +1545,8 @@ describe("self-hosted account monitoring API", () => {
         },
       },
     } as unknown as Env;
-    const occurrence = Math.ceil(Date.now() / 900_000) * 900_000;
+    const occurrence = Math.ceil(Date.now() / FIVE_MINUTES_MILLISECONDS)
+      * FIVE_MINUTES_MILLISECONDS;
     await testing.runScheduledRefresh(testEnv, occurrence);
     const monitorMessages = queued.filter(
       (body): body is { kind: "monitor_run"; run_id: string } =>

@@ -47,6 +47,6 @@ The OpenAI Blossom is used only to identify the ChatGPT provider. OpenAI, ChatGP
 
 ## Push refresh server
 
-The optional [Cloudflare Worker](server/README.md) is self-hosted in the user’s Cloudflare account. It sends hourly silent refresh hints and can, only for accounts individually opted in by the user, encrypt provider credentials in D1 and record quota every 15 minutes or longer. Credential upload is write-only through the Worker API, and overlapping client accounts are fetched once per credential scope and cron occurrence. When Reset does not operate an official server.
+The optional [Cloudflare Worker](server/README.md) is self-hosted in the user’s Cloudflare account. It sends hourly silent refresh hints and can, only for accounts individually opted in by the user, encrypt provider credentials in D1 and record quota every 5 minutes or longer. The app merges those server samples into its 24-hour, 7-day, and 30-day usage charts. Credential upload is write-only through the Worker API, and overlapping client accounts are fetched once per credential scope and cron occurrence. When Reset does not operate an official server.
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iebb/when-reset/tree/master/server)
