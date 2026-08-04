@@ -92,6 +92,16 @@ enum ProviderAvailability {
     static func availableProviders(locale: Locale) -> [ProviderID] {
         ProviderID.allCases.filter { allowsAccountAddition($0, locale: locale) }
     }
+
+    static func providerChoices(locale: Locale, relinkingProvider: ProviderID?) -> [ProviderID] {
+        if let relinkingProvider { return [relinkingProvider] }
+        return availableProviders(locale: locale)
+    }
+
+    static func allowsLinkStart(_ providerID: ProviderID, locale: Locale,
+                                isRelinking: Bool) -> Bool {
+        isRelinking || allowsAccountAddition(providerID, locale: locale)
+    }
 }
 
 enum LiveActivityMode: String, Codable, CaseIterable, Sendable {
@@ -368,7 +378,7 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     var isDemo: Bool { workspaceID == Self.demoWorkspaceID }
 
     var providerDisplayName: String {
-        isDemo ? "Sample coding plan" : providerID.displayName
+        isDemo ? "Your AI Provider" : providerID.displayName
     }
 
     func providerSectionTitle(plan: String?) -> String {
@@ -681,8 +691,8 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
     }
 
     static let preview = UsageSnapshot(
-        accountID: UUID(), providerName: "ChatGPT", accountName: "Personal",
-        accountProviderID: .chatGPT, plan: "Pro",
+        accountID: UUID(), providerName: "Your AI Provider", accountName: "Demo workspace",
+        accountProviderID: .chatGPT, accountSymbolName: "timer.circle.fill", plan: "Demo plan",
         primary: UsageWindow(title: "5 hour", usedPercent: 37, resetsAt: .now.addingTimeInterval(5_400), windowMinutes: 300),
         secondary: UsageWindow(title: "Weekly", usedPercent: 68, resetsAt: .now.addingTimeInterval(180_000), windowMinutes: 10_080),
         availableResetCount: 2,

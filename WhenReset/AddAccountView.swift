@@ -59,18 +59,6 @@ struct AddAccountView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                if store.accounts.isEmpty, relinkingAccount == nil {
-                    demoCard
-                }
-
-                if isRelinkUnavailable {
-                    ContentUnavailableView {
-                        Label("Unavailable in your region", systemImage: "globe.asia.australia.fill")
-                    } description: {
-                        Text("This account provider cannot be linked while the device region is set to China.")
-                    }
-                }
-
                 if !availableProviders.isEmpty {
                     VStack(alignment: .leading, spacing: 12) {
                         Text(relinkingAccount == nil ? "Connect a provider" : "Account provider")
@@ -107,6 +95,10 @@ struct AddAccountView: View {
                         }
                     }
                 }
+
+                if store.accounts.isEmpty, relinkingAccount == nil {
+                    demoCard
+                }
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 22)
@@ -115,17 +107,10 @@ struct AddAccountView: View {
     }
 
     private var availableProviders: [ProviderID] {
-        if let relinkingAccount {
-            return ProviderAvailability.allowsAccountAddition(relinkingAccount.providerID, locale: locale)
-                ? [relinkingAccount.providerID]
-                : []
-        }
-        return ProviderAvailability.availableProviders(locale: locale)
-    }
-
-    private var isRelinkUnavailable: Bool {
-        guard let relinkingAccount else { return false }
-        return !ProviderAvailability.allowsAccountAddition(relinkingAccount.providerID, locale: locale)
+        ProviderAvailability.providerChoices(
+            locale: locale,
+            relinkingProvider: relinkingAccount?.providerID
+        )
     }
 
     private var demoCard: some View {
@@ -137,9 +122,9 @@ struct AddAccountView: View {
                     .frame(width: 46, height: 46)
                     .background(Color.accentColor.gradient, in: .rect(cornerRadius: 14))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Preview the experience")
+                    Text("Your AI Provider")
                         .font(.headline)
-                    Text("Interactive limits, banked resets, charts, widgets, and Live Activity.")
+                    Text("A credential-free demo with limits, charts, widgets, and Live Activity.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -155,7 +140,7 @@ struct AddAccountView: View {
             } label: {
                 HStack {
                     if isAddingDemo { ProgressView().tint(.white) }
-                    Text(isAddingDemo ? "Preparing demo…" : "Try it out with our demo")
+                    Text(isAddingDemo ? "Preparing demo…" : "Open Your AI Provider")
                         .fontWeight(.semibold)
                     Spacer()
                     Image(systemName: "arrow.right")
@@ -196,7 +181,7 @@ struct AddAccountView: View {
                 .foregroundStyle(.secondary)
             Button {
                 completionTask = Task {
-                    await store.beginDeviceLink(for: provider)
+                    await store.beginDeviceLink(for: provider, replacing: relinkingAccount)
                     if let link = store.deviceLink {
                         openURL(link.verificationURL)
                         if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }

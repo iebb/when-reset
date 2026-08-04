@@ -476,9 +476,9 @@ final class AppStore {
         let account = MonitoredAccount(
             id: UUID(),
             providerID: .chatGPT,
-            displayName: "Sample workspace",
+            displayName: "Demo workspace",
             workspaceID: MonitoredAccount.demoWorkspaceID,
-            plan: "Sample Pro",
+            plan: "Demo plan",
             addedAt: .now,
             customSymbolName: "timer.circle.fill"
         )
@@ -510,12 +510,13 @@ final class AppStore {
         }
     }
 
-    func beginDeviceLink(for providerID: ProviderID) async {
-        guard ProviderAvailability.allowsAccountAddition(
+    func beginDeviceLink(for providerID: ProviderID,
+                         replacing relinkingAccount: MonitoredAccount? = nil) async {
+        guard ProviderAvailability.allowsLinkStart(
             providerID,
-            locale: .autoupdatingCurrent
+            locale: .autoupdatingCurrent,
+            isRelinking: relinkingAccount != nil
         ) else {
-            errorMessage = "This account provider cannot be linked while the device region is set to China."
             return
         }
         isLinking = true; errorMessage = nil
@@ -1835,8 +1836,8 @@ final class AppStore {
         accounts.map { value in
             guard value.isDemo else { return value }
             var account = value
-            account.displayName = "Sample workspace"
-            account.plan = "Sample Pro"
+            account.displayName = "Demo workspace"
+            account.plan = "Demo plan"
             if account.customSymbolName == nil {
                 account.customSymbolName = "timer.circle.fill"
             }

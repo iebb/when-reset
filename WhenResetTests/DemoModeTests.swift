@@ -19,7 +19,9 @@ final class DemoModeTests: XCTestCase {
 
         XCTAssertTrue(account.isDemo)
         XCTAssertEqual(snapshot.accountID, account.id)
-        XCTAssertEqual(snapshot.providerName, "Sample coding plan")
+        XCTAssertEqual(snapshot.providerName, "Your AI Provider")
+        XCTAssertEqual(account.providerDisplayName, "Your AI Provider")
+        XCTAssertFalse(snapshot.providerName.localizedCaseInsensitiveContains("ChatGPT"))
         XCTAssertEqual(snapshot.usageWindows.map(\.displayTitle), ["5h limit", "Weekly limit", "Monthly coding limit"])
         XCTAssertTrue(snapshot.usageWindows.allSatisfy { (0...100).contains($0.usedPercent) })
         XCTAssertTrue((2...4).contains(snapshot.availableResetCount))
@@ -31,8 +33,8 @@ final class DemoModeTests: XCTestCase {
     func testDemoHistoryShowsBothDailyAndWeeklyChartRanges() {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let account = MonitoredAccount(
-            id: UUID(), providerID: .chatGPT, displayName: "Sample workspace",
-            workspaceID: MonitoredAccount.demoWorkspaceID, plan: "Sample Pro", addedAt: now
+            id: UUID(), providerID: .chatGPT, displayName: "Demo workspace",
+            workspaceID: MonitoredAccount.demoWorkspaceID, plan: "Demo plan", addedAt: now
         )
 
         let snapshots = DemoUsageFactory.historySnapshots(for: account, endingAt: now)
@@ -43,12 +45,22 @@ final class DemoModeTests: XCTestCase {
         XCTAssertTrue(snapshots.allSatisfy { $0.providerName == DemoUsageFactory.providerName })
     }
 
-    func testChinaRegionExcludesChatGPTAccountAddition() {
+    func testChinaRegionOnlyExcludesNewChatGPTAccountAddition() {
         let china = Locale(identifier: "zh-Hans-CN")
         let unitedStates = Locale(identifier: "en-US")
 
         XCTAssertFalse(ProviderAvailability.allowsAccountAddition(.chatGPT, locale: china))
         XCTAssertFalse(ProviderAvailability.availableProviders(locale: china).contains(.chatGPT))
+        XCTAssertEqual(
+            ProviderAvailability.providerChoices(locale: china, relinkingProvider: .chatGPT),
+            [.chatGPT]
+        )
+        XCTAssertFalse(
+            ProviderAvailability.allowsLinkStart(.chatGPT, locale: china, isRelinking: false)
+        )
+        XCTAssertTrue(
+            ProviderAvailability.allowsLinkStart(.chatGPT, locale: china, isRelinking: true)
+        )
         XCTAssertTrue(ProviderAvailability.allowsAccountAddition(.chatGPT, locale: unitedStates))
         XCTAssertTrue(ProviderAvailability.availableProviders(locale: china).contains(.claude))
     }

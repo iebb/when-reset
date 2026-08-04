@@ -198,6 +198,17 @@ private struct FirstRunExperienceView: View {
                 FirstRunDashboardPreview()
 
                 VStack(spacing: 10) {
+                    Button(action: connectAccount) {
+                        Label("Connect an account", systemImage: "person.crop.circle.badge.plus")
+                            .fontWeight(.semibold)
+                            .frame(maxWidth: .infinity, minHeight: 32)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: 15))
+                    .controlSize(.large)
+                    .disabled(isPreparingDemo)
+                    .accessibilityIdentifier("connect-account-button")
+
                     Button(action: openDemo) {
                         HStack {
                             if isPreparingDemo { ProgressView().tint(.white) }
@@ -208,22 +219,11 @@ private struct FirstRunExperienceView: View {
                         }
                         .frame(maxWidth: .infinity, minHeight: 32)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.roundedRectangle(radius: 15))
-                    .controlSize(.large)
-                    .disabled(isPreparingDemo)
-                    .accessibilityIdentifier("open-demo-button")
-
-                    Button(action: connectAccount) {
-                        Label("Connect an account", systemImage: "person.crop.circle.badge.plus")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                    }
                     .buttonStyle(.bordered)
                     .buttonBorderShape(.roundedRectangle(radius: 15))
                     .controlSize(.large)
                     .disabled(isPreparingDemo)
-                    .accessibilityIdentifier("connect-account-button")
+                    .accessibilityIdentifier("open-demo-button")
                 }
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 12)], spacing: 12) {
@@ -300,9 +300,9 @@ private struct FirstRunDashboardPreview: View {
                     .font(.title2)
                     .foregroundStyle(Color.accentColor)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("Sample workspace")
+                    Text("Your AI Provider")
                         .font(.headline)
-                    Text("Coding plan overview")
+                    Text("Credential-free demo")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

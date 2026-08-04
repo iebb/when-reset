@@ -1,7 +1,7 @@
 import Foundation
 
 enum DemoUsageFactory {
-    static let providerName = "Sample coding plan"
+    static let providerName = "Your AI Provider"
 
     static func snapshot(for account: MonitoredAccount, at date: Date = .now) -> UsageSnapshot {
         var generator = SystemRandomNumberGenerator()
