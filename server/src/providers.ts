@@ -1,7 +1,8 @@
 const MAX_PROVIDER_RESPONSE_BYTES = 1_048_576;
 const USER_AGENT = "WhenReset-Worker/1.0";
 
-export type ProviderID = "chatgpt" | "claude" | "kimi" | "github_copilot" | "zai" | "minimax";
+export type ProviderID = "chatgpt" | "claude" | "kimi" | "github_copilot" | "zai" | "minimax"
+  | "synthetic" | "warp";
 export type WindowKind = "fiveHour" | "weekly" | "additional";
 
 export type ProviderCredentials = {
@@ -72,6 +73,8 @@ export async function fetchProviderUsage(
     case "github_copilot": return fetchCopilot(account, originalCredentials, now);
     case "zai": return fetchZAI(account, originalCredentials, now);
     case "minimax": return fetchMiniMax(account, originalCredentials, now);
+    case "synthetic": return fetchSynthetic(account, originalCredentials, now);
+    case "warp": return fetchWarp(account, originalCredentials, now);
   }
 }
 
@@ -597,6 +600,131 @@ function miniMaxWindow(
     weekly ? 10_080 : 300, percent, reset);
 }
 
+async function fetchSynthetic(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const value = await getJSON("https://api.synthetic.new/v2/quotas", {
+    authorization: `Bearer ${credentials.access_token}`,
+    accept: "application/json",
+    "user-agent": USER_AGENT,
+  });
+  const root = requiredRecord(value, "Synthetic returned unreadable quota data.");
+  const windows = syntheticWindows(root, now);
+  if (windows.length === 0) throw new ProviderFetchError("Synthetic returned no resettable quota.");
+  const payload = asRecord(root.data) ?? root;
+  const plan = firstText(payload, ["plan", "planName", "plan_name", "subscription", "tier"])
+    ?? account.plan;
+  return { credentials, snapshot: snapshot(account.provider_id, plan, now, windows, 0, []) };
+}
+
+function syntheticWindows(root: Record<string, unknown>, now: number): ProviderUsageWindow[] {
+  const payload = asRecord(root.data) ?? root;
+  const candidates: Array<{
+    value: unknown;
+    title: string;
+    minutes: number;
+    kind: WindowKind;
+    id: string;
+  }> = [
+    { value: payload.rollingFiveHourLimit, title: "5h limit", minutes: 300,
+      kind: "fiveHour", id: "synthetic:five_hour" },
+    { value: payload.weeklyTokenLimit, title: "Weekly limit", minutes: 10_080,
+      kind: "weekly", id: "synthetic:weekly" },
+  ];
+  return candidates.map((candidate, position) => {
+    const quota = asRecord(candidate.value);
+    if (!quota) return null;
+    const remainingPercent = syntheticRemainingPercent(quota);
+    const reset = timestamp(quota.resetAt ?? quota.reset_at ?? quota.resetsAt ?? quota.resets_at
+      ?? quota.nextTickAt ?? quota.next_tick_at ?? quota.nextRegenAt ?? quota.next_regen_at
+      ?? quota.periodEnd ?? quota.period_end);
+    if (remainingPercent === null || reset === null || reset <= now) return null;
+    return window(position, candidate.id, candidate.title, candidate.kind, candidate.minutes,
+      remainingPercent, reset);
+  }).filter((item): item is ProviderUsageWindow => item !== null);
+}
+
+function syntheticRemainingPercent(root: Record<string, unknown>): number | null {
+  const explicit = number(root.percentRemaining ?? root.remainingPercent
+    ?? root.remaining_percent ?? root.percent_remaining);
+  if (explicit !== null) return clamp(explicit);
+  const usedPercent = number(root.percentUsed ?? root.usedPercent ?? root.used_percent
+    ?? root.percent_used ?? root.percentage);
+  if (usedPercent !== null) return clamp(100 - usedPercent);
+  const limit = currencyNumber(root.limit ?? root.max ?? root.total ?? root.maxCredits);
+  const remaining = currencyNumber(root.remaining ?? root.left ?? root.remainingCredits);
+  const used = currencyNumber(root.used ?? root.usage ?? root.usedCredits);
+  if (limit === null || limit <= 0) return null;
+  if (remaining !== null) return clamp(remaining / limit * 100);
+  if (used !== null) return clamp(100 - used / limit * 100);
+  return null;
+}
+
+const WARP_QUERY = `
+query GetRequestLimitInfo($requestContext: RequestContext!) {
+  user(requestContext: $requestContext) {
+    __typename
+    ... on UserOutput {
+      user { requestLimitInfo { isUnlimited nextRefreshTime requestLimit requestsUsedSinceLastRefresh } }
+    }
+  }
+}`;
+
+async function fetchWarp(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const value = await requestJSON("https://app.warp.dev/graphql/v2?op=GetRequestLimitInfo", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${credentials.access_token}`,
+      accept: "application/json",
+      "content-type": "application/json",
+      "user-agent": "Warp/1.0",
+      "x-warp-client-id": "warp-app",
+      "x-warp-os-category": "macOS",
+      "x-warp-os-name": "macOS",
+      "x-warp-os-version": "14.0.0",
+    },
+    body: JSON.stringify({
+      query: WARP_QUERY,
+      operationName: "GetRequestLimitInfo",
+      variables: {
+        requestContext: {
+          clientContext: {},
+          osContext: { category: "macOS", name: "macOS", version: "14.0.0" },
+        },
+      },
+    }),
+  });
+  const root = requiredRecord(value, "Warp returned unreadable quota data.");
+  const quota = warpWindow(root, 0, now);
+  if (!quota) throw new ProviderFetchError("Warp returned no resettable quota.");
+  return {
+    credentials,
+    snapshot: snapshot(account.provider_id, account.plan ?? "Warp", now, [quota], 0, []),
+  };
+}
+
+function warpWindow(root: Record<string, unknown>, position: number, now: number): ProviderUsageWindow | null {
+  const errors = Array.isArray(root.errors) ? root.errors : [];
+  if (errors.length > 0) return null;
+  const data = asRecord(root.data);
+  const output = asRecord(data?.user);
+  const user = asRecord(output?.user);
+  const quota = asRecord(user?.requestLimitInfo);
+  if (!quota || quota.isUnlimited === true) return null;
+  const limit = number(quota.requestLimit);
+  const used = number(quota.requestsUsedSinceLastRefresh);
+  const reset = timestamp(quota.nextRefreshTime);
+  if (limit === null || limit <= 0 || used === null || reset === null || reset <= now) return null;
+  return window(position, "warp:monthly_credits", "Monthly credits", "additional", null,
+    100 - used / limit * 100, reset);
+}
+
 function snapshot(
   providerID: ProviderID,
   plan: string | null,
@@ -735,6 +863,11 @@ function number(value: unknown): number | null {
   return null;
 }
 
+function currencyNumber(value: unknown): number | null {
+  if (typeof value === "string") return number(value.replace(/[$,%]/g, ""));
+  return number(value);
+}
+
 function integer(value: unknown): number | null {
   const parsed = number(value);
   return parsed === null ? null : Math.trunc(parsed);
@@ -852,5 +985,7 @@ export const providerTesting = {
   jwtExpiration,
   quotaFromUnknown,
   miniMaxWindow,
+  syntheticWindows,
+  warpWindow,
   zaiWindow,
 };

@@ -51,7 +51,8 @@ struct ProviderIcon: View {
         switch providerID {
         case .chatGPT: .white
         case .claude: .clear
-        case .kimi, .zai, .miniMax: .clear
+        case .kimi, .zai, .miniMax, .synthetic, .ollamaCloud, .warp, .antigravity,
+             .compatibleAPI: .clear
         case .githubCopilot: .secondary.opacity(0.12)
         }
     }
@@ -63,6 +64,11 @@ struct ProviderIcon: View {
         case .githubCopilot: .purple
         case .zai: .primary
         case .miniMax: Color(red: 0.91, green: 0.21, blue: 0.38)
+        case .synthetic: .cyan
+        case .ollamaCloud: .primary
+        case .warp: .purple
+        case .antigravity: .blue
+        case .compatibleAPI: .secondary
         }
     }
 
@@ -72,6 +78,7 @@ struct ProviderIcon: View {
         case .githubCopilot: 0.18
         case .claude, .kimi, .zai: 0
         case .miniMax: 0.13
+        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI: 0.2
         }
     }
 }

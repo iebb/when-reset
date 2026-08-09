@@ -11,6 +11,11 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 - GitHub Copilot device linking with chat and premium-request quotas
 - Z.AI GLM Coding Plan quota monitoring with 5-hour, weekly, and monthly limits
 - MiniMax Token Plan quota monitoring with 5-hour and weekly limits
+- Synthetic rolling 5-hour and weekly quota monitoring
+- Ollama Cloud session and weekly quota monitoring from an on-device browser session
+- Warp monthly request-credit monitoring
+- Experimental Antigravity OAuth quota monitoring for Gemini, Claude, and GPT pools
+- A generic on-device HTTPS usage adapter, including Sub2API-style `/v1/usage` responses
 - Provider marks in the app, widgets, and Live Activity
 - Duration-classified 5-hour and weekly usage windows with live countdowns
 - Nearest banked reset expiry with a day-aware countdown and exact local time
@@ -40,6 +45,10 @@ OAuth succeeds.
 - GitHub Copilot uses GitHub device authorization, but exact remaining quotas come from the undocumented `copilot_internal/user` endpoint. Its bundled VS Code client ID should be replaced with a separately registered client before distribution.
 - Z.AI uses a user-provided GLM Coding Plan key to read the same quota data shown by Usage Statistics. The quota endpoint is not documented as a public API; general-purpose and pay-as-you-go keys are outside this app’s scope.
 - MiniMax uses a user-provided Subscription Key and its documented Token Plan remaining-quota endpoint. When Reset tries the global service first, then the mainland-China service for regional keys. Standard pay-as-you-go keys are outside this app’s scope.
+- Synthetic and Warp use user-provided API keys with fixed quota endpoints. Both can opt in to self-hosted Worker monitoring.
+- Ollama Cloud currently exposes quota windows on its signed-in settings page, not through its API-key endpoints. Its session cookie therefore remains on-device.
+- Antigravity uses Google OAuth and internal Cloud Code Assist quota endpoints. The mobile callback is completed by pasting the localhost URL, and its tokens remain on-device because the protocol is experimental.
+- Compatible API accounts issue only `GET` requests to the exact user-entered HTTPS endpoint (or loopback HTTP), send a bearer key, cap responses at 1 MiB, and require explicit percentages or counters plus future reset timestamps. Their URL and key remain on-device.
 
 When Reset intentionally tracks recurring coding-plan allowances, not general pay-as-you-go API balances. The private and first-party-compatible integrations may change without notice. No provider token is written to app snapshots, logs, or user defaults.
 

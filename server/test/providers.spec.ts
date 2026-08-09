@@ -38,4 +38,45 @@ describe("server-side provider adapters", () => {
       0,
     )).toBe("generated:2000000000000:2000086400000:available:0");
   });
+
+  it("parses Synthetic rolling and weekly quotas", () => {
+    const windows = providerTesting.syntheticWindows({
+      rollingFiveHourLimit: {
+        max: 100,
+        remaining: 75,
+        nextTickAt: 2_000_003_600,
+      },
+      weeklyTokenLimit: {
+        maxCredits: "$100.00",
+        remainingCredits: "$40.00",
+        nextRegenAt: 2_000_086_400,
+      },
+    }, 2_000_000_000);
+
+    expect(windows).toMatchObject([
+      { metric_id: "synthetic:five_hour", remaining_percent: 75 },
+      { metric_id: "synthetic:weekly", remaining_percent: 40 },
+    ]);
+  });
+
+  it("parses Warp request-credit quota", () => {
+    expect(providerTesting.warpWindow({
+      data: {
+        user: {
+          __typename: "UserOutput",
+          user: {
+            requestLimitInfo: {
+              isUnlimited: false,
+              nextRefreshTime: 2_000_086_400,
+              requestLimit: 1_000,
+              requestsUsedSinceLastRefresh: 250,
+            },
+          },
+        },
+      },
+    }, 0, 2_000_000_000)).toMatchObject({
+      metric_id: "warp:monthly_credits",
+      remaining_percent: 75,
+    });
+  });
 });

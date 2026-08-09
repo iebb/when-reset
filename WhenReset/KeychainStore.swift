@@ -7,6 +7,11 @@ struct AccountCredentials: Codable, Equatable, Sendable {
     var refreshToken: String
     var idToken: String
     var expiresAt: Date? = nil
+    var endpointURL: String? = nil
+    var projectID: String? = nil
+    var accountLabel: String? = nil
+    var oauthClientID: String? = nil
+    var oauthClientSecret: String? = nil
 }
 
 enum KeychainStore {

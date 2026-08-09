@@ -803,10 +803,16 @@ struct AccountSettingsView: View {
         switch currentAccount.providerID {
         case .chatGPT, .claude, .kimi:
             "this account’s access token, refresh token, and ID token when available"
-        case .zai, .miniMax:
+        case .zai, .miniMax, .synthetic, .warp:
             "this account’s API key"
         case .githubCopilot:
             "this account’s credentials"
+        case .ollamaCloud:
+            "this account’s browser session cookie"
+        case .antigravity:
+            "this account’s Google OAuth tokens"
+        case .compatibleAPI:
+            "this account’s endpoint URL and API key"
         }
     }
 
@@ -1799,10 +1805,16 @@ private struct WorkerLinkReviewView: View {
         switch providerID {
         case .chatGPT, .claude, .kimi:
             "Access token, refresh token, and ID token when available"
-        case .zai, .miniMax:
+        case .zai, .miniMax, .synthetic, .warp:
             "API key"
         case .githubCopilot:
             "Credentials remain on this device"
+        case .ollamaCloud:
+            "Browser session remains on this device"
+        case .antigravity:
+            "Google OAuth tokens remain on this device"
+        case .compatibleAPI:
+            "Endpoint and API key remain on this device"
         }
     }
 

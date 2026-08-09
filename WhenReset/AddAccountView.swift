@@ -11,11 +11,23 @@ struct AddAccountView: View {
     @State private var claudeCode = ""
     @State private var zaiAPIKey = ""
     @State private var miniMaxAPIKey = ""
+    @State private var syntheticAPIKey = ""
+    @State private var ollamaCookie = ""
+    @State private var warpAPIKey = ""
+    @State private var antigravityClientID = ""
+    @State private var antigravityClientSecret = ""
+    @State private var antigravityCallback = ""
+    @State private var compatibleName = ""
+    @State private var compatibleEndpoint = ""
+    @State private var compatibleAPIKey = ""
     @State private var isAddingDemo = false
 
     init(relinkingAccount: MonitoredAccount? = nil) {
         self.relinkingAccount = relinkingAccount
         _selectedProvider = State(initialValue: relinkingAccount?.providerID)
+        let savedCredentials = relinkingAccount.flatMap { try? KeychainStore.load(for: $0.id) }
+        _antigravityClientID = State(initialValue: savedCredentials?.oauthClientID ?? "")
+        _antigravityClientSecret = State(initialValue: savedCredentials?.oauthClientSecret ?? "")
     }
 
     var body: some View {
@@ -25,6 +37,8 @@ struct AddAccountView: View {
                     linkView(link)
                 } else if let claudeLink = store.claudeLink {
                     claudeCodeView(claudeLink)
+                } else if let antigravityLink = store.antigravityLink {
+                    antigravityCodeView(antigravityLink)
                 } else {
                     providerView
                 }
@@ -171,6 +185,16 @@ struct AddAccountView: View {
             zaiLinker
         case .miniMax:
             miniMaxLinker
+        case .synthetic:
+            syntheticLinker
+        case .ollamaCloud:
+            ollamaCloudLinker
+        case .warp:
+            warpLinker
+        case .antigravity:
+            antigravityLinker
+        case .compatibleAPI:
+            compatibleAPILinker
         }
     }
 
@@ -209,7 +233,8 @@ struct AddAccountView: View {
             "Uses Kimi Code’s device authorization flow. This integration relies on Kimi’s public first-party client and is experimental."
         case .githubCopilot:
             "Uses GitHub device authorization. Exact Copilot quotas come from an undocumented endpoint and may change."
-        case .claude, .zai, .miniMax:
+        case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
+             .antigravity, .compatibleAPI:
             ""
         }
     }
@@ -296,6 +321,183 @@ struct AddAccountView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var syntheticLinker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Enter a Synthetic API key. When Reset reads only the rolling five-hour and weekly quota endpoint.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            providerSecretField("Synthetic API key", text: $syntheticAPIKey)
+            Button {
+                completionTask = Task {
+                    if await store.addSyntheticAccount(
+                        apiKey: syntheticAPIKey,
+                        replacing: relinkingAccount
+                    ) { dismiss() }
+                }
+            } label: {
+                Label("Connect Synthetic", systemImage: "key.fill")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(syntheticAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || store.isLinking)
+            if store.isLinking { ProgressView("Checking Synthetic quota…") }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var ollamaCloudLinker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Ollama API keys do not expose Cloud quota. Paste the Cookie request header from ollama.com/settings; it stays in this device’s Keychain and cannot be enabled for server monitoring.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            providerSecretField("Cookie request header", text: $ollamaCookie)
+            Button {
+                completionTask = Task {
+                    if await store.addOllamaCloudAccount(
+                        cookie: ollamaCookie,
+                        replacing: relinkingAccount
+                    ) { dismiss() }
+                }
+            } label: {
+                Label("Connect Ollama Cloud", systemImage: "lock.fill")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(ollamaCookie.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || store.isLinking)
+            if store.isLinking { ProgressView("Checking Ollama Cloud quota…") }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var warpLinker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Enter the API key generated by Warp. When Reset reads only Warp’s request-credit limit and refresh time.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            providerSecretField("Warp API key", text: $warpAPIKey)
+            Button {
+                completionTask = Task {
+                    if await store.addWarpAccount(apiKey: warpAPIKey, replacing: relinkingAccount) {
+                        dismiss()
+                    }
+                }
+            } label: {
+                Label("Connect Warp", systemImage: "key.fill")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(warpAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || store.isLinking)
+            if store.isLinking { ProgressView("Checking Warp credits…") }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var antigravityLinker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Experimental: enter the installed-app OAuth configuration used by your Antigravity setup, then sign in with Google. It is stored in Keychain with your tokens and is never included in When Reset’s source or sent to its Worker.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            TextField("OAuth client ID", text: $antigravityClientID)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .privacySensitive()
+                .padding(14)
+                .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+            SecureField("OAuth client secret", text: $antigravityClientSecret)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .privacySensitive()
+                .padding(14)
+                .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+            Text("Quotas come from an internal Code Assist API that may change. When Reset never sends prompts or model requests.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button {
+                store.beginAntigravityLink(
+                    clientID: antigravityClientID,
+                    clientSecret: antigravityClientSecret
+                )
+                if let url = store.antigravityLink?.authorizationURL { openURL(url) }
+            } label: {
+                Label("Continue with Google", systemImage: "arrow.right")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(antigravityClientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || antigravityClientSecret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || store.isLinking)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var compatibleAPILinker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Connect an HTTPS endpoint that returns reset windows as JSON, including Sub2API’s GET /v1/usage shape. The URL and bearer key stay on-device to prevent a self-hosted Worker from requesting arbitrary hosts.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            TextField("Provider name", text: $compatibleName)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .padding(14)
+                .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+            TextField("https://example.com/v1/usage", text: $compatibleEndpoint)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .font(.system(.body, design: .monospaced))
+                .padding(14)
+                .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+            providerSecretField("Bearer API key", text: $compatibleAPIKey)
+            Button {
+                completionTask = Task {
+                    if await store.addCompatibleAPIAccount(
+                        endpoint: compatibleEndpoint,
+                        apiKey: compatibleAPIKey,
+                        name: compatibleName,
+                        replacing: relinkingAccount
+                    ) { dismiss() }
+                }
+            } label: {
+                Label("Connect compatible API", systemImage: "network")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(compatibleName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || compatibleEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || compatibleAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || store.isLinking)
+            if store.isLinking { ProgressView("Checking compatible quota…") }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func providerSecretField(_ title: String, text: Binding<String>) -> some View {
+        SecureField(title, text: text)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .font(.system(.body, design: .monospaced))
+            .padding(14)
+            .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+    }
+
     private func claudeCodeView(_ link: ClaudeOAuthLink) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
@@ -332,6 +534,55 @@ struct AddAccountView: View {
                 .buttonBorderShape(.roundedRectangle(radius: 14))
                 .controlSize(.large)
                 Text("The code may include a #state suffix. Paste the complete value so When Reset can verify the sign-in attempt.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(20)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private func antigravityCodeView(_ link: AntigravityOAuthLink) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Finish Antigravity sign-in")
+                    .font(.title2.bold())
+                Text("Google redirects to a desktop localhost address, which will not load on iPhone. Copy the complete URL from Safari’s address bar and paste it here.")
+                    .foregroundStyle(.secondary)
+                TextField("http://localhost:51121/oauth-callback?code=…", text: $antigravityCallback,
+                          axis: .vertical)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(3...7)
+                    .padding(14)
+                    .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+                Button {
+                    completionTask = Task {
+                        if await store.completeAntigravityLink(
+                            callback: antigravityCallback,
+                            replacing: relinkingAccount
+                        ) { dismiss() }
+                    }
+                } label: {
+                    Label("Finish linking", systemImage: "checkmark.circle.fill")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity, minHeight: 30)
+                }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 14))
+                .controlSize(.large)
+                .disabled(antigravityCallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                          || store.isLinking)
+                Button { openURL(link.authorizationURL) } label: {
+                    Label("Open Google again", systemImage: "safari")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity, minHeight: 30)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 14))
+                .controlSize(.large)
+                Text("When Reset verifies the OAuth state before exchanging the code. This integration never sends prompts or model requests.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             }

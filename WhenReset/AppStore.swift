@@ -201,6 +201,9 @@ struct AccountRefreshFailure: Equatable, Sendable {
                 break
             }
         }
+        if let additionalError = error as? AdditionalProviderError {
+            return additionalError.requiresReauthentication
+        }
 
         let nsError = error as NSError
         if nsError.domain == NSOSStatusErrorDomain, nsError.code == Int(errSecItemNotFound) {
@@ -235,6 +238,7 @@ final class AppStore {
     var errorMessage: String?
     var deviceLink: DeviceLinkPresentation?
     var claudeLink: ClaudeOAuthLink?
+    var antigravityLink: AntigravityOAuthLink?
     var isLinking = false
     var monitorSettings: [UUID: AccountMonitorSettings] = [:]
     var liveActivitySettings = GlobalLiveActivitySettings()
@@ -253,6 +257,11 @@ final class AppStore {
     private let copilotProvider = CopilotProvider()
     private let zaiProvider = ZAIProvider()
     private let miniMaxProvider = MiniMaxProvider()
+    private let syntheticProvider = SyntheticProvider()
+    private let ollamaCloudProvider = OllamaCloudProvider()
+    private let warpProvider = WarpProvider()
+    private let antigravityProvider = AntigravityProvider()
+    private let compatibleAPIProvider = CompatibleAPIProvider()
     private var chatGPTLink: DeviceLink?
     private var kimiLink: KimiDeviceLink?
     private var copilotLink: CopilotDeviceLink?
@@ -537,7 +546,8 @@ final class AppStore {
                 copilotLink = link
                 deviceLink = .init(providerID: .githubCopilot, verificationURL: link.verificationURL,
                                    userCode: link.userCode, expiresAt: link.expiresAt)
-            case .claude, .zai, .miniMax:
+            case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
+                 .antigravity, .compatibleAPI:
                 throw ProviderError.server(400, "This provider does not use device linking.")
             }
         } catch {
@@ -562,7 +572,8 @@ final class AppStore {
             case .githubCopilot:
                 guard let copilotLink else { throw ProviderError.invalidResponse }
                 identity = try await copilotProvider.finishLink(copilotLink)
-            case .claude, .zai, .miniMax:
+            case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
+                 .antigravity, .compatibleAPI:
                 throw ProviderError.invalidResponse
             }
             let account = try saveLinkedAccount(identity, providerID: deviceLink.providerID,
@@ -626,6 +637,113 @@ final class AppStore {
         do {
             let identity = try await miniMaxProvider.link(apiKey: apiKey)
             let account = try saveLinkedAccount(identity, providerID: .miniMax, replacing: relinkingAccount)
+            await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
+            isLinking = false
+            await refresh(account, source: .accountLink)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            isLinking = false
+            return false
+        }
+    }
+
+    @discardableResult
+    func addSyntheticAccount(apiKey: String, replacing relinkingAccount: MonitoredAccount? = nil) async -> Bool {
+        await addLinkedIdentity(providerID: .synthetic, replacing: relinkingAccount) {
+            try await self.syntheticProvider.link(apiKey: apiKey)
+        }
+    }
+
+    @discardableResult
+    func addOllamaCloudAccount(cookie: String, replacing relinkingAccount: MonitoredAccount? = nil) async -> Bool {
+        await addLinkedIdentity(providerID: .ollamaCloud, replacing: relinkingAccount) {
+            try await self.ollamaCloudProvider.link(cookie: cookie)
+        }
+    }
+
+    @discardableResult
+    func addWarpAccount(apiKey: String, replacing relinkingAccount: MonitoredAccount? = nil) async -> Bool {
+        await addLinkedIdentity(providerID: .warp, replacing: relinkingAccount) {
+            try await self.warpProvider.link(apiKey: apiKey)
+        }
+    }
+
+    func beginAntigravityLink(clientID: String, clientSecret: String) {
+        isLinking = true
+        errorMessage = nil
+        do {
+            antigravityLink = try antigravityProvider.beginLink(
+                clientID: clientID,
+                clientSecret: clientSecret
+            )
+            isLinking = false
+        } catch {
+            errorMessage = error.localizedDescription
+            isLinking = false
+        }
+    }
+
+    @discardableResult
+    func completeAntigravityLink(
+        callback: String,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        guard let antigravityLink else { return false }
+        isLinking = true
+        errorMessage = nil
+        do {
+            let identity = try await antigravityProvider.finishLink(
+                antigravityLink,
+                callback: callback
+            )
+            let account = try saveLinkedAccount(
+                identity,
+                providerID: .antigravity,
+                replacing: relinkingAccount
+            )
+            await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
+            self.antigravityLink = nil
+            isLinking = false
+            await refresh(account, source: .accountLink)
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            isLinking = false
+            return false
+        }
+    }
+
+    @discardableResult
+    func addCompatibleAPIAccount(
+        endpoint: String,
+        apiKey: String,
+        name: String,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .compatibleAPI, replacing: relinkingAccount) {
+            try await self.compatibleAPIProvider.link(
+                endpoint: endpoint,
+                apiKey: apiKey,
+                name: name
+            )
+        }
+    }
+
+    private func addLinkedIdentity(
+        providerID: ProviderID,
+        replacing relinkingAccount: MonitoredAccount?,
+        link: () async throws -> LinkedIdentity
+    ) async -> Bool {
+        isLinking = true
+        errorMessage = nil
+        do {
+            let identity = try await link()
+            let account = try saveLinkedAccount(
+                identity,
+                providerID: providerID,
+                replacing: relinkingAccount
+            )
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             isLinking = false
             await refresh(account, source: .accountLink)
@@ -761,6 +879,27 @@ final class AppStore {
                 snapshot = try await zaiProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
             case .miniMax:
                 snapshot = try await miniMaxProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
+            case .synthetic:
+                snapshot = try await syntheticProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
+            case .ollamaCloud:
+                snapshot = try await ollamaCloudProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
+            case .warp:
+                snapshot = try await warpProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
+            case .antigravity:
+                let refreshed = try await antigravityProvider.refreshedIfNeeded(credentials)
+                if refreshed != credentials {
+                    try KeychainStore.save(refreshed, for: account.id)
+                    credentials = refreshed
+                }
+                snapshot = try await antigravityProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
+            case .compatibleAPI:
+                snapshot = try await compatibleAPIProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
             }
             guard accounts.contains(where: { $0.id == account.id }) else { return false }
             mergeLatestPlan(snapshot.plan, for: account.id)
@@ -830,6 +969,7 @@ final class AppStore {
         kimiLink = nil
         copilotLink = nil
         claudeLink = nil
+        antigravityLink = nil
     }
 
     func remove(_ account: MonitoredAccount) {

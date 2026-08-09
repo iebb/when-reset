@@ -1886,7 +1886,8 @@ function decodeBase64URL(value: string): Uint8Array<ArrayBuffer> {
 
 function isProviderID(value: unknown): value is ProviderID {
   return typeof value === "string"
-    && ["chatgpt", "claude", "kimi", "github_copilot", "zai", "minimax"].includes(value);
+    && ["chatgpt", "claude", "kimi", "github_copilot", "zai", "minimax", "synthetic", "warp"]
+      .includes(value);
 }
 
 function credentialsSufficient(providerID: ProviderID, accessToken: string, refreshToken: string): boolean {

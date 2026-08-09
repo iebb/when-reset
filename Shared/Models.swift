@@ -7,6 +7,11 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     case githubCopilot = "github_copilot"
     case zai = "zai"
     case miniMax = "minimax"
+    case synthetic = "synthetic"
+    case ollamaCloud = "ollama_cloud"
+    case warp = "warp"
+    case antigravity = "antigravity"
+    case compatibleAPI = "compatible_api"
 
     var displayName: String {
         switch self {
@@ -16,14 +21,25 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .githubCopilot: "GitHub Copilot"
         case .zai: "Z.AI Coding Plan"
         case .miniMax: "MiniMax Token Plan"
+        case .synthetic: "Synthetic"
+        case .ollamaCloud: "Ollama Cloud"
+        case .warp: "Warp"
+        case .antigravity: "Antigravity"
+        case .compatibleAPI: "Compatible API"
         }
     }
 
     var supportsBankedResets: Bool { self == .chatGPT }
 
-    /// Keep Copilot credentials on-device to satisfy App Review Guideline 5.1.1(v).
-    /// The account remains fully available for on-device refreshes.
-    var supportsOffDeviceMonitoring: Bool { self != .githubCopilot }
+    /// Browser sessions, experimental OAuth credentials, and user-selected URLs remain on-device.
+    var supportsOffDeviceMonitoring: Bool {
+        switch self {
+        case .githubCopilot, .ollamaCloud, .antigravity, .compatibleAPI:
+            false
+        default:
+            true
+        }
+    }
 
     func sectionTitle(plan: String?) -> String {
         guard let plan = planDisplayName(plan) else { return displayName }
@@ -57,6 +73,11 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .githubCopilot: "Chat and premium request quotas"
         case .zai: "5-hour, weekly, and monthly limits"
         case .miniMax: "5-hour and weekly coding limits"
+        case .synthetic: "Rolling 5-hour and weekly limits"
+        case .ollamaCloud: "Session and weekly Cloud limits"
+        case .warp: "Monthly request credits"
+        case .antigravity: "Gemini, Claude, and GPT quota pools"
+        case .compatibleAPI: "Reset windows from a compatible endpoint"
         }
     }
 
@@ -68,6 +89,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .githubCopilot: "CopilotLogo"
         case .zai: "ZAILogo"
         case .miniMax: "MiniMaxLogo"
+        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI: nil
         }
     }
 
@@ -78,6 +100,11 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .githubCopilot: "chevron.left.forwardslash.chevron.right"
         case .zai: "z.square.fill"
         case .miniMax: "waveform"
+        case .synthetic: "atom"
+        case .ollamaCloud: "cloud.fill"
+        case .warp: "terminal.fill"
+        case .antigravity: "sparkles"
+        case .compatibleAPI: "network"
         }
     }
 }
