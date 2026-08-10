@@ -65,6 +65,7 @@ private struct UsageTabView: View {
                 else { accountList }
             }
             .navigationTitle(store.accounts.isEmpty ? "When Reset" : "Usage")
+            .navigationBarTitleDisplayMode(store.accounts.isEmpty ? .inline : .automatic)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !store.accounts.isEmpty {
@@ -73,7 +74,11 @@ private struct UsageTabView: View {
                         }.disabled(store.isRefreshing)
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) { Button("Add", systemImage: "plus") { showingAddAccount = true } }
+                ToolbarItem(placement: .topBarTrailing) {
+                    if !store.accounts.isEmpty {
+                        Button("Add", systemImage: "plus") { showingAddAccount = true }
+                    }
+                }
             }
             .refreshable { await store.refreshAll() }
             .sheet(isPresented: $showingAddAccount) { AddAccountView() }
@@ -96,7 +101,11 @@ private struct UsageTabView: View {
                 }
                 Button("Cancel", role: .cancel) { accountPendingRemoval = nil }
             } message: {
-                Text("This deletes the account and credentials from devices using your iCloud Keychain, plus this device’s cached usage, recorded history, and monitor settings.")
+                if accountPendingRemoval?.isRemoteOnly == true {
+                    Text("This removes the Worker subscription and this device’s cached usage, recorded history, and monitor settings. Provider credentials remain on the Worker.")
+                } else {
+                    Text("This deletes the account and credentials from devices using your iCloud Keychain, plus this device’s cached usage, recorded history, and monitor settings.")
+                }
             }
             .alert("Couldn’t update", isPresented: .init(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
@@ -176,23 +185,22 @@ private struct FirstRunExperienceView: View {
 
     var body: some View {
         ScrollView {
-            VStack(spacing: 24) {
-                VStack(spacing: 12) {
-                    Image(systemName: "gauge.with.dots.needle.50percent")
-                        .font(.system(size: 38, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 72, height: 72)
-                        .background(Color.accentColor.gradient, in: .rect(cornerRadius: 22))
-                        .shadow(color: Color.accentColor.opacity(0.25), radius: 18, y: 8)
+            VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Coding-plan companion", systemImage: "sparkles")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 7)
+                        .background(Color.accentColor.opacity(0.11), in: .capsule)
 
-                    Text("Know what resets next")
-                        .font(.largeTitle.bold())
-                        .multilineTextAlignment(.center)
-                    Text("Follow coding-plan quotas, countdowns, and trends in one native dashboard.")
+                    Text("Know what resets next.")
+                        .font(.system(size: 36, weight: .bold, design: .rounded))
+                        .tracking(-0.7)
+                    Text("See every quota, countdown, and trend in one calm, native dashboard.")
                         .font(.body)
                         .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 560)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 FirstRunDashboardPreview()
@@ -211,8 +219,8 @@ private struct FirstRunExperienceView: View {
 
                     Button(action: openDemo) {
                         HStack {
-                            if isPreparingDemo { ProgressView().tint(.white) }
-                            Text(isPreparingDemo ? "Preparing dashboard…" : "Explore interactive demo")
+                            if isPreparingDemo { ProgressView() }
+                            Text(isPreparingDemo ? "Preparing demo…" : "Try the demo")
                                 .fontWeight(.semibold)
                             Spacer()
                             Image(systemName: "arrow.right")
@@ -224,27 +232,31 @@ private struct FirstRunExperienceView: View {
                     .controlSize(.large)
                     .disabled(isPreparingDemo)
                     .accessibilityIdentifier("open-demo-button")
+
+                    Label("No sign-in or credentials needed for the demo", systemImage: "lock.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 250), spacing: 12)], spacing: 12) {
-                    ForEach(features) { feature in
-                        FirstRunFeatureCard(feature: feature)
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Made for the moments between resets")
+                        .font(.headline)
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 10)], spacing: 10) {
+                        ForEach(features) { feature in
+                            FirstRunFeatureCard(feature: feature)
+                        }
                     }
                 }
-
-                Label("The demo needs no account and uses generated data stored on this device.",
-                      systemImage: "lock.shield.fill")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.center)
             }
-            .frame(maxWidth: 720)
-            .padding(.horizontal, 18)
-            .padding(.top, 12)
-            .padding(.bottom, 30)
+            .frame(maxWidth: 620)
+            .padding(.horizontal, 20)
+            .padding(.top, 18)
+            .padding(.bottom, 32)
             .frame(maxWidth: .infinity)
         }
         .background(Color(.systemGroupedBackground))
+        .accessibilityIdentifier("first-run-screen")
     }
 }
 
@@ -259,12 +271,12 @@ private struct FirstRunFeatureCard: View {
     let feature: FirstRunFeature
 
     var body: some View {
-        HStack(alignment: .top, spacing: 11) {
+        VStack(alignment: .leading, spacing: 10) {
             Image(systemName: feature.icon)
                 .font(.headline)
                 .foregroundStyle(Color.accentColor)
-                .frame(width: 34, height: 34)
-                .background(Color.accentColor.opacity(0.12), in: .rect(cornerRadius: 10))
+                .frame(width: 36, height: 36)
+                .background(Color.accentColor.opacity(0.11), in: .circle)
             VStack(alignment: .leading, spacing: 3) {
                 Text(feature.title)
                     .font(.subheadline.weight(.semibold))
@@ -274,31 +286,28 @@ private struct FirstRunFeatureCard: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer(minLength: 0)
         }
         .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 86, alignment: .topLeading)
-        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 17))
+        .frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
+        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(Color(.separator).opacity(0.22), lineWidth: 1)
+        }
     }
 }
 
 private struct FirstRunDashboardPreview: View {
-    private struct Point: Identifiable {
-        let id: Int
-        let remaining: Double
-    }
-
     @State private var nextReset = Date.now.addingTimeInterval(5_430)
-    private let chartPoints = [82.0, 79, 74, 63, 59, 54, 48, 42].enumerated().map {
-        Point(id: $0.offset, remaining: $0.element)
-    }
 
     var body: some View {
-        VStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack(spacing: 10) {
-                Image(systemName: "timer.circle.fill")
-                    .font(.title2)
-                    .foregroundStyle(Color.accentColor)
+                Image(systemName: "timer")
+                    .font(.headline)
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(Color.accentColor.gradient, in: .circle)
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Your AI Provider")
                         .font(.headline)
@@ -317,85 +326,58 @@ private struct FirstRunDashboardPreview: View {
                 }
             }
 
-            Divider()
-
-            FirstRunQuotaPreview(title: "5h limit", remaining: 42, tint: .blue,
-                                 reset: "Resets in 1h 30m")
-            FirstRunQuotaPreview(title: "Weekly limit", remaining: 71, tint: .purple,
-                                 reset: "Resets in 5d 18h")
-
-            HStack(alignment: .bottom, spacing: 14) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Last 24 hours")
-                        .font(.caption)
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .lastTextBaseline, spacing: 5) {
+                    Text("42%")
+                        .font(.system(size: 42, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                    Text("remaining")
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(.secondary)
-                    Text("Usage trend")
-                        .font(.subheadline.weight(.semibold))
                 }
-                Chart(chartPoints) { point in
-                    AreaMark(
-                        x: .value("Sample", point.id),
-                        y: .value("Remaining", point.remaining)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(
-                        .linearGradient(
-                            colors: [Color.accentColor.opacity(0.34), Color.accentColor.opacity(0.02)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    LineMark(
-                        x: .value("Sample", point.id),
-                        y: .value("Remaining", point.remaining)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(Color.accentColor)
-                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round))
-                }
-                .chartXScale(domain: 0...7)
-                .chartYScale(domain: 0...100)
-                .chartXAxis(.hidden)
-                .chartYAxis(.hidden)
-                .frame(height: 58)
-                .accessibilityLabel("Sample 24-hour usage trend")
+                ProgressView(value: 42, total: 100)
+                    .tint(Color.accentColor)
+                    .scaleEffect(x: 1, y: 1.35)
+            }
+
+            HStack(spacing: 0) {
+                FirstRunMiniMetric(title: "5-hour limit", value: "42%", tint: .blue)
+                Divider()
+                    .frame(height: 34)
+                    .padding(.horizontal, 16)
+                FirstRunMiniMetric(title: "Weekly limit", value: "71%", tint: .purple)
             }
         }
-        .padding(18)
+        .padding(20)
         .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 24))
         .overlay {
             RoundedRectangle(cornerRadius: 24)
                 .stroke(Color(.separator).opacity(0.28), lineWidth: 1)
         }
         .shadow(color: .black.opacity(0.06), radius: 18, y: 8)
+        .accessibilityIdentifier("first-run-preview")
     }
 }
 
-private struct FirstRunQuotaPreview: View {
+private struct FirstRunMiniMetric: View {
     let title: String
-    let remaining: Int
+    let value: String
     let tint: Color
-    let reset: String
 
     var body: some View {
-        VStack(spacing: 7) {
-            HStack(alignment: .firstTextBaseline) {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(tint)
+                    .frame(width: 7, height: 7)
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                Text("\(remaining)% left")
-                    .font(.subheadline.weight(.semibold).monospacedDigit())
-            }
-            ProgressView(value: Double(remaining), total: 100)
-                .tint(tint)
-            HStack {
-                Label(reset, systemImage: "arrow.clockwise")
-                Spacer()
-                Image(systemName: "bell.fill")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            Text(value)
+                .font(.headline.monospacedDigit())
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -459,7 +441,7 @@ private struct AccountFailureView: View {
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
-                if failure.requiresRelink {
+                if failure.requiresRelink, !account.isRemoteOnly {
                     Button("Sign in again", systemImage: "arrow.triangle.2.circlepath", action: relink)
                         .buttonStyle(.borderedProminent)
                 } else {
@@ -595,7 +577,11 @@ struct AccountSettingsView: View {
                     Text(currentAccount.providerDisplayName)
                 }
             } footer: {
-                Text("Provider-reported details update during refresh. The account and its credentials sync through iCloud Keychain.")
+                if currentAccount.isRemoteOnly {
+                    Text("Account details and usage are downloaded from the Worker. Provider credentials never leave the Worker.")
+                } else {
+                    Text("Provider-reported details update during refresh. The account and its credentials sync through iCloud Keychain.")
+                }
             }
             if !account.isDemo {
                 Section {
@@ -608,15 +594,21 @@ struct AccountSettingsView: View {
                     Text("Scheduled-time and unexpected reset alerts also require their global settings.")
                 }
                 Section {
-                    Toggle("Monitor on Self-hosted Server",
-                           isOn: serverMonitoringBinding)
-                        .disabled(!currentAccount.providerID.supportsOffDeviceMonitoring
-                                  || (!store.isServerMonitoringEnabled(for: currentAccount)
-                                      && store.pushServerStatus != .registered))
+                    if currentAccount.isRemoteOnly {
+                        Label("Remote Worker only", systemImage: "lock.icloud.fill")
+                    } else {
+                        Toggle("Monitor on Self-hosted Server",
+                               isOn: serverMonitoringBinding)
+                            .disabled(!currentAccount.providerID.supportsOffDeviceMonitoring
+                                      || (!store.isServerMonitoringEnabled(for: currentAccount)
+                                          && store.pushServerStatus != .registered))
+                    }
                 } header: {
                     Text("Self-hosted monitoring")
                 } footer: {
-                    if !currentAccount.providerID.supportsOffDeviceMonitoring {
+                    if currentAccount.isRemoteOnly {
+                        Text("Server-side refreshes and silent pushes are the only update source. Local provider refresh and sign-in are unavailable.")
+                    } else if !currentAccount.providerID.supportsOffDeviceMonitoring {
                         Text("GitHub Copilot credentials stay on this device and cannot be uploaded for off-device monitoring.")
                     } else if store.pushServerSettings.mode == .disabled {
                         Text("Configure a self-hosted server in Settings first.")
@@ -722,10 +714,13 @@ struct AccountSettingsView: View {
                     title: "Added",
                     value: currentAccount.addedAt.formatted(date: .abbreviated, time: .shortened)
                 )
-                if !account.isDemo {
+                if !account.isDemo, !currentAccount.isRemoteOnly {
                     Button("Sign in again", systemImage: "arrow.triangle.2.circlepath") {
                         showingRelink = true
                     }
+                }
+                if currentAccount.isRemoteOnly {
+                    AccountInformationRow(title: "Refresh source", value: "Self-hosted Worker")
                 }
                 Button(account.isDemo ? "Remove demo" : "Remove account", systemImage: "trash", role: .destructive) {
                     confirmingRemoval = true
@@ -772,9 +767,13 @@ struct AccountSettingsView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(account.isDemo
-                 ? "This deletes the demo and its generated usage from this device."
-                 : "This deletes the account and credentials from devices using your iCloud Keychain, plus this device’s cached usage, recorded history, and monitor settings.")
+            if account.isDemo {
+                Text("This deletes the demo and its generated usage from this device.")
+            } else if currentAccount.isRemoteOnly {
+                Text("This removes the Worker subscription and this device’s cached usage, recorded history, and monitor settings. Provider credentials remain on the Worker.")
+            } else {
+                Text("This deletes the account and credentials from devices using your iCloud Keychain, plus this device’s cached usage, recorded history, and monitor settings.")
+            }
         }
     }
 
@@ -1352,6 +1351,7 @@ struct SettingsView: View {
     @State private var pushServerSettings = PushServerSettings()
     @State private var pushServerAccessKey = ""
     @State private var showingWorkerLinkEntry = false
+    @State private var showingRemoteWorkerAccounts = false
     @State private var stagedLinkFromEntry: WorkerLinkDraft?
     @State private var pushServerActionError: String?
 
@@ -1413,6 +1413,10 @@ struct SettingsView: View {
                             Button("Retry") { store.retryPushRegistration() }
                         }
                         if store.pushServerStatus == .registered {
+                            Button("Add Accounts from Worker",
+                                   systemImage: "icloud.and.arrow.down") {
+                                showingRemoteWorkerAccounts = true
+                            }
                             Button("Send Test Refresh") {
                                 Task { await store.requestTestPushRefresh() }
                             }
@@ -1467,6 +1471,9 @@ struct SettingsView: View {
                     stagedLinkFromEntry = .pairing(payload)
                     showingWorkerLinkEntry = false
                 }
+            }
+            .sheet(isPresented: $showingRemoteWorkerAccounts) {
+                RemoteWorkerAccountsView()
             }
             .onChange(of: showingWorkerLinkEntry) { _, isShowing in
                 guard !isShowing, let draft = stagedLinkFromEntry else { return }
@@ -1844,6 +1851,120 @@ private struct WorkerLinkReviewView: View {
         } catch {
             isCommitting = false
             validationError = error.localizedDescription
+        }
+    }
+}
+
+struct RemoteWorkerAccountsView: View {
+    @Environment(AppStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var accounts: [RemoteWorkerAccountCandidate] = []
+    @State private var selectedIDs: Set<String> = []
+    @State private var isLoading = true
+    @State private var isImporting = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    Label("Provider credentials stay encrypted on the Worker.",
+                          systemImage: "lock.shield.fill")
+                    Label("Imported accounts refresh only from the Worker. Local provider refresh is unavailable.",
+                          systemImage: "cloud.fill")
+                } header: {
+                    Text("Remote-only accounts")
+                }
+
+                Section("Available accounts") {
+                    if isLoading {
+                        HStack {
+                            ProgressView()
+                            Text("Loading Worker accounts…")
+                        }
+                    } else if accounts.isEmpty {
+                        ContentUnavailableView(
+                            "No Accounts Available",
+                            systemImage: "icloud.slash",
+                            description: Text("All monitorable Worker accounts are already on this device.")
+                        )
+                    } else {
+                        ForEach(accounts) { account in
+                            Toggle(isOn: selectionBinding(account.id)) {
+                                HStack(spacing: 12) {
+                                    ProviderIcon(providerID: account.providerID)
+                                        .frame(width: 28, height: 28)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(account.displayName)
+                                        Text(account.providerID.sectionTitle(plan: account.plan))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Add from Worker")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Add") { importSelection() }
+                        .disabled(selectedIDs.isEmpty || isImporting)
+                }
+            }
+            .task { await loadAccounts() }
+            .alert("Couldn’t Add Accounts", isPresented: Binding(
+                get: { errorMessage != nil },
+                set: { if !$0 { errorMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {}
+            } message: {
+                Text(errorMessage ?? "The Worker accounts could not be imported.")
+            }
+        }
+    }
+
+    private func selectionBinding(_ id: String) -> Binding<Bool> {
+        Binding {
+            selectedIDs.contains(id)
+        } set: { selected in
+            if selected { selectedIDs.insert(id) }
+            else { selectedIDs.remove(id) }
+        }
+    }
+
+    @MainActor
+    private func loadAccounts() async {
+        isLoading = true
+        errorMessage = nil
+        do {
+            accounts = try await store.availableRemoteWorkerAccounts()
+            selectedIDs.formIntersection(accounts.map(\.id))
+        } catch {
+            accounts = []
+            errorMessage = error.localizedDescription
+        }
+        isLoading = false
+    }
+
+    private func importSelection() {
+        let selected = accounts.filter { selectedIDs.contains($0.id) }
+        guard !selected.isEmpty else { return }
+        isImporting = true
+        Task { @MainActor in
+            do {
+                _ = try await store.importRemoteWorkerAccounts(selected)
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+                isImporting = false
+                await loadAccounts()
+            }
         }
     }
 }

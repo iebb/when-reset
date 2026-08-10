@@ -553,7 +553,7 @@ final class ParsingTests: XCTestCase {
 
         XCTAssertEqual(settings.mode, .disabled)
         XCTAssertEqual(settings.customServerURL, "")
-        XCTAssertEqual(settings.serverMonitoringInterval, .fiveMinutes)
+        XCTAssertEqual(settings.serverMonitoringInterval, .tenMinutes)
         XCTAssertNil(try settings.resolvedServerURL())
     }
 
@@ -675,6 +675,13 @@ final class ParsingTests: XCTestCase {
             "refresh_token": ["must", "not", "decode"],
             "id_token": {"or": "reach Keychain"}
           },
+          "metadata": {
+            "name": "Provider Person",
+            "email": "person@example.com",
+            "plan": "Pro 20x",
+            "plan_expires_at": 2000000000,
+            "trial_expires_at": 1999000000
+          },
           "history": []
         }
         """#.utf8)
@@ -682,8 +689,44 @@ final class ParsingTests: XCTestCase {
         let result = try PushServerClient.decodeAccountResponse(response, account: account)
 
         XCTAssertEqual(result.consentRevision, 7)
+        XCTAssertEqual(result.accountDetails?.profileName, "Provider Person")
+        XCTAssertEqual(result.accountDetails?.email, "person@example.com")
+        XCTAssertEqual(result.accountDetails?.plan, "Pro 20x")
+        XCTAssertEqual(result.accountDetails?.planExpiresAt,
+                       Date(timeIntervalSince1970: 2_000_000_000))
+        XCTAssertEqual(result.accountDetails?.trialExpiresAt,
+                       Date(timeIntervalSince1970: 1_999_000_000))
+        XCTAssertEqual(result.accountDetails?.replacesMissingFields, true)
         XCTAssertNil(result.snapshot)
         XCTAssertTrue(result.history.isEmpty)
+    }
+
+    func testRemoteWorkerCandidateDecodesSanitizedAccountMetadata() throws {
+        let response = Data(#"""
+        {
+          "remote_account_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "provider_id": "claude",
+          "display_name": "Work",
+          "plan": "Max",
+          "metadata": {
+            "name": "Provider Person",
+            "email": "person@example.com",
+            "plan": "Max",
+            "plan_expires_at": 2000000000,
+            "trial_expires_at": null
+          },
+          "last_success_at": 1999999900
+        }
+        """#.utf8)
+
+        let candidate = try JSONDecoder().decode(RemoteWorkerAccountCandidate.self, from: response)
+
+        XCTAssertEqual(candidate.metadata?.name, "Provider Person")
+        XCTAssertEqual(candidate.metadata?.email, "person@example.com")
+        XCTAssertEqual(candidate.metadata?.plan, "Max")
+        XCTAssertEqual(candidate.metadata?.accountDetails.planExpiresAt,
+                       Date(timeIntervalSince1970: 2_000_000_000))
+        XCTAssertNil(candidate.metadata?.accountDetails.trialExpiresAt)
     }
 
     func testLiveActivityRotatesBeforeSystemEightHourLimit() {

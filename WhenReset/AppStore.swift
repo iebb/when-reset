@@ -141,9 +141,32 @@ struct AccountRefreshFailure: Equatable, Sendable {
         if kind == .authentication {
             message = "Your sign-in expired or was revoked. Sign in again to resume updates."
         } else {
-            let description = error.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
-            message = description.isEmpty ? "The latest usage could not be loaded." : description
+            message = Self.updateMessage(for: error)
         }
+    }
+
+    private static func updateMessage(for error: Error) -> String {
+        if let pushError = error as? PushServerError,
+           case .remoteAccountUnavailable = pushError {
+            return "This account is no longer available on the self-hosted Worker."
+        }
+        if httpStatus(for: error) == 429 {
+            return "Updates are temporarily rate-limited. Showing the latest saved usage; When Reset will retry automatically."
+        }
+        if error is URLError {
+            return "The provider couldn’t be reached. Showing the latest saved usage; When Reset will retry automatically."
+        }
+        return "The latest usage could not be loaded. Showing the latest saved usage; When Reset will retry automatically."
+    }
+
+    private static func httpStatus(for error: Error) -> Int? {
+        if let value = error as? ProviderError, case let .server(code, _) = value { return code }
+        if let value = error as? KimiProviderError, case let .server(code, _) = value { return code }
+        if let value = error as? CopilotProviderError, case let .server(code, _) = value { return code }
+        if let value = error as? ZAIProviderError, case let .server(code, _) = value { return code }
+        if let value = error as? MiniMaxProviderError, case let .server(code, _) = value { return code }
+        if let value = error as? AdditionalProviderError, case let .server(_, code) = value { return code }
+        return nil
     }
 
     static func requiresReauthentication(for error: Error) -> Bool {
@@ -226,6 +249,50 @@ struct AccountRefreshFailure: Equatable, Sendable {
 extension UsageRefreshSource {
     var presentsFetchFailureAlerts: Bool {
         self == .manual || self == .accountLink
+    }
+}
+
+enum AccountRefreshRoute: Equatable, Sendable {
+    case demo
+    case server
+    case provider
+
+    init(isDemo: Bool, serverMonitoringEnabled: Bool, remoteOnly: Bool = false) {
+        if isDemo {
+            self = .demo
+        } else if serverMonitoringEnabled || remoteOnly {
+            self = .server
+        } else {
+            self = .provider
+        }
+    }
+}
+
+enum WorkerMetadataPolicy {
+    static func shouldUpload(local account: MonitoredAccount,
+                             remote details: ProviderAccountDetails?) -> Bool {
+        guard let details else { return false }
+        return differs(account.profileName, details.profileName)
+            || differs(account.email, details.email)
+            || differs(account.plan, details.plan)
+            || differs(account.planExpiresAt, details.planExpiresAt)
+            || differs(account.trialExpiresAt, details.trialExpiresAt)
+    }
+
+    static func authoritativeDetails(from account: MonitoredAccount) -> ProviderAccountDetails {
+        ProviderAccountDetails(
+            profileName: account.profileName,
+            email: account.email,
+            plan: account.plan,
+            planExpiresAt: account.planExpiresAt,
+            trialExpiresAt: account.trialExpiresAt,
+            replacesMissingFields: true
+        )
+    }
+
+    private static func differs<T: Equatable>(_ local: T?, _ remote: T?) -> Bool {
+        guard local != nil else { return false }
+        return local != remote
     }
 }
 
@@ -496,6 +563,74 @@ final class AppStore {
         await seedDemoHistory(for: account)
         await refresh(account, source: .demo)
         return account
+    }
+
+    func availableRemoteWorkerAccounts() async throws -> [RemoteWorkerAccountCandidate] {
+        let candidates = try await PushServerClient.remoteAccounts(settings: pushServerSettings)
+        let existing = Set(accounts.compactMap { account -> String? in
+            guard account.remoteWorkerServerURL
+                    == (try? pushServerSettings.resolvedServerURL())?.absoluteString else {
+                return nil
+            }
+            return account.remoteWorkerAccountID
+        })
+        return candidates.filter { !existing.contains($0.remoteAccountID) }
+    }
+
+    @discardableResult
+    func importRemoteWorkerAccounts(_ candidates: [RemoteWorkerAccountCandidate]) async throws
+        -> [MonitoredAccount] {
+        guard let serverURL = try pushServerSettings.resolvedServerURL() else {
+            throw PushServerError.accountMonitoringUnavailable
+        }
+        var imported: [MonitoredAccount] = []
+        for candidate in candidates {
+            guard !accounts.contains(where: {
+                $0.remoteWorkerServerURL == serverURL.absoluteString
+                    && $0.remoteWorkerAccountID == candidate.remoteAccountID
+            }) else { continue }
+            let localAccountID = UUID()
+            let remoteAccount = try await PushServerClient.importRemoteAccount(
+                settings: pushServerSettings,
+                candidate: candidate,
+                localAccountID: localAccountID
+            )
+            let details = remoteAccount.metadata?.accountDetails
+            let account = MonitoredAccount(
+                id: localAccountID,
+                providerID: remoteAccount.providerID,
+                displayName: remoteAccount.displayName,
+                workspaceID: MonitoredAccount.remoteWorkspacePrefix + remoteAccount.remoteAccountID,
+                plan: details?.plan ?? remoteAccount.plan,
+                addedAt: .now,
+                profileName: details?.profileName,
+                email: details?.email,
+                planExpiresAt: details?.planExpiresAt,
+                trialExpiresAt: details?.trialExpiresAt,
+                remoteWorkerAccountID: remoteAccount.remoteAccountID,
+                remoteWorkerServerURL: serverURL.absoluteString
+            )
+            KeychainStore.delete(for: localAccountID)
+            accounts.append(account)
+            monitorSettings[localAccountID] = AccountMonitorSettings(
+                monitorOnSelfHostedServer: true,
+                selfHostedServerConsentURL: serverURL.absoluteString,
+                selfHostedServerConsentRevision: 1
+            )
+            recordServerConsentHighWater(accountID: localAccountID, revision: 1)
+            imported.append(account)
+        }
+        guard !imported.isEmpty else { return [] }
+        persistAccounts()
+        persistMonitorSettings()
+        for account in imported {
+            _ = await refresh(account, source: .manual, publishChanges: false)
+        }
+        publishSnapshots()
+        await reconcileScheduledResetNotifications()
+        await updateLiveActivity()
+        await reconcileLiveActivity()
+        return imported
     }
 
     private func seedDemoHistory(for account: MonitoredAccount, endingAt date: Date = .now) async {
@@ -796,7 +931,12 @@ final class AppStore {
     func refresh(_ account: MonitoredAccount,
                  source: UsageRefreshSource = .manual,
                  publishChanges: Bool = true) async -> Bool {
-        if account.isDemo {
+        switch AccountRefreshRoute(
+            isDemo: account.isDemo,
+            serverMonitoringEnabled: isServerMonitoringEnabled(for: account),
+            remoteOnly: account.isRemoteOnly
+        ) {
+        case .demo:
             guard accounts.contains(where: { $0.id == account.id }) else { return false }
             let snapshot = DemoUsageFactory.snapshot(for: account)
             mergeLatestPlan(snapshot.plan, for: account.id)
@@ -815,13 +955,24 @@ final class AppStore {
                 await reconcileLiveActivity()
             }
             return true
-        }
-        if isServerMonitoringEnabled(for: account) {
-            await syncServerAccount(
+        case .server:
+            // The Worker is the sole provider poller for an opted-in account. Periodic foreground,
+            // background, manual, and silent-push refreshes only download its latest result.
+            if source == .accountLink, !account.isRemoteOnly {
+                // A relink replaces the Worker credential envelope, but still never contacts the
+                // provider from this device.
+                return await uploadServerAccount(
+                    account,
+                    presentErrors: source.presentsFetchFailureAlerts
+                )
+            }
+            return await syncServerAccount(
                 account,
                 publishChanges: publishChanges,
                 presentErrors: source.presentsFetchFailureAlerts
             )
+        case .provider:
+            break
         }
         do {
             var credentials = try KeychainStore.load(for: account.id)
@@ -930,7 +1081,9 @@ final class AppStore {
             guard accounts.contains(where: { $0.id == account.id }) else { return false }
             // Keep the most recent snapshot in memory and in SharedSnapshotStore.
             // The account-scoped failure lets the UI label that data as cached.
-            refreshFailures[account.id] = AccountRefreshFailure(error: error)
+            if source.presentsFetchFailureAlerts {
+                refreshFailures[account.id] = AccountRefreshFailure(error: error)
+            }
             return false
         }
     }
@@ -947,6 +1100,15 @@ final class AppStore {
             account.workspaceID = identity.workspaceID
             account.mergeProviderDetails(identity.accountDetails)
             accounts[index] = account
+            if isServerMonitoringEnabled(for: account) {
+                var accountSettings = settings(for: account)
+                accountSettings.selfHostedServerConsentRevision = nextServerConsentRevision(
+                    for: account.id,
+                    after: accountSettings.selfHostedServerConsentRevision
+                )
+                monitorSettings[account.id] = accountSettings
+                persistMonitorSettings()
+            }
             refreshFailures.removeValue(forKey: account.id)
             persistAccounts()
             return account
@@ -1103,13 +1265,29 @@ final class AppStore {
     private func hasServerConsent(_ settings: AccountMonitorSettings,
                                   account: MonitoredAccount) -> Bool {
         guard !account.isDemo,
-              account.providerID.supportsOffDeviceMonitoring,
-              settings.monitorOnSelfHostedServer,
               let serverURL = try? pushServerSettings.resolvedServerURL() else { return false }
+        if account.isRemoteOnly {
+            return account.remoteWorkerServerURL == serverURL.absoluteString
+        }
+        guard account.providerID.supportsOffDeviceMonitoring,
+              settings.monitorOnSelfHostedServer else { return false }
         return settings.selfHostedServerConsentURL == serverURL.absoluteString
     }
 
     func setSettings(_ proposedSettings: AccountMonitorSettings, for account: MonitoredAccount) {
+        if account.isRemoteOnly {
+            var settings = proposedSettings
+            settings.monitorOnSelfHostedServer = true
+            settings.selfHostedServerConsentURL = account.remoteWorkerServerURL
+            settings.selfHostedServerConsentRevision = max(
+                1,
+                settings.selfHostedServerConsentRevision
+            )
+            monitorSettings[account.id] = settings
+            persistMonitorSettings()
+            publishSnapshots()
+            return
+        }
         let previousSettings = self.settings(for: account)
         var settings = proposedSettings
         if settings.monitorOnSelfHostedServer,
@@ -1278,6 +1456,7 @@ final class AppStore {
         let eligibleIDs = Set(accounts.compactMap { account -> UUID? in
             guard monitoringAccountIDs.contains(account.id),
                   !account.isDemo,
+                  !account.isRemoteOnly,
                   account.providerID.supportsOffDeviceMonitoring else { return nil }
             return account.id
         })
@@ -1373,7 +1552,8 @@ final class AppStore {
             forKey: pushServerSettingsKey
         )
         Task {
-            for account in accounts where isServerMonitoringEnabled(for: account) {
+            for account in accounts
+                where isServerMonitoringEnabled(for: account) && !account.isRemoteOnly {
                 await uploadServerAccount(account)
             }
         }
@@ -1522,8 +1702,11 @@ final class AppStore {
                 pendingServerAccountDeletionURL = nil
             }
             persistPendingServerCleanup()
-            for account in accounts where isServerMonitoringEnabled(for: account) {
-                await uploadServerAccount(account)
+            if enrollment != nil {
+                for account in accounts
+                    where isServerMonitoringEnabled(for: account) && !account.isRemoteOnly {
+                    await uploadServerAccount(account)
+                }
             }
             guard (try? pushServerSettings.resolvedServerURL()) == serverURL else { return }
             if let cleanupFailure {
@@ -2066,24 +2249,30 @@ final class AppStore {
         }
     }
 
+    @discardableResult
     private func uploadServerAccount(_ account: MonitoredAccount,
-                                     presentErrors: Bool = true) async {
+                                     presentErrors: Bool = true) async -> Bool {
         await serverAccountOperationGate.acquire(accountID: account.id)
-        await performServerAccountUpload(account, presentErrors: presentErrors)
+        let succeeded = await performServerAccountUpload(account, presentErrors: presentErrors)
         await serverAccountOperationGate.release(accountID: account.id)
+        return succeeded
     }
 
+    @discardableResult
     private func performServerAccountUpload(_ account: MonitoredAccount,
-                                            presentErrors: Bool) async {
+                                            presentErrors: Bool) async -> Bool {
         var accountSettings = settings(for: account)
         guard !account.isDemo,
+              !account.isRemoteOnly,
               serverMonitoringEnabled(accountSettings, account: account),
               pushServerSettings.mode != .disabled,
-              let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
-        accountSettings.selfHostedServerConsentRevision = nextServerConsentRevision(
-            for: account.id,
-            after: accountSettings.selfHostedServerConsentRevision
-        )
+              let currentAccount = accounts.first(where: { $0.id == account.id }) else { return false }
+        if accountSettings.selfHostedServerConsentRevision <= 0 {
+            accountSettings.selfHostedServerConsentRevision = nextServerConsentRevision(
+                for: account.id,
+                after: accountSettings.selfHostedServerConsentRevision
+            )
+        }
         let consentRevision = accountSettings.selfHostedServerConsentRevision
         monitorSettings[account.id] = accountSettings
         persistMonitorSettings()
@@ -2115,37 +2304,40 @@ final class AppStore {
                 deliverNotifications: false,
                 presentErrors: presentErrors
             )
+            return true
         } catch {
-            guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
+            guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return false }
             let currentSettings = settings(for: currentAccount)
             guard serverMonitoringEnabled(currentSettings, account: currentAccount),
-                  currentSettings.selfHostedServerConsentRevision == consentRevision else { return }
+                  currentSettings.selfHostedServerConsentRevision == consentRevision else { return false }
             if presentErrors {
                 errorMessage = error.localizedDescription
             }
+            return false
         }
     }
 
     private func syncServerAccount(_ account: MonitoredAccount,
                                    publishChanges: Bool,
-                                   presentErrors: Bool) async {
+                                   presentErrors: Bool) async -> Bool {
         await serverAccountOperationGate.acquire(accountID: account.id)
-        await performServerAccountSync(
+        let succeeded = await performServerAccountSync(
             account,
             publishChanges: publishChanges,
             presentErrors: presentErrors
         )
         await serverAccountOperationGate.release(accountID: account.id)
+        return succeeded
     }
 
     private func performServerAccountSync(_ account: MonitoredAccount,
                                           publishChanges: Bool,
-                                          presentErrors: Bool) async {
+                                          presentErrors: Bool) async -> Bool {
         let accountSettings = settings(for: account)
         guard !account.isDemo,
               serverMonitoringEnabled(accountSettings, account: account),
               pushServerSettings.mode != .disabled,
-              accounts.contains(where: { $0.id == account.id }) else { return }
+              accounts.contains(where: { $0.id == account.id }) else { return false }
         let consentRevision = accountSettings.selfHostedServerConsentRevision
         let earliest = Date.now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
         let latestServerPoint = usageHistory.lazy
@@ -2155,11 +2347,28 @@ final class AppStore {
         let since = max(earliest, latestServerPoint?.addingTimeInterval(-60) ?? earliest)
         do {
             let currentAccount = accounts.first(where: { $0.id == account.id }) ?? account
-            let result = try await PushServerClient.syncAccount(
+            var result = try await PushServerClient.syncAccount(
                 settings: pushServerSettings,
                 account: currentAccount,
                 since: since
             )
+            if !currentAccount.isRemoteOnly {
+                mergeLatestPlan(result.snapshot?.plan, for: currentAccount.id)
+                let metadataSource = accounts.first(where: { $0.id == currentAccount.id })
+                    ?? currentAccount
+                if WorkerMetadataPolicy.shouldUpload(
+                    local: metadataSource,
+                    remote: result.accountDetails
+                ) {
+                    let uploaded = await performServerAccountUpload(
+                        metadataSource,
+                        presentErrors: false
+                    )
+                    result.accountDetails = uploaded
+                        ? WorkerMetadataPolicy.authoritativeDetails(from: metadataSource)
+                        : nil
+                }
+            }
             await consumeServerResult(
                 result,
                 for: currentAccount,
@@ -2167,18 +2376,76 @@ final class AppStore {
                 deliverNotifications: publishChanges,
                 presentErrors: presentErrors
             )
+            return true
         } catch let PushServerError.serverRejected(code) where code == 404 {
-            // A newly enabled account may not have reached the Worker yet. The upload after the
-            // local refresh creates it without turning a normal refresh into a failure.
-        } catch {
-            guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
-            let currentSettings = settings(for: currentAccount)
-            guard serverMonitoringEnabled(currentSettings, account: currentAccount),
-                  currentSettings.selfHostedServerConsentRevision == consentRevision else { return }
-            if presentErrors {
-                errorMessage = error.localizedDescription
+            if account.isRemoteOnly {
+                do {
+                    try await PushServerClient.restoreRemoteAccount(
+                        settings: pushServerSettings,
+                        account: account
+                    )
+                    let restoredAccount = accounts.first(where: { $0.id == account.id }) ?? account
+                    let result = try await PushServerClient.syncAccount(
+                        settings: pushServerSettings,
+                        account: restoredAccount,
+                        since: since
+                    )
+                    await consumeServerResult(
+                        result,
+                        for: restoredAccount,
+                        consentRevision: consentRevision,
+                        deliverNotifications: publishChanges,
+                        presentErrors: presentErrors
+                    )
+                    return true
+                } catch let PushServerError.serverRejected(retryCode) where retryCode == 404 {
+                    return recordServerSyncFailure(
+                        PushServerError.remoteAccountUnavailable,
+                        for: account,
+                        consentRevision: consentRevision,
+                        presentErrors: presentErrors
+                    )
+                } catch {
+                    return recordServerSyncFailure(
+                        error,
+                        for: account,
+                        consentRevision: consentRevision,
+                        presentErrors: presentErrors
+                    )
+                }
             }
+            // Recreate a missing Worker record from the existing consented credentials without
+            // falling through to a second provider request on this device.
+            return await performServerAccountUpload(account, presentErrors: presentErrors)
+        } catch {
+            return recordServerSyncFailure(
+                error,
+                for: account,
+                consentRevision: consentRevision,
+                presentErrors: presentErrors
+            )
         }
+    }
+
+    private func recordServerSyncFailure(
+        _ error: Error,
+        for account: MonitoredAccount,
+        consentRevision: Int64,
+        presentErrors: Bool
+    ) -> Bool {
+        guard let currentAccount = accounts.first(where: { $0.id == account.id }) else {
+            return false
+        }
+        let currentSettings = settings(for: currentAccount)
+        guard serverMonitoringEnabled(currentSettings, account: currentAccount),
+              currentSettings.selfHostedServerConsentRevision == consentRevision else {
+            return false
+        }
+        refreshFailures[account.id] = AccountRefreshFailure(error: error)
+        if presentErrors {
+            errorMessage = error.localizedDescription
+        }
+        return false
     }
 
     private func serverMissingQuotaDescriptors(for account: MonitoredAccount)
@@ -2223,27 +2490,32 @@ final class AppStore {
                                      consentRevision: Int64,
                                      deliverNotifications: Bool,
                                      presentErrors: Bool) async {
-        guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
+        guard var currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
         let currentSettings = settings(for: currentAccount)
         guard serverMonitoringEnabled(currentSettings, account: currentAccount),
               currentSettings.selfHostedServerConsentRevision == consentRevision,
               result.consentRevision == consentRevision else { return }
+        if let details = result.accountDetails,
+           let updated = mergeProviderDetails(details, for: currentAccount.id) {
+            currentAccount = updated
+        }
         do {
             usageHistory = try await historyStore.mergeServerHistory(
                 result.history,
-                account: account
+                account: currentAccount
             )
             historyStorageError = nil
         } catch {
             historyStorageError = error.localizedDescription
         }
 
+        // A successful Worker sync supersedes any old on-device provider failure. Provider-side
+        // monitoring errors are retried by the Worker and are not client request failures.
+        refreshFailures.removeValue(forKey: account.id)
+
         guard let snapshot = result.snapshot,
               snapshot.fetchedAt > (snapshots[account.id]?.fetchedAt ?? .distantPast),
               accounts.contains(where: { $0.id == account.id }) else {
-            if presentErrors, let lastError = result.lastError, !lastError.isEmpty {
-                errorMessage = lastError
-            }
             return
         }
         mergeLatestPlan(snapshot.plan, for: account.id)

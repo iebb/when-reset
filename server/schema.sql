@@ -2,9 +2,12 @@ CREATE TABLE IF NOT EXISTS devices (
   device_id TEXT PRIMARY KEY NOT NULL,
   secret_hash TEXT NOT NULL,
   apns_token TEXT NOT NULL UNIQUE,
+  apns_environment TEXT NOT NULL DEFAULT 'production'
+    CHECK(apns_environment IN ('development', 'production')),
   created_at INTEGER NOT NULL,
   last_seen_at INTEGER NOT NULL,
-  last_push_at INTEGER
+  last_push_at INTEGER,
+  push_disabled_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS devices_last_seen_at
@@ -54,16 +57,23 @@ CREATE TABLE IF NOT EXISTS monitored_accounts (
   account_id TEXT NOT NULL,
   provider_id TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
+  display_name TEXT,
+  profile_name TEXT,
+  email TEXT,
   plan TEXT,
+  plan_expires_at INTEGER,
+  trial_expires_at INTEGER,
   missing_quotas TEXT NOT NULL DEFAULT '[]',
   encrypted_credentials TEXT NOT NULL,
   credential_fingerprint TEXT,
+  credential_revision INTEGER NOT NULL CHECK(credential_revision > 0),
   scheduled_monitor_at INTEGER,
   refresh_interval_seconds INTEGER NOT NULL,
   next_refresh_at INTEGER NOT NULL,
   last_refresh_at INTEGER,
   last_success_at INTEGER,
   last_error TEXT,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0),
   latest_snapshot TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -76,6 +86,22 @@ ON monitored_accounts(next_refresh_at, device_id, account_id);
 
 CREATE INDEX IF NOT EXISTS monitored_accounts_credential_fingerprint
 ON monitored_accounts(credential_fingerprint, next_refresh_at);
+
+CREATE TABLE IF NOT EXISTS remote_account_subscriptions (
+  subscriber_device_id TEXT NOT NULL,
+  local_account_id TEXT NOT NULL,
+  source_device_id TEXT NOT NULL,
+  source_account_id TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (subscriber_device_id, local_account_id),
+  UNIQUE (subscriber_device_id, source_device_id, source_account_id),
+  FOREIGN KEY (subscriber_device_id) REFERENCES devices(device_id) ON DELETE CASCADE,
+  FOREIGN KEY (source_device_id, source_account_id)
+    REFERENCES monitored_accounts(device_id, account_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS remote_account_subscriptions_source
+ON remote_account_subscriptions(source_device_id, source_account_id, subscriber_device_id);
 
 CREATE TABLE IF NOT EXISTS usage_history (
   device_id TEXT NOT NULL,
@@ -107,6 +133,7 @@ CREATE TABLE IF NOT EXISTS monitor_runs (
   result_snapshot TEXT,
   result_error TEXT,
   failure_retryable INTEGER CHECK(failure_retryable IN (0, 1)),
+  failure_retry_after_seconds INTEGER CHECK(failure_retry_after_seconds >= 0),
   created_at INTEGER NOT NULL,
   started_at INTEGER,
   fetched_at INTEGER,
@@ -145,6 +172,7 @@ BEGIN
     result_snapshot = NULL,
     result_error = NULL,
     failure_retryable = NULL,
+    failure_retry_after_seconds = NULL,
     completed_at = COALESCE(completed_at, occurrence_at)
   WHERE run_id = OLD.run_id;
 END;

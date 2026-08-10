@@ -388,6 +388,7 @@ struct ProviderAccountDetails: Equatable, Sendable {
 
 struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     static let demoWorkspaceID = "when-reset.demo.chatgpt"
+    static let remoteWorkspacePrefix = "when-reset.remote."
 
     var id: UUID
     var providerID: ProviderID
@@ -401,8 +402,13 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     var email: String? = nil
     var planExpiresAt: Date? = nil
     var trialExpiresAt: Date? = nil
+    var remoteWorkerAccountID: String? = nil
+    var remoteWorkerServerURL: String? = nil
 
     var isDemo: Bool { workspaceID == Self.demoWorkspaceID }
+    var isRemoteOnly: Bool {
+        remoteWorkerAccountID != nil && remoteWorkerServerURL != nil
+    }
 
     var providerDisplayName: String {
         isDemo ? "Your AI Provider" : providerID.displayName
@@ -465,6 +471,7 @@ enum MissingQuotaHistoryBehavior: String, Codable, CaseIterable, Hashable, Senda
 enum RefreshInterval: Int, Codable, CaseIterable, Hashable, Sendable {
     case off = 0
     case fiveMinutes = 300
+    case tenMinutes = 600
     case fifteenMinutes = 900
     case thirtyMinutes = 1_800
     case oneHour = 3_600
@@ -479,7 +486,7 @@ enum RefreshInterval: Int, Codable, CaseIterable, Hashable, Sendable {
         .fifteenMinutes, .thirtyMinutes, .oneHour, .twoHours, .fourHours, .eightHours
     ]
     static let serverMonitoringOptions: [Self] = [
-        .fiveMinutes, .fifteenMinutes, .thirtyMinutes, .oneHour, .twoHours, .fourHours,
+        .fiveMinutes, .tenMinutes, .fifteenMinutes, .thirtyMinutes, .oneHour, .twoHours, .fourHours,
         .eightHours
     ]
 
@@ -487,6 +494,7 @@ enum RefreshInterval: Int, Codable, CaseIterable, Hashable, Sendable {
         switch self {
         case .off: "Off"
         case .fiveMinutes: "5 minutes"
+        case .tenMinutes: "10 minutes"
         case .fifteenMinutes: "15 minutes"
         case .thirtyMinutes: "30 minutes"
         case .oneHour: "1 hour"

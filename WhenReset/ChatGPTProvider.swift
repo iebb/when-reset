@@ -161,9 +161,19 @@ struct ChatGPTProvider {
     }
 
     func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws -> UsageSnapshot {
-        async let usageData = authenticatedGet("https://chatgpt.com/backend-api/wham/usage", account: account, token: credentials.accessToken)
-        async let creditData = authenticatedGet("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", account: account, token: credentials.accessToken)
-        return try parse(account: account, usage: await usageData, credits: await creditData)
+        let usageData = try await authenticatedGet(
+            "https://chatgpt.com/backend-api/wham/usage",
+            account: account,
+            token: credentials.accessToken
+        )
+        // Banked-reset details are supplementary. A rate limit on that endpoint must not discard
+        // otherwise valid quota windows returned by the primary usage endpoint.
+        let creditData = (try? await authenticatedGet(
+            "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+            account: account,
+            token: credentials.accessToken
+        )) ?? Data("{}".utf8)
+        return try parse(account: account, usage: usageData, credits: creditData)
     }
 
     private func authenticatedGet(_ url: String, account: MonitoredAccount, token: String) async throws -> Data {

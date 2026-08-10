@@ -1,6 +1,7 @@
 import APNSPrivateKey from "../apns/WhenResetSharedAPNs.p8";
 import {
   fetchProviderUsage,
+  providerRetryDelaySeconds,
   ProviderFetchError,
   type ProviderAccount,
   type ProviderCredentials,
@@ -12,6 +13,8 @@ import { renderLinkPage, renderLinkQRCode } from "./link-page";
 const MAX_REGISTRATION_BODY_BYTES = 2_048;
 const MAX_DEVICE_TOKEN_BODY_BYTES = 1_024;
 const MAX_ACCOUNT_BODY_BYTES = 64 * 1_024;
+const MAX_REMOTE_ACCOUNT_IMPORT_BODY_BYTES = 16 * 1_024;
+const MAX_REMOTE_ACCOUNT_IMPORTS = 50;
 const LINK_SESSION_TTL_SECONDS = 5 * 60;
 const ACTIVE_DEVICE_DAYS = 45;
 const HISTORY_RETENTION_DAYS = 35;
@@ -24,21 +27,27 @@ const HISTORY_PAGE_SIZE = 1_000;
 const MIN_MONITOR_INTERVAL_SECONDS = 5 * 60;
 const MAX_MONITOR_INTERVAL_SECONDS = 8 * 60 * 60;
 const APNS_TOKEN_REFRESH_SECONDS = 50 * 60;
-const APNS_HOST = "https://api.push.apple.com";
+const APNS_PRODUCTION_HOST = "https://api.push.apple.com";
+const APNS_DEVELOPMENT_HOST = "https://api.sandbox.push.apple.com";
 const APNS_KEY_ID = "Y35ZLFTW8W";
 const APNS_TEAM_ID = "7P8CLHDH5G";
 const APNS_TOPIC = "ad.neko.when";
+
+type APNSEnvironment = "development" | "production";
 
 type DeviceRegistration = {
   device_id: string;
   device_secret: string;
   apns_token: string;
+  apns_environment: APNSEnvironment;
 };
 
 type DeviceRow = {
   device_id: string;
   secret_hash: string;
   apns_token: string;
+  apns_environment: APNSEnvironment;
+  push_disabled_at: number | null;
 };
 
 type DeviceDeletionTombstoneRow = {
@@ -65,6 +74,7 @@ type PushTarget = {
   kind: "push";
   device_id: string;
   apns_token: string;
+  apns_environment?: APNSEnvironment;
 };
 
 type MonitorRunTarget = {
@@ -77,7 +87,12 @@ type QueueTarget = PushTarget | MonitorRunTarget;
 type AccountUpload = {
   provider_id: ProviderID;
   workspace_id: string;
+  display_name: string | null;
+  profile_name: string | null;
+  email: string | null;
   plan: string | null;
+  plan_expires_at: number | null;
+  trial_expires_at: number | null;
   refresh_interval_seconds: number;
   consent_revision: number;
   credentials: ProviderCredentials;
@@ -95,6 +110,7 @@ type MissingQuotaDescriptor = {
 type MonitoredAccountRow = ProviderAccount & {
   device_id: string;
   account_id: string;
+  display_name: string | null;
   encrypted_credentials: string;
   refresh_interval_seconds: number;
   next_refresh_at: number;
@@ -104,14 +120,50 @@ type MonitoredAccountRow = ProviderAccount & {
   missing_quotas: string;
   consent_revision: number;
   credential_fingerprint: string | null;
+  credential_revision: number;
+  consecutive_failures: number;
   scheduled_monitor_at: number | null;
 };
 
 type AccountSyncRow = {
+  profile_name: string | null;
+  email: string | null;
+  plan: string | null;
+  plan_expires_at: number | null;
+  trial_expires_at: number | null;
   latest_snapshot: string | null;
   last_success_at: number | null;
   last_error: string | null;
   consent_revision: number;
+};
+
+type AccountSyncSourceRow = AccountSyncRow & {
+  source_device_id: string;
+  source_account_id: string;
+};
+
+type RemoteAccountCandidateRow = {
+  device_id: string;
+  account_id: string;
+  provider_id: ProviderID;
+  workspace_id: string;
+  display_name: string | null;
+  profile_name: string | null;
+  email: string | null;
+  plan: string | null;
+  plan_expires_at: number | null;
+  trial_expires_at: number | null;
+  credential_fingerprint: string;
+  last_success_at: number | null;
+};
+
+type RemoteAccountCandidate = RemoteAccountCandidateRow & {
+  remote_account_id: string;
+};
+
+type RemoteAccountImport = {
+  remote_account_id: string;
+  local_account_id: string;
 };
 
 type MonitorRunRow = {
@@ -123,6 +175,7 @@ type MonitorRunRow = {
   result_snapshot: string | null;
   result_error: string | null;
   failure_retryable: number | null;
+  failure_retry_after_seconds: number | null;
 };
 
 type MonitorRunTargetRow = MonitoredAccountRow & {
@@ -237,6 +290,19 @@ async function route(request: Request, env: Env): Promise<Response> {
     return registerDevice(env, registration);
   }
 
+  const remoteAccountsMatch = /^\/v1\/devices\/([0-9a-f-]{36})\/remote-accounts$/.exec(
+    url.pathname
+  );
+  if (remoteAccountsMatch) {
+    const deviceID = remoteAccountsMatch[1];
+    if (!isUUID(deviceID)) return json({ error: "invalid_device_id" }, 400);
+    const device = await authorizeDevice(request, env, deviceID);
+    if (!device) return json({ error: "unauthorized" }, 401);
+    if (request.method === "GET") return listRemoteAccounts(env, deviceID);
+    if (request.method === "POST") return importRemoteAccounts(request, env, deviceID);
+    return json({ error: "method_not_allowed" }, 405, { Allow: "GET, POST" });
+  }
+
   const accountMatch = /^\/v1\/devices\/([0-9a-f-]{36})\/accounts\/([0-9a-f-]{36})(?:\/(sync))?$/.exec(
     url.pathname
   );
@@ -281,17 +347,21 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (!row) return json({ error: "unauthorized" }, 401);
 
   if (request.method === "PUT" && !match[2]) {
-    const apnsToken = await parseDeviceTokenUpdate(request);
-    if (!apnsToken) return json({ error: "invalid_device_token" }, 400);
+    const tokenUpdate = await parseDeviceTokenUpdate(request);
+    if (!tokenUpdate) return json({ error: "invalid_device_token" }, 400);
     const now = Math.floor(Date.now() / 1_000);
     const result = await env.DB.prepare(
-      `UPDATE devices SET apns_token = ?, last_seen_at = ?
+      `UPDATE devices SET apns_token = ?, apns_environment = ?,
+         last_seen_at = ?, push_disabled_at = NULL
        WHERE device_id = ?
          AND NOT EXISTS (
            SELECT 1 FROM devices AS token_owner
            WHERE token_owner.apns_token = ? AND token_owner.device_id <> ?
          )`
-    ).bind(apnsToken, now, deviceID, apnsToken, deviceID).run();
+    ).bind(
+      tokenUpdate.apns_token, tokenUpdate.apns_environment, now, deviceID,
+      tokenUpdate.apns_token, deviceID,
+    ).run();
     if ((result.meta.changes ?? 0) !== 1) {
       return json({ error: "apns_token_conflict" }, 409);
     }
@@ -300,8 +370,13 @@ async function route(request: Request, env: Env): Promise<Response> {
   }
 
   if (request.method === "POST" && match[2] === "refresh") {
+    if (row.push_disabled_at !== null) {
+      return json({ error: "push_disabled" }, 409, { "cache-control": "no-store" });
+    }
     const authorization = await currentAPNSAuthorization(env);
-    const result = await sendSilentPush(env, row.apns_token, authorization);
+    const result = await sendSilentPush(
+      env, row.apns_token, authorization, row.apns_environment
+    );
     await handleAPNSResult(env, row, result);
     if (!result.ok) return json({ error: "apns_rejected", reason: result.reason }, 502);
     return json({ ok: true });
@@ -412,7 +487,8 @@ async function claimLinkSession(
   registration: DeviceRegistration,
 ): Promise<Response> {
   const existing = await env.DB.prepare(
-    "SELECT device_id, secret_hash, apns_token FROM devices WHERE device_id = ?"
+    `SELECT device_id, secret_hash, apns_token, apns_environment, push_disabled_at
+     FROM devices WHERE device_id = ?`
   ).bind(registration.device_id).first<DeviceRow>();
   if (existing && !(await secretsMatch(registration.device_secret, existing.secret_hash))) {
     return linkJSON({ error: "device_conflict" }, 409);
@@ -429,8 +505,9 @@ async function claimLinkSession(
   const sessionBindings = [session.session_id, tokenHash, session.server_origin, now] as const;
   const results = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO devices (device_id, secret_hash, apns_token, created_at, last_seen_at)
-       SELECT ?, ?, ?, ?, ?
+      `INSERT INTO devices (
+         device_id, secret_hash, apns_token, apns_environment, created_at, last_seen_at
+       ) SELECT ?, ?, ?, ?, ?, ?
        WHERE EXISTS (SELECT 1 FROM link_sessions WHERE ${validSession})
          AND NOT EXISTS (
            SELECT 1 FROM devices AS token_owner
@@ -438,14 +515,17 @@ async function claimLinkSession(
          )
        ON CONFLICT(device_id) DO UPDATE SET
          apns_token = excluded.apns_token,
-         last_seen_at = excluded.last_seen_at
+         apns_environment = excluded.apns_environment,
+         last_seen_at = excluded.last_seen_at,
+         push_disabled_at = NULL
        WHERE devices.secret_hash = excluded.secret_hash
          AND NOT EXISTS (
            SELECT 1 FROM devices AS token_owner
            WHERE token_owner.apns_token = ? AND token_owner.device_id <> ?
          )`
     ).bind(
-      registration.device_id, deviceSecretHash, registration.apns_token, now, now,
+      registration.device_id, deviceSecretHash, registration.apns_token,
+      registration.apns_environment, now, now,
       ...sessionBindings,
       registration.apns_token, registration.device_id,
       registration.apns_token, registration.device_id,
@@ -496,7 +576,8 @@ function sameOriginRequest(request: Request, origin: string): boolean {
 async function unregisterDevice(env: Env, deviceID: string, secret: string): Promise<Response> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const live = await env.DB.prepare(
-      "SELECT device_id, secret_hash, apns_token FROM devices WHERE device_id = ?"
+      `SELECT device_id, secret_hash, apns_token, apns_environment, push_disabled_at
+       FROM devices WHERE device_id = ?`
     ).bind(deviceID).first<DeviceRow>();
     if (!live) return deletedDeviceRetryResponse(env, deviceID, secret);
     if (!(await secretsMatch(secret, live.secret_hash))) {
@@ -519,7 +600,8 @@ async function deletedDeviceRetryResponse(
   secret: string,
 ): Promise<Response> {
   const live = await env.DB.prepare(
-    "SELECT device_id, secret_hash, apns_token FROM devices WHERE device_id = ?"
+    `SELECT device_id, secret_hash, apns_token, apns_environment, push_disabled_at
+     FROM devices WHERE device_id = ?`
   ).bind(deviceID).first<DeviceRow>();
   if (live) {
     return json({ error: "unauthorized" }, 401, { "cache-control": "no-store" });
@@ -565,36 +647,10 @@ async function tombstoneAndDeleteDeviceBySecretHash(
   return (results[1]?.meta.changes ?? 0) === 1;
 }
 
-async function tombstoneAndDeleteDeviceByAPNSToken(
-  env: Env,
-  deviceID: string,
-  apnsToken: string,
-  deletedAt: number,
-): Promise<boolean> {
-  const results = await env.DB.batch([
-    env.DB.prepare(
-      `INSERT INTO device_deletion_tombstones (device_id, secret_hash, deleted_at)
-       SELECT device_id, secret_hash, ? FROM devices
-       WHERE device_id = ? AND apns_token = ?
-       ON CONFLICT(device_id) DO UPDATE SET
-         secret_hash = excluded.secret_hash,
-         deleted_at = excluded.deleted_at`
-    ).bind(deletedAt, deviceID, apnsToken),
-    env.DB.prepare(
-      `DELETE FROM devices
-       WHERE device_id = ? AND apns_token = ?
-         AND EXISTS (
-           SELECT 1 FROM device_deletion_tombstones
-           WHERE device_id = devices.device_id AND secret_hash = devices.secret_hash
-         )`
-    ).bind(deviceID, apnsToken),
-  ]);
-  return (results[1]?.meta.changes ?? 0) === 1;
-}
-
 async function registerDevice(env: Env, registration: DeviceRegistration): Promise<Response> {
   const existing = await env.DB.prepare(
-    "SELECT device_id, secret_hash, apns_token FROM devices WHERE device_id = ?"
+    `SELECT device_id, secret_hash, apns_token, apns_environment, push_disabled_at
+     FROM devices WHERE device_id = ?`
   ).bind(registration.device_id).first<DeviceRow>();
 
   if (existing && !(await secretsMatch(registration.device_secret, existing.secret_hash))) {
@@ -608,22 +664,26 @@ async function registerDevice(env: Env, registration: DeviceRegistration): Promi
   const secretHash = existing?.secret_hash ?? await hashSecret(registration.device_secret);
   const results = await env.DB.batch([
     env.DB.prepare(
-      `INSERT INTO devices (device_id, secret_hash, apns_token, created_at, last_seen_at)
-       SELECT ?, ?, ?, ?, ?
+      `INSERT INTO devices (
+         device_id, secret_hash, apns_token, apns_environment, created_at, last_seen_at
+       ) SELECT ?, ?, ?, ?, ?, ?
        WHERE NOT EXISTS (
          SELECT 1 FROM devices AS token_owner
          WHERE token_owner.apns_token = ? AND token_owner.device_id <> ?
        )
        ON CONFLICT(device_id) DO UPDATE SET
          apns_token = excluded.apns_token,
-         last_seen_at = excluded.last_seen_at
+         apns_environment = excluded.apns_environment,
+         last_seen_at = excluded.last_seen_at,
+         push_disabled_at = NULL
        WHERE devices.secret_hash = excluded.secret_hash
          AND NOT EXISTS (
            SELECT 1 FROM devices AS token_owner
            WHERE token_owner.apns_token = ? AND token_owner.device_id <> ?
          )`
     ).bind(
-      registration.device_id, secretHash, registration.apns_token, now, now,
+      registration.device_id, secretHash, registration.apns_token,
+      registration.apns_environment, now, now,
       registration.apns_token, registration.device_id,
       registration.apns_token, registration.device_id,
     ),
@@ -665,21 +725,241 @@ async function authorizeDevice(request: Request, env: Env, deviceID: string): Pr
   const secret = bearerToken(request);
   if (!secret) return null;
   const row = await env.DB.prepare(
-    "SELECT device_id, secret_hash, apns_token FROM devices WHERE device_id = ?"
+    `SELECT device_id, secret_hash, apns_token, apns_environment, push_disabled_at
+     FROM devices WHERE device_id = ?`
   ).bind(deviceID).first<DeviceRow>();
   return row && await secretsMatch(secret, row.secret_hash) ? row : null;
+}
+
+async function listRemoteAccounts(env: Env, subscriberDeviceID: string): Promise<Response> {
+  const candidates = await loadRemoteAccountCandidates(env, subscriberDeviceID);
+  return json({
+    accounts: candidates.map(remoteAccountPayload),
+  }, 200, { "cache-control": "no-store" });
+}
+
+async function importRemoteAccounts(
+  request: Request,
+  env: Env,
+  subscriberDeviceID: string,
+): Promise<Response> {
+  const imported = await parseRemoteAccountImport(request);
+  if (!imported) return json({ error: "invalid_remote_account" }, 400);
+  const subscribedSource = await env.DB.prepare(
+    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.display_name, monitored_accounts.profile_name,
+            monitored_accounts.email, monitored_accounts.plan,
+            monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
+            monitored_accounts.credential_fingerprint, monitored_accounts.last_success_at
+     FROM remote_account_subscriptions
+     INNER JOIN monitored_accounts
+       ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
+      AND monitored_accounts.account_id = remote_account_subscriptions.source_account_id
+     WHERE remote_account_subscriptions.subscriber_device_id = ?
+       AND remote_account_subscriptions.local_account_id = ?
+       AND monitored_accounts.credential_fingerprint IS NOT NULL`
+  ).bind(subscriberDeviceID, imported.local_account_id).first<RemoteAccountCandidateRow>();
+  if (subscribedSource) {
+    const existing = {
+      ...subscribedSource,
+      remote_account_id: await remoteAccountReference(
+        env, subscribedSource.device_id, subscribedSource.account_id
+      ),
+    };
+    if (existing.remote_account_id !== imported.remote_account_id) {
+      return json({ error: "remote_account_conflict" }, 409);
+    }
+    return json({
+      account: {
+        ...remoteAccountPayload(existing),
+        local_account_id: imported.local_account_id,
+      },
+    }, 200, { "cache-control": "no-store" });
+  }
+  const candidates = await loadRemoteAccountCandidates(env, subscriberDeviceID);
+  const source = candidates.find(
+    (candidate) => candidate.remote_account_id === imported.remote_account_id
+  );
+  if (!source) return json({ error: "remote_account_not_found" }, 404);
+  const direct = await env.DB.prepare(
+    "SELECT account_id FROM monitored_accounts WHERE device_id = ? AND account_id = ?"
+  ).bind(subscriberDeviceID, imported.local_account_id).first<{ account_id: string }>();
+  if (direct) return json({ error: "local_account_conflict" }, 409);
+  const now = Math.floor(Date.now() / 1_000);
+  const result = await env.DB.prepare(
+    `INSERT INTO remote_account_subscriptions (
+       subscriber_device_id, local_account_id, source_device_id, source_account_id, created_at
+     )
+     SELECT ?, ?, ?, ?, ?
+     WHERE EXISTS (
+       SELECT 1 FROM monitored_accounts
+       INNER JOIN account_monitoring_consent
+         ON account_monitoring_consent.device_id = monitored_accounts.device_id
+        AND account_monitoring_consent.account_id = monitored_accounts.account_id
+        AND account_monitoring_consent.enabled = 1
+       WHERE monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?
+     )
+     ON CONFLICT DO NOTHING`
+  ).bind(
+    subscriberDeviceID, imported.local_account_id, source.device_id, source.account_id, now,
+    source.device_id, source.account_id,
+  ).run();
+  if ((result.meta.changes ?? 0) !== 1) {
+    const existing = await env.DB.prepare(
+      `SELECT source_device_id, source_account_id
+       FROM remote_account_subscriptions
+       WHERE subscriber_device_id = ? AND local_account_id = ?`
+    ).bind(subscriberDeviceID, imported.local_account_id).first<{
+      source_device_id: string;
+      source_account_id: string;
+    }>();
+    if (existing?.source_device_id !== source.device_id
+        || existing.source_account_id !== source.account_id) {
+      return json({ error: "remote_account_conflict" }, 409);
+    }
+    return json({
+      account: {
+        ...remoteAccountPayload(source),
+        local_account_id: imported.local_account_id,
+      },
+    }, 200, { "cache-control": "no-store" });
+  }
+  console.log(JSON.stringify({ event: "remote_account_imported", provider: source.provider_id }));
+  return json({
+    account: {
+      ...remoteAccountPayload(source),
+      local_account_id: imported.local_account_id,
+    },
+  }, 201, { "cache-control": "no-store" });
+}
+
+async function loadRemoteAccountCandidates(
+  env: Env,
+  subscriberDeviceID: string,
+): Promise<RemoteAccountCandidate[]> {
+  const result = await env.DB.prepare(
+    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.display_name, monitored_accounts.profile_name,
+            monitored_accounts.email, monitored_accounts.plan,
+            monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
+            monitored_accounts.credential_fingerprint, monitored_accounts.last_success_at
+     FROM monitored_accounts
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE monitored_accounts.device_id <> ?
+       AND monitored_accounts.credential_fingerprint IS NOT NULL
+       AND monitored_accounts.latest_snapshot IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM remote_account_subscriptions
+         WHERE remote_account_subscriptions.subscriber_device_id = ?
+           AND remote_account_subscriptions.source_device_id = monitored_accounts.device_id
+           AND remote_account_subscriptions.source_account_id = monitored_accounts.account_id
+       )
+     ORDER BY monitored_accounts.last_success_at DESC,
+              monitored_accounts.device_id, monitored_accounts.account_id
+     LIMIT ?`
+  ).bind(subscriberDeviceID, subscriberDeviceID, MAX_REMOTE_ACCOUNT_IMPORTS * 4)
+    .all<RemoteAccountCandidateRow>();
+  const seen = new Set<string>();
+  const candidates: RemoteAccountCandidate[] = [];
+  for (const row of result.results) {
+    const duplicateKey = `${row.provider_id}\u0000${row.workspace_id}\u0000${row.credential_fingerprint}`;
+    if (seen.has(duplicateKey)) continue;
+    seen.add(duplicateKey);
+    candidates.push({
+      ...row,
+      remote_account_id: await remoteAccountReference(env, row.device_id, row.account_id),
+    });
+    if (candidates.length >= MAX_REMOTE_ACCOUNT_IMPORTS) break;
+  }
+  return candidates;
+}
+
+async function parseRemoteAccountImport(request: Request): Promise<RemoteAccountImport | null> {
+  const value = await boundedRequestJSON(request, MAX_REMOTE_ACCOUNT_IMPORT_BODY_BYTES);
+  if (!isRecord(value)) return null;
+  const remoteAccountID = requiredBoundedString(value.remote_account_id, 64, false);
+  const localAccountID = requiredBoundedString(value.local_account_id, 36, false);
+  if (remoteAccountID === null || !/^[A-Za-z0-9_-]{43}$/.test(remoteAccountID)
+      || localAccountID === null || !isUUID(localAccountID)) return null;
+  return {
+    remote_account_id: remoteAccountID,
+    local_account_id: localAccountID.toLowerCase(),
+  };
+}
+
+function remoteAccountPayload(candidate: RemoteAccountCandidate): Record<string, unknown> {
+  return {
+    remote_account_id: candidate.remote_account_id,
+    provider_id: candidate.provider_id,
+    display_name: candidate.display_name ?? providerDisplayName(candidate.provider_id),
+    plan: candidate.plan,
+    metadata: accountMetadataPayload(candidate),
+    last_success_at: candidate.last_success_at,
+  };
+}
+
+function accountMetadataPayload(row: {
+  profile_name: string | null;
+  email: string | null;
+  plan: string | null;
+  plan_expires_at: number | null;
+  trial_expires_at: number | null;
+}): Record<string, unknown> {
+  return {
+    name: row.profile_name,
+    email: row.email,
+    plan: row.plan,
+    plan_expires_at: row.plan_expires_at,
+    trial_expires_at: row.trial_expires_at,
+  };
+}
+
+function providerDisplayName(providerID: ProviderID): string {
+  switch (providerID) {
+    case "chatgpt": return "ChatGPT";
+    case "claude": return "Claude";
+    case "kimi": return "Kimi Code";
+    case "github_copilot": return "GitHub Copilot";
+    case "zai": return "Z.AI Coding Plan";
+    case "minimax": return "MiniMax Token Plan";
+    case "synthetic": return "Synthetic";
+    case "warp": return "Warp";
+  }
+}
+
+async function remoteAccountReference(
+  env: Env,
+  sourceDeviceID: string,
+  sourceAccountID: string,
+): Promise<string> {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await credentialFingerprintKey(env),
+    new TextEncoder().encode(
+      `when-reset:remote-account:v1:${sourceDeviceID}:${sourceAccountID}`
+    ),
+  );
+  return base64URL(new Uint8Array(signature));
 }
 
 async function parseAccountUpload(request: Request): Promise<AccountUpload | null> {
   const value = await boundedRequestJSON(request, MAX_ACCOUNT_BODY_BYTES);
   if (!isRecord(value) || !isProviderID(value.provider_id)) return null;
   const workspaceID = requiredBoundedString(value.workspace_id, 512, true);
+  const displayName = optionalBoundedString(value.display_name, 128);
   const plan = optionalBoundedString(value.plan, 200);
+  const metadata = parseAccountMetadata(value.metadata);
   const interval = value.refresh_interval_seconds;
   const consentRevision = parseUploadConsentRevision(value.consent_revision);
   const rawCredentials = value.credentials;
   const missingQuotas = parseMissingQuotas(value.missing_quotas);
-  if (workspaceID === null || plan === undefined
+  if (workspaceID === null || displayName === undefined || plan === undefined
+      || metadata === null
       || typeof interval !== "number" || !Number.isInteger(interval)
       || interval < MIN_MONITOR_INTERVAL_SECONDS || interval > MAX_MONITOR_INTERVAL_SECONDS
       || consentRevision === null || !isRecord(rawCredentials) || missingQuotas === null) return null;
@@ -692,7 +972,12 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
   return {
     provider_id: value.provider_id,
     workspace_id: workspaceID,
+    display_name: displayName,
+    profile_name: metadata.profile_name,
+    email: metadata.email,
     plan,
+    plan_expires_at: metadata.plan_expires_at,
+    trial_expires_at: metadata.trial_expires_at,
     refresh_interval_seconds: interval,
     consent_revision: consentRevision,
     missing_quotas: missingQuotas,
@@ -711,6 +996,15 @@ async function upsertMonitoredAccount(
   accountID: string,
   upload: AccountUpload,
 ): Promise<Response> {
+  const remoteSubscription = await env.DB.prepare(
+    `SELECT local_account_id FROM remote_account_subscriptions
+     WHERE subscriber_device_id = ? AND local_account_id = ?`
+  ).bind(deviceID, accountID).first<{ local_account_id: string }>();
+  if (remoteSubscription) {
+    return json({ error: "remote_account_is_read_only" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   const now = Math.floor(Date.now() / 1_000);
   const encrypted = await encryptCredentials(env, deviceID, accountID, upload.provider_id, upload.credentials);
   const fingerprint = await credentialFingerprint(env, upload, upload.credentials);
@@ -734,11 +1028,12 @@ async function upsertMonitoredAccount(
     ).bind(deviceID, accountID, upload.consent_revision, now),
     env.DB.prepare(
       `INSERT INTO monitored_accounts (
-         device_id, account_id, provider_id, workspace_id, plan, missing_quotas,
-         encrypted_credentials, credential_fingerprint,
+         device_id, account_id, provider_id, workspace_id, display_name, profile_name, email,
+         plan, plan_expires_at, trial_expires_at, missing_quotas,
+         encrypted_credentials, credential_fingerprint, credential_revision,
          refresh_interval_seconds, next_refresh_at, created_at, updated_at
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM account_monitoring_consent
          WHERE device_id = ? AND account_id = ? AND consent_revision = ? AND enabled = 1
@@ -746,17 +1041,47 @@ async function upsertMonitoredAccount(
        ON CONFLICT(device_id, account_id) DO UPDATE SET
          provider_id = excluded.provider_id,
          workspace_id = excluded.workspace_id,
+         display_name = excluded.display_name,
+         profile_name = excluded.profile_name,
+         email = excluded.email,
          plan = excluded.plan,
+         plan_expires_at = excluded.plan_expires_at,
+         trial_expires_at = excluded.trial_expires_at,
          missing_quotas = excluded.missing_quotas,
-         encrypted_credentials = excluded.encrypted_credentials,
-         credential_fingerprint = excluded.credential_fingerprint,
+         encrypted_credentials = CASE
+           WHEN excluded.credential_revision > monitored_accounts.credential_revision
+             THEN excluded.encrypted_credentials
+           ELSE monitored_accounts.encrypted_credentials
+         END,
+         credential_fingerprint = CASE
+           WHEN excluded.credential_revision > monitored_accounts.credential_revision
+             THEN excluded.credential_fingerprint
+           ELSE monitored_accounts.credential_fingerprint
+         END,
+         credential_revision = MAX(
+           monitored_accounts.credential_revision,
+           excluded.credential_revision
+         ),
          refresh_interval_seconds = excluded.refresh_interval_seconds,
-         next_refresh_at = MIN(monitored_accounts.next_refresh_at, excluded.next_refresh_at),
+         next_refresh_at = CASE
+           WHEN excluded.credential_revision > monitored_accounts.credential_revision
+             THEN MIN(monitored_accounts.next_refresh_at, excluded.next_refresh_at)
+           WHEN monitored_accounts.last_error IS NULL
+             AND excluded.refresh_interval_seconds < monitored_accounts.refresh_interval_seconds
+             THEN MIN(
+               monitored_accounts.next_refresh_at,
+               excluded.next_refresh_at + excluded.refresh_interval_seconds
+             )
+           ELSE monitored_accounts.next_refresh_at
+         END,
          updated_at = excluded.updated_at`
     ).bind(
-      deviceID, accountID, upload.provider_id, upload.workspace_id, upload.plan,
+      deviceID, accountID, upload.provider_id, upload.workspace_id, upload.display_name,
+      upload.profile_name, upload.email, upload.plan, upload.plan_expires_at,
+      upload.trial_expires_at,
       JSON.stringify(upload.missing_quotas),
-      encrypted, fingerprint, upload.refresh_interval_seconds, now, now, now,
+      encrypted, fingerprint, upload.consent_revision,
+      upload.refresh_interval_seconds, now, now, now,
       deviceID, accountID, upload.consent_revision,
     ),
   ]);
@@ -780,6 +1105,14 @@ async function disableMonitoredAccount(
   accountID: string,
   consentRevision: number,
 ): Promise<Response> {
+  const remoteSubscription = await env.DB.prepare(
+    `DELETE FROM remote_account_subscriptions
+     WHERE subscriber_device_id = ? AND local_account_id = ?`
+  ).bind(deviceID, accountID).run();
+  if ((remoteSubscription.meta.changes ?? 0) === 1) {
+    console.log(JSON.stringify({ event: "remote_account_removed" }));
+    return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+  }
   const now = Math.floor(Date.now() / 1_000);
   const results = await env.DB.batch([
     env.DB.prepare(
@@ -822,7 +1155,7 @@ async function syncMonitoredAccount(
   accountID: string,
   url: URL,
 ): Promise<Response> {
-  const row = await loadAccountSyncRow(env, deviceID, accountID);
+  const row = await loadAccountSyncSourceRow(env, deviceID, accountID);
   if (!row) return json({ error: "account_not_found" }, 404);
   const sinceValue = url.searchParams.get("since");
   const parsedSince = parseUnixSeconds(sinceValue);
@@ -845,9 +1178,11 @@ async function syncMonitoredAccount(
        WHERE device_id = ? AND account_id = ? AND recorded_at >= ?
        ORDER BY recorded_at, metric_id LIMIT ?`;
   const statement = cursor
-    ? env.DB.prepare(query).bind(deviceID, accountID, effectiveSince,
+    ? env.DB.prepare(query).bind(row.source_device_id, row.source_account_id, effectiveSince,
         cursor.recordedAt, cursor.recordedAt, cursor.metricID, HISTORY_PAGE_SIZE + 1)
-    : env.DB.prepare(query).bind(deviceID, accountID, effectiveSince, HISTORY_PAGE_SIZE + 1);
+    : env.DB.prepare(query).bind(
+        row.source_device_id, row.source_account_id, effectiveSince, HISTORY_PAGE_SIZE + 1
+      );
   const result = await statement.all<HistoryRow>();
   const rows = result.results;
   const hasMore = rows.length > HISTORY_PAGE_SIZE;
@@ -871,6 +1206,7 @@ async function accountSyncResponse(
   }
   return json({
     snapshot,
+    metadata: accountMetadataPayload(row),
     history,
     consent_revision: row.consent_revision,
     next_cursor: nextCursor,
@@ -885,7 +1221,10 @@ async function loadAccountSyncRow(
   accountID: string,
 ): Promise<AccountSyncRow | null> {
   return env.DB.prepare(
-    `SELECT monitored_accounts.last_success_at, monitored_accounts.last_error,
+    `SELECT monitored_accounts.profile_name, monitored_accounts.email,
+            monitored_accounts.plan, monitored_accounts.plan_expires_at,
+            monitored_accounts.trial_expires_at,
+            monitored_accounts.last_success_at, monitored_accounts.last_error,
             monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
@@ -894,6 +1233,48 @@ async function loadAccountSyncRow(
       AND account_monitoring_consent.enabled = 1
      WHERE monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?`
   ).bind(deviceID, accountID).first<AccountSyncRow>();
+}
+
+async function loadAccountSyncSourceRow(
+  env: Env,
+  deviceID: string,
+  accountID: string,
+): Promise<AccountSyncSourceRow | null> {
+  const direct = await env.DB.prepare(
+    `SELECT monitored_accounts.device_id AS source_device_id,
+            monitored_accounts.account_id AS source_account_id,
+            monitored_accounts.profile_name, monitored_accounts.email,
+            monitored_accounts.plan, monitored_accounts.plan_expires_at,
+            monitored_accounts.trial_expires_at,
+            monitored_accounts.last_success_at, monitored_accounts.last_error,
+            monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision
+     FROM monitored_accounts
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?`
+  ).bind(deviceID, accountID).first<AccountSyncSourceRow>();
+  if (direct) return direct;
+  return env.DB.prepare(
+    `SELECT monitored_accounts.device_id AS source_device_id,
+            monitored_accounts.account_id AS source_account_id,
+            monitored_accounts.profile_name, monitored_accounts.email,
+            monitored_accounts.plan, monitored_accounts.plan_expires_at,
+            monitored_accounts.trial_expires_at,
+            monitored_accounts.last_success_at, monitored_accounts.last_error,
+            monitored_accounts.latest_snapshot, 1 AS consent_revision
+     FROM remote_account_subscriptions
+     INNER JOIN monitored_accounts
+       ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
+      AND monitored_accounts.account_id = remote_account_subscriptions.source_account_id
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE remote_account_subscriptions.subscriber_device_id = ?
+       AND remote_account_subscriptions.local_account_id = ?`
+  ).bind(deviceID, accountID).first<AccountSyncSourceRow>();
 }
 
 async function runScheduledRefresh(env: Env, scheduledTime: number): Promise<void> {
@@ -921,11 +1302,13 @@ async function enqueueDueAccounts(env: Env, now: number): Promise<void> {
     const result = await env.DB.prepare(
       `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
               monitored_accounts.provider_id, monitored_accounts.workspace_id,
+              monitored_accounts.display_name,
               monitored_accounts.plan, monitored_accounts.missing_quotas,
               CASE WHEN monitored_accounts.credential_fingerprint IS NULL
                 THEN monitored_accounts.encrypted_credentials ELSE ''
               END AS encrypted_credentials,
               monitored_accounts.credential_fingerprint,
+              monitored_accounts.credential_revision, monitored_accounts.consecutive_failures,
               monitored_accounts.scheduled_monitor_at,
               monitored_accounts.refresh_interval_seconds, monitored_accounts.next_refresh_at,
               monitored_accounts.last_success_at, monitored_accounts.last_error,
@@ -1068,7 +1451,7 @@ async function enqueueRecoverableMonitorRuns(env: Env, now: number): Promise<voi
     `UPDATE monitor_runs SET status = 'failed',
        encrypted_result_credentials = NULL, result_snapshot = NULL,
        result_error = 'Scheduled refresh did not finish; the next interval will retry.',
-       failure_retryable = 0, completed_at = ?
+       failure_retryable = 0, failure_retry_after_seconds = NULL, completed_at = ?
      WHERE status = 'running' AND started_at IS NOT NULL AND started_at <= ?`
   ).bind(now, now - MONITOR_RUN_STALE_SECONDS).run();
   await env.DB.prepare(
@@ -1117,8 +1500,8 @@ async function enqueueActiveDevices(env: Env): Promise<void> {
 
   while (true) {
     const result = await env.DB.prepare(
-      `SELECT device_id, apns_token FROM devices
-       WHERE last_seen_at >= ? AND device_id > ?
+      `SELECT device_id, apns_token, apns_environment FROM devices
+       WHERE last_seen_at >= ? AND push_disabled_at IS NULL AND device_id > ?
        ORDER BY device_id LIMIT ?`
     ).bind(activeSince, cursor, DATABASE_BATCH_SIZE).all<Omit<PushTarget, "kind">>();
     const rows = result.results;
@@ -1137,13 +1520,23 @@ async function enqueueActiveDevices(env: Env): Promise<void> {
   console.log(JSON.stringify({ event: "scheduled_push_enqueued", enqueued }));
 }
 
-async function processQueue(batch: MessageBatch<QueueTarget>, env: Env): Promise<void> {
+async function processQueue(
+  batch: MessageBatch<QueueTarget>,
+  env: Env,
+  refreshMonitor: typeof refreshMonitorRun = refreshMonitorRun,
+): Promise<void> {
   const pushMessages = batch.messages.filter((message) => message.body.kind === "push");
   const monitorMessages = batch.messages.filter((message) => message.body.kind === "monitor_run");
-  await Promise.all([
-    pushMessages.length ? deliverQueuedPushes(pushMessages, env) : Promise.resolve(),
-    ...monitorMessages.map((message) => refreshMonitorRun(message, env)),
-  ]);
+  const pushDelivery = pushMessages.length
+    ? deliverQueuedPushes(pushMessages, env)
+    : Promise.resolve();
+  try {
+    // Provider quota endpoints commonly rate-limit by account or connector. Keep APNs fan-out
+    // parallel, but never burst independent provider refreshes from the same queue invocation.
+    for (const message of monitorMessages) await refreshMonitor(message, env);
+  } finally {
+    await pushDelivery;
+  }
 }
 
 async function deliverQueuedPushes(messages: Message<QueueTarget>[], env: Env): Promise<void> {
@@ -1154,7 +1547,9 @@ async function deliverQueuedPushes(messages: Message<QueueTarget>[], env: Env): 
   await Promise.all(messages.map(async (message) => {
     if (message.body.kind !== "push") return;
     try {
-      const outcome = await sendSilentPush(env, message.body.apns_token, authorization);
+      const outcome = await sendSilentPush(
+        env, message.body.apns_token, authorization, message.body.apns_environment
+      );
       await handleAPNSResult(env, message.body, outcome);
       if (outcome.ok || isPermanentAPNSRejection(outcome)) {
         message.ack();
@@ -1197,6 +1592,7 @@ async function refreshMonitorRun(
         runID,
         run.result_error ?? "Server monitoring failed.",
         run.failure_retryable === 1,
+        run.failure_retry_after_seconds,
         Math.floor(Date.now() / 1_000),
       );
       message.ack();
@@ -1239,6 +1635,7 @@ async function refreshMonitorRun(
           runID,
           run.result_error ?? "Server monitoring failed.",
           run.failure_retryable === 1,
+          run.failure_retry_after_seconds,
           startedAt,
         );
       } catch {
@@ -1281,13 +1678,20 @@ async function refreshMonitorRun(
   } catch (error) {
     const providerError = error instanceof ProviderFetchError ? error : null;
     const errorText = monitorError(error);
+    const retryAfterSeconds = providerError ? providerRetryDelaySeconds(providerError) : null;
     await env.DB.prepare(
       `UPDATE monitor_runs SET status = 'failed', result_error = ?, completed_at = ?,
-         failure_retryable = ?
+         failure_retryable = ?, failure_retry_after_seconds = ?
        WHERE run_id = ? AND status = 'running'`
-    ).bind(errorText, startedAt, providerError?.retryable === true ? 1 : 0, runID).run();
+    ).bind(
+      errorText, startedAt, providerError?.retryable === true ? 1 : 0,
+      retryAfterSeconds, runID,
+    ).run();
     try {
-      await applyMonitorRunFailure(env, runID, errorText, providerError?.retryable === true, startedAt);
+      await applyMonitorRunFailure(
+        env, runID, errorText, providerError?.retryable === true,
+        retryAfterSeconds, startedAt,
+      );
     } catch {
       message.retry({ delaySeconds: 60 });
       return;
@@ -1319,7 +1723,8 @@ async function refreshMonitorRun(
 async function loadMonitorRun(env: Env, runID: string): Promise<MonitorRunRow | null> {
   return env.DB.prepare(
     `SELECT run_id, occurrence_at, credential_fingerprint, status,
-            encrypted_result_credentials, result_snapshot, result_error, failure_retryable
+            encrypted_result_credentials, result_snapshot, result_error, failure_retryable,
+            failure_retry_after_seconds
      FROM monitor_runs WHERE run_id = ?`
   ).bind(runID).first<MonitorRunRow>();
 }
@@ -1332,9 +1737,11 @@ async function loadPendingMonitorRunTargets(
   const result = await env.DB.prepare(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.display_name,
             monitored_accounts.plan, monitored_accounts.missing_quotas,
             monitored_accounts.encrypted_credentials,
             monitored_accounts.credential_fingerprint,
+            monitored_accounts.credential_revision, monitored_accounts.consecutive_failures,
             monitored_accounts.scheduled_monitor_at,
             monitored_accounts.refresh_interval_seconds, monitored_accounts.next_refresh_at,
             monitored_accounts.last_success_at, monitored_accounts.last_error,
@@ -1386,6 +1793,7 @@ async function fanOutMonitorRun(env: Env, run: MonitorRunRow): Promise<void> {
     env.DB.prepare(
       `UPDATE monitor_runs SET status = 'succeeded', encrypted_result_credentials = NULL,
          result_snapshot = NULL, result_error = NULL, failure_retryable = NULL,
+         failure_retry_after_seconds = NULL,
          completed_at = ?
        WHERE run_id = ? AND status = 'fetched'`
     ).bind(completedAt, run.run_id),
@@ -1402,7 +1810,10 @@ async function applyMonitorResultToTarget(
 ): Promise<void> {
   const appliedAt = Math.floor(Date.now() / 1_000);
   const effectivePlan = snapshot.plan ?? row.plan;
-  const effectiveSnapshot = { ...snapshot, plan: effectivePlan };
+  const effectiveSnapshot = mergeSupplementarySnapshot(
+    { ...snapshot, plan: effectivePlan },
+    row.latest_snapshot,
+  );
   const nextFingerprint = await credentialFingerprint(env, {
     provider_id: row.provider_id,
     workspace_id: row.workspace_id,
@@ -1428,7 +1839,7 @@ async function applyMonitorResultToTarget(
       `UPDATE monitored_accounts SET
          plan = ?, encrypted_credentials = ?, credential_fingerprint = ?, latest_snapshot = ?,
          last_refresh_at = ?, last_success_at = ?, last_error = NULL,
-         next_refresh_at = ?, updated_at = ?
+         consecutive_failures = 0, next_refresh_at = ?, updated_at = ?
        WHERE device_id = ? AND account_id = ? AND credential_fingerprint = ?
          AND scheduled_monitor_at = ?
          AND EXISTS (
@@ -1491,7 +1902,39 @@ async function applyMonitorResultToTarget(
       row.target_consent_revision,
     ),
   ];
-  await env.DB.batch(statements);
+  const results = await env.DB.batch(statements);
+  if ((results[0]?.meta.changes ?? 0) === 1) {
+    await enqueueRemoteAccountRefreshHints(env, row.device_id, row.account_id);
+  }
+}
+
+async function enqueueRemoteAccountRefreshHints(
+  env: Env,
+  sourceDeviceID: string,
+  sourceAccountID: string,
+): Promise<void> {
+  const result = await env.DB.prepare(
+    `SELECT DISTINCT devices.device_id, devices.apns_token, devices.apns_environment
+     FROM remote_account_subscriptions
+     INNER JOIN devices
+       ON devices.device_id = remote_account_subscriptions.subscriber_device_id
+     WHERE remote_account_subscriptions.source_device_id = ?
+       AND remote_account_subscriptions.source_account_id = ?
+       AND devices.push_disabled_at IS NULL`
+  ).bind(sourceDeviceID, sourceAccountID).all<Omit<PushTarget, "kind">>();
+  for (let offset = 0; offset < result.results.length; offset += QUEUE_BATCH_SIZE) {
+    await env.PUSH_QUEUE.sendBatch(
+      result.results.slice(offset, offset + QUEUE_BATCH_SIZE).map((row) => ({
+        body: { kind: "push" as const, ...row },
+      }))
+    );
+  }
+  if (result.results.length > 0) {
+    console.log(JSON.stringify({
+      event: "remote_account_refresh_hints_enqueued",
+      devices: result.results.length,
+    }));
+  }
 }
 
 async function applyMonitorRunFailure(
@@ -1499,6 +1942,7 @@ async function applyMonitorRunFailure(
   runID: string,
   error: string,
   retryable: boolean,
+  retryAfterSeconds: number | null,
   failedAt: number,
 ): Promise<void> {
   const run = await loadMonitorRun(env, runID);
@@ -1507,10 +1951,16 @@ async function applyMonitorRunFailure(
     const targets = await loadPendingMonitorRunTargets(env, runID);
     if (targets.length === 0) break;
     for (const row of targets) {
-      const delay = retryable ? 5 * 60 : row.refresh_interval_seconds;
+      const delay = monitorRetryDelaySeconds(
+        retryable,
+        retryAfterSeconds,
+        row.refresh_interval_seconds,
+        row.consecutive_failures,
+      );
       await env.DB.batch([
         env.DB.prepare(
           `UPDATE monitored_accounts SET last_refresh_at = ?, last_error = ?,
+             consecutive_failures = consecutive_failures + 1,
              next_refresh_at = ?, updated_at = ?
            WHERE device_id = ? AND account_id = ? AND credential_fingerprint = ?
              AND scheduled_monitor_at = ?
@@ -1537,6 +1987,43 @@ async function applyMonitorRunFailure(
   ).bind(failedAt, runID).run();
 }
 
+function monitorRetryDelaySeconds(
+  retryable: boolean,
+  retryAfterSeconds: number | null,
+  refreshIntervalSeconds: number,
+  consecutiveFailures: number,
+): number {
+  const baseDelay = retryAfterSeconds
+    ?? (retryable ? 15 * 60 : refreshIntervalSeconds);
+  if (!retryable && retryAfterSeconds === null) return baseDelay;
+  return Math.min(
+    MAX_MONITOR_INTERVAL_SECONDS,
+    baseDelay * (2 ** Math.min(Math.max(0, consecutiveFailures), 4)),
+  );
+}
+
+function mergeSupplementarySnapshot(
+  snapshot: ProviderSnapshot,
+  previousJSON: string | null,
+): ProviderSnapshot {
+  if (snapshot.provider_id !== "chatgpt"
+      || snapshot.reset_credits_authoritative !== false
+      || snapshot.available_reset_count <= 0
+      || !previousJSON) return snapshot;
+  try {
+    const previous = JSON.parse(previousJSON) as ProviderSnapshot;
+    if (previous.provider_id !== "chatgpt" || !Array.isArray(previous.reset_credits)) {
+      return snapshot;
+    }
+    return {
+      ...snapshot,
+      reset_credits: previous.reset_credits.slice(0, snapshot.available_reset_count),
+    };
+  } catch {
+    return snapshot;
+  }
+}
+
 async function finishMonitorRun(
   env: Env,
   runID: string,
@@ -1546,6 +2033,7 @@ async function finishMonitorRun(
   await env.DB.prepare(
     `UPDATE monitor_runs SET status = ?, encrypted_result_credentials = NULL,
        result_snapshot = NULL, result_error = NULL, failure_retryable = NULL,
+       failure_retry_after_seconds = NULL,
        completed_at = ? WHERE run_id = ?`
   ).bind(status, completedAt, runID).run();
 }
@@ -1579,24 +2067,47 @@ async function pruneMonitorRuns(env: Env, now: number): Promise<void> {
 
 async function handleAPNSResult(
   env: Env,
-  row: { device_id: string; apns_token: string },
+  row: {
+    device_id: string;
+    apns_token: string;
+    apns_environment?: APNSEnvironment;
+  },
   result: APNSResult,
 ): Promise<void> {
+  const environment = row.apns_environment ?? null;
   if (result.ok) {
     await env.DB.prepare(
-      "UPDATE devices SET last_push_at = ? WHERE device_id = ? AND apns_token = ?"
-    ).bind(Math.floor(Date.now() / 1_000), row.device_id, row.apns_token).run();
+      `UPDATE devices SET last_push_at = ?, push_disabled_at = NULL
+       WHERE device_id = ? AND apns_token = ?
+         AND (? IS NULL OR apns_environment = ?)`
+    ).bind(
+      Math.floor(Date.now() / 1_000), row.device_id, row.apns_token,
+      environment, environment,
+    ).run();
   } else if (isPermanentAPNSRejection(result)) {
-    const deleted = await tombstoneAndDeleteDeviceByAPNSToken(
-      env, row.device_id, row.apns_token, Math.floor(Date.now() / 1_000)
-    );
-    if (deleted) console.log(JSON.stringify({ event: "device_unregistered_after_apns_rejection" }));
+    const disabled = await env.DB.prepare(
+      `UPDATE devices SET push_disabled_at = ?
+       WHERE device_id = ? AND apns_token = ?
+         AND (? IS NULL OR apns_environment = ?)`
+    ).bind(
+      Math.floor(Date.now() / 1_000), row.device_id, row.apns_token,
+      environment, environment,
+    ).run();
+    if ((disabled.meta.changes ?? 0) === 1) {
+      console.log(JSON.stringify({ event: "device_push_disabled_after_apns_rejection" }));
+    }
   }
 }
 
-async function sendSilentPush(env: Env, token: string, authorization: string): Promise<APNSResult> {
+async function sendSilentPush(
+  env: Env,
+  token: string,
+  authorization: string,
+  environment: APNSEnvironment = "production",
+): Promise<APNSResult> {
   validateAPNSConfiguration();
-  const response = await fetch(`${APNS_HOST}/3/device/${token}`, {
+  const host = environment === "development" ? APNS_DEVELOPMENT_HOST : APNS_PRODUCTION_HOST;
+  const response = await fetch(`${host}/3/device/${token}`, {
     method: "POST",
     headers: {
       authorization: `bearer ${authorization}`,
@@ -1619,7 +2130,10 @@ async function sendSilentPush(env: Env, token: string, authorization: string): P
 }
 
 function isPermanentAPNSRejection(result: APNSResult): boolean {
-  return result.status === 410 || result.reason === "BadDeviceToken" || result.reason === "Unregistered";
+  return result.status === 410
+    || result.reason === "BadDeviceToken"
+    || result.reason === "Unregistered"
+    || result.reason === "BadEnvironmentKeyInToken";
 }
 
 async function createAPNSAuthorization(): Promise<string> {
@@ -1675,17 +2189,32 @@ async function parseRegistration(request: Request): Promise<DeviceRegistration |
   const deviceID = value.device_id;
   const deviceSecret = value.device_secret;
   const apnsToken = value.apns_token;
+  const apnsEnvironment = value.apns_environment ?? "production";
   if (typeof deviceID !== "string" || !isUUID(deviceID)) return null;
   if (typeof deviceSecret !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(deviceSecret)) return null;
   if (typeof apnsToken !== "string" || !/^[0-9a-fA-F]{64,200}$/.test(apnsToken)) return null;
-  return { device_id: deviceID.toLowerCase(), device_secret: deviceSecret, apns_token: apnsToken.toLowerCase() };
+  if (apnsEnvironment !== "development" && apnsEnvironment !== "production") return null;
+  return {
+    device_id: deviceID.toLowerCase(),
+    device_secret: deviceSecret,
+    apns_token: apnsToken.toLowerCase(),
+    apns_environment: apnsEnvironment,
+  };
 }
 
-async function parseDeviceTokenUpdate(request: Request): Promise<string | null> {
+async function parseDeviceTokenUpdate(request: Request): Promise<{
+  apns_token: string;
+  apns_environment: APNSEnvironment;
+} | null> {
   const value = await boundedRequestJSON(request, MAX_DEVICE_TOKEN_BODY_BYTES);
   if (!isRecord(value) || typeof value.apns_token !== "string"
       || !/^[0-9a-fA-F]{64,200}$/.test(value.apns_token)) return null;
-  return value.apns_token.toLowerCase();
+  const environment = value.apns_environment ?? "production";
+  if (environment !== "development" && environment !== "production") return null;
+  return {
+    apns_token: value.apns_token.toLowerCase(),
+    apns_environment: environment,
+  };
 }
 
 async function boundedRequestJSON(request: Request, maximumBytes: number): Promise<unknown> {
@@ -1895,6 +2424,35 @@ function credentialsSufficient(providerID: ProviderID, accessToken: string, refr
   return !["chatgpt", "claude", "kimi"].includes(providerID) || refreshToken.length > 0;
 }
 
+function parseAccountMetadata(value: unknown): {
+  profile_name: string | null;
+  email: string | null;
+  plan_expires_at: number | null;
+  trial_expires_at: number | null;
+} | null {
+  if (value === null || value === undefined) {
+    return {
+      profile_name: null,
+      email: null,
+      plan_expires_at: null,
+      trial_expires_at: null,
+    };
+  }
+  if (!isRecord(value)) return null;
+  const profileName = optionalBoundedString(value.name, 128);
+  const email = optionalBoundedString(value.email, 320);
+  const planExpiresAt = nullableTimestamp(value.plan_expires_at);
+  const trialExpiresAt = nullableTimestamp(value.trial_expires_at);
+  if (profileName === undefined || email === undefined
+      || planExpiresAt === undefined || trialExpiresAt === undefined) return null;
+  return {
+    profile_name: profileName,
+    email,
+    plan_expires_at: planExpiresAt,
+    trial_expires_at: trialExpiresAt,
+  };
+}
+
 function parseMissingQuotas(value: unknown): MissingQuotaDescriptor[] | null {
   if (value === undefined) return [];
   if (!Array.isArray(value) || value.length > 50) return null;
@@ -2087,6 +2645,7 @@ export const testing = {
   handleAPNSResult,
   hashSecret,
   isUUID,
+  monitorRetryDelaySeconds,
   parseAccountUpload,
   parseRegistration,
   processQueue,

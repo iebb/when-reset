@@ -1,5 +1,9 @@
 const MAX_PROVIDER_RESPONSE_BYTES = 1_048_576;
 const USER_AGENT = "WhenReset-Worker/1.0";
+const TRANSIENT_RETRY_FLOOR_SECONDS = 15 * 60;
+const RATE_LIMIT_RETRY_FLOOR_SECONDS = 30 * 60;
+const CREDENTIAL_ERROR_RETRY_FLOOR_SECONDS = 6 * 60 * 60;
+const MAX_PROVIDER_RETRY_SECONDS = 8 * 60 * 60;
 
 export type ProviderID = "chatgpt" | "claude" | "kimi" | "github_copilot" | "zai" | "minimax"
   | "synthetic" | "warp";
@@ -42,6 +46,7 @@ export type ProviderSnapshot = {
   windows: ProviderUsageWindow[];
   available_reset_count: number;
   reset_credits: ProviderResetCredit[];
+  reset_credits_authoritative?: boolean;
 };
 
 export type ProviderFetchResult = {
@@ -52,13 +57,27 @@ export type ProviderFetchResult = {
 export class ProviderFetchError extends Error {
   readonly retryable: boolean;
   readonly status: number;
+  readonly retryAfterSeconds: number | null;
 
-  constructor(message: string, status = 0, retryable = false) {
+  constructor(message: string, status = 0, retryable = false, retryAfterSeconds: number | null = null) {
     super(message);
     this.name = "ProviderFetchError";
     this.status = status;
     this.retryable = retryable;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
+}
+
+export function providerRetryDelaySeconds(error: ProviderFetchError): number | null {
+  if (!error.retryable) {
+    return error.status >= 400 && error.status < 500
+      ? CREDENTIAL_ERROR_RETRY_FLOOR_SECONDS
+      : null;
+  }
+  const floor = error.status === 429
+    ? RATE_LIMIT_RETRY_FLOOR_SECONDS
+    : TRANSIENT_RETRY_FLOOR_SECONDS;
+  return Math.min(MAX_PROVIDER_RETRY_SECONDS, Math.max(floor, error.retryAfterSeconds ?? 0));
 }
 
 export async function fetchProviderUsage(
@@ -89,10 +108,19 @@ async function fetchChatGPT(
     "chatgpt-account-id": account.workspace_id,
     "user-agent": USER_AGENT,
   };
-  const [usage, credits] = await Promise.all([
-    getJSON("https://chatgpt.com/backend-api/wham/usage", headers),
-    getJSON("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits", headers),
-  ]);
+  const usage = await getJSON("https://chatgpt.com/backend-api/wham/usage", headers);
+  let credits: unknown = {};
+  let resetCreditsAuthoritative = true;
+  try {
+    credits = await getJSON(
+      "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+      headers,
+    );
+  } catch {
+    // The banked-reset endpoint has its own rate limit. Quota windows from /usage remain valid,
+    // so retain the previous credit detail during fan-out instead of failing the whole refresh.
+    resetCreditsAuthoritative = false;
+  }
   const root = asRecord(usage) ?? {};
   const limit = asRecord(root.rate_limit) ?? root;
   const windows: ProviderUsageWindow[] = [];
@@ -145,7 +173,15 @@ async function fetchChatGPT(
   const plan = preferredPlan(reportedPlan, account.plan);
   return {
     credentials: refreshed,
-    snapshot: snapshot(account.provider_id, plan, now, windows, resetCount, resetCredits),
+    snapshot: snapshot(
+      account.provider_id,
+      plan,
+      now,
+      windows,
+      resetCount,
+      resetCredits,
+      resetCreditsAuthoritative,
+    ),
   };
 }
 
@@ -732,8 +768,9 @@ function snapshot(
   windows: ProviderUsageWindow[],
   resetCount: number,
   credits: ProviderResetCredit[],
+  resetCreditsAuthoritative = true,
 ): ProviderSnapshot {
-  return {
+  const result: ProviderSnapshot = {
     provider_id: providerID,
     plan,
     fetched_at: fetchedAt,
@@ -741,6 +778,8 @@ function snapshot(
     available_reset_count: Math.max(0, resetCount),
     reset_credits: credits,
   };
+  if (!resetCreditsAuthoritative) result.reset_credits_authoritative = false;
+  return result;
 }
 
 function fallbackResetCreditID(
@@ -781,16 +820,40 @@ async function getJSON(url: string, headers: HeadersInit): Promise<unknown> {
 async function requestJSON(url: string, init: RequestInit): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(url, { ...init, redirect: "error" });
+    // The Workers runtime supports manual redirect handling, but intentionally rejects
+    // `redirect: "error"` before issuing the request. Never follow redirects here because an
+    // Authorization header must not be forwarded to an unexpected origin.
+    response = await fetch(url, { ...init, redirect: "manual" });
   } catch {
     throw new ProviderFetchError("Provider request failed.", 0, true);
   }
-  const value = await boundedJSON(response);
-  if (!response.ok) {
-    throw new ProviderFetchError(`Provider request failed (HTTP ${response.status}).`, response.status,
-      response.status === 408 || response.status === 429 || response.status >= 500);
+  if (response.status >= 300 && response.status < 400) {
+    await discardResponseBody(response);
+    throw new ProviderFetchError("Provider redirected unexpectedly.", response.status);
   }
-  return value;
+  if (!response.ok) {
+    const retryAfter = parseRetryAfterSeconds(response.headers.get("retry-after"));
+    await discardResponseBody(response);
+    const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+    const message = response.status === 429
+      ? "Provider rate limit reached; retrying later."
+      : `Provider request failed (HTTP ${response.status}).`;
+    throw new ProviderFetchError(message, response.status, retryable, retryAfter);
+  }
+  return boundedJSON(response);
+}
+
+async function discardResponseBody(response: Response): Promise<void> {
+  try { await response.body?.cancel(); } catch { /* The response is already unusable. */ }
+}
+
+function parseRetryAfterSeconds(value: string | null, now = Date.now()): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const date = Date.parse(trimmed);
+  if (!Number.isFinite(date)) return null;
+  return Math.max(0, Math.ceil((date - now) / 1_000));
 }
 
 async function boundedJSON(response: Response): Promise<unknown> {
@@ -983,7 +1046,10 @@ export const providerTesting = {
   chatGPTWindow,
   fallbackResetCreditID,
   jwtExpiration,
+  parseRetryAfterSeconds,
+  providerRetryDelaySeconds,
   quotaFromUnknown,
+  requestJSON,
   miniMaxWindow,
   syntheticWindows,
   warpWindow,

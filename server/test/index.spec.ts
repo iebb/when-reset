@@ -1,6 +1,7 @@
 import { env, SELF } from "cloudflare:test";
 import { beforeEach, describe, expect, it } from "vitest";
 import { testing } from "../src/index";
+import { ProviderFetchError } from "../src/providers";
 
 const deviceID = "019f724a-3414-4d52-ae37-0c7024a1ab97";
 const deviceSecret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -13,6 +14,7 @@ beforeEach(async () => {
     env.DB.prepare("DROP TABLE IF EXISTS usage_history"),
     env.DB.prepare("DROP TABLE IF EXISTS monitor_run_targets"),
     env.DB.prepare("DROP TABLE IF EXISTS monitor_runs"),
+    env.DB.prepare("DROP TABLE IF EXISTS remote_account_subscriptions"),
     env.DB.prepare("DROP TABLE IF EXISTS monitored_accounts"),
     env.DB.prepare("DROP TABLE IF EXISTS account_monitoring_consent"),
     env.DB.prepare("DROP TABLE IF EXISTS link_sessions"),
@@ -22,9 +24,11 @@ beforeEach(async () => {
       device_id TEXT PRIMARY KEY NOT NULL,
       secret_hash TEXT NOT NULL,
       apns_token TEXT NOT NULL UNIQUE,
+      apns_environment TEXT NOT NULL DEFAULT 'production',
       created_at INTEGER NOT NULL,
       last_seen_at INTEGER NOT NULL,
-      last_push_at INTEGER
+      last_push_at INTEGER,
+      push_disabled_at INTEGER
     )`),
     env.DB.prepare(`CREATE TABLE device_deletion_tombstones (
       device_id TEXT PRIMARY KEY NOT NULL,
@@ -55,21 +59,40 @@ beforeEach(async () => {
       account_id TEXT NOT NULL,
       provider_id TEXT NOT NULL,
       workspace_id TEXT NOT NULL,
+      display_name TEXT,
+      profile_name TEXT,
+      email TEXT,
       plan TEXT,
+      plan_expires_at INTEGER,
+      trial_expires_at INTEGER,
       missing_quotas TEXT NOT NULL DEFAULT '[]',
       encrypted_credentials TEXT NOT NULL,
       credential_fingerprint TEXT,
+      credential_revision INTEGER NOT NULL CHECK(credential_revision > 0),
       scheduled_monitor_at INTEGER,
       refresh_interval_seconds INTEGER NOT NULL,
       next_refresh_at INTEGER NOT NULL,
       last_refresh_at INTEGER,
       last_success_at INTEGER,
       last_error TEXT,
+      consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK(consecutive_failures >= 0),
       latest_snapshot TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       PRIMARY KEY (device_id, account_id),
       FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+    )`),
+    env.DB.prepare(`CREATE TABLE remote_account_subscriptions (
+      subscriber_device_id TEXT NOT NULL,
+      local_account_id TEXT NOT NULL,
+      source_device_id TEXT NOT NULL,
+      source_account_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (subscriber_device_id, local_account_id),
+      UNIQUE (subscriber_device_id, source_device_id, source_account_id),
+      FOREIGN KEY (subscriber_device_id) REFERENCES devices(device_id) ON DELETE CASCADE,
+      FOREIGN KEY (source_device_id, source_account_id)
+        REFERENCES monitored_accounts(device_id, account_id) ON DELETE CASCADE
     )`),
     env.DB.prepare(`CREATE TABLE monitor_runs (
       run_id TEXT PRIMARY KEY NOT NULL,
@@ -80,6 +103,7 @@ beforeEach(async () => {
       result_snapshot TEXT,
       result_error TEXT,
       failure_retryable INTEGER CHECK(failure_retryable IN (0, 1)),
+      failure_retry_after_seconds INTEGER CHECK(failure_retry_after_seconds >= 0),
       created_at INTEGER NOT NULL,
       started_at INTEGER,
       fetched_at INTEGER,
@@ -110,6 +134,7 @@ beforeEach(async () => {
           result_snapshot = NULL,
           result_error = NULL,
           failure_retryable = NULL,
+          failure_retry_after_seconds = NULL,
           completed_at = COALESCE(completed_at, occurrence_at)
         WHERE run_id = OLD.run_id;
       END`),
@@ -169,7 +194,14 @@ function accountRequestBody(providerID = "chatgpt", consentRevision?: number) {
   return {
     provider_id: providerID,
     workspace_id: "workspace-123",
+    display_name: "Worker account",
     plan: "Plus",
+    metadata: {
+      name: "Provider Person",
+      email: "person@example.com",
+      plan_expires_at: 2_000_000_000,
+      trial_expires_at: 1_999_000_000,
+    },
     refresh_interval_seconds: FIVE_MINUTES_SECONDS,
     ...(consentRevision === undefined ? {} : { consent_revision: consentRevision }),
     missing_quotas: [{
@@ -481,21 +513,29 @@ describe("push registration API", () => {
         device_id: deviceID,
         device_secret: deviceSecret,
         apns_token: apnsToken,
+        apns_environment: "development",
       }),
     });
 
     expect(response.status).toBe(201);
     const row = await env.DB.prepare(
-      "SELECT secret_hash, apns_token FROM devices WHERE device_id = ?"
-    ).bind(deviceID).first<{ secret_hash: string; apns_token: string }>();
+      "SELECT secret_hash, apns_token, apns_environment FROM devices WHERE device_id = ?"
+    ).bind(deviceID).first<{
+      secret_hash: string;
+      apns_token: string;
+      apns_environment: string;
+    }>();
     expect(row?.secret_hash).toBe(await testing.hashSecret(deviceSecret));
     expect(row?.secret_hash).not.toBe(deviceSecret);
     expect(row?.apns_token).toBe(apnsToken);
+    expect(row?.apns_environment).toBe("development");
   });
 
   it("rotates an existing APNs token using only the device secret", async () => {
     await registerDevice();
     const url = `https://push.example/v1/devices/${deviceID}`;
+    await env.DB.prepare("UPDATE devices SET push_disabled_at = 123 WHERE device_id = ?")
+      .bind(deviceID).run();
     expect((await SELF.fetch(url, {
       method: "PUT",
       headers: { authorization: `Bearer ${"B".repeat(43)}` },
@@ -505,12 +545,25 @@ describe("push registration API", () => {
     const response = await SELF.fetch(url, {
       method: "PUT",
       headers: { authorization: `Bearer ${deviceSecret}` },
-      body: JSON.stringify({ apns_token: "b".repeat(64) }),
+      body: JSON.stringify({
+        apns_token: "b".repeat(64),
+        apns_environment: "development",
+      }),
     });
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
-    expect(await env.DB.prepare("SELECT apns_token FROM devices WHERE device_id = ?")
-      .bind(deviceID).first<{ apns_token: string }>()).toEqual({ apns_token: "b".repeat(64) });
+    expect(await env.DB.prepare(
+      `SELECT apns_token, apns_environment, push_disabled_at
+       FROM devices WHERE device_id = ?`
+    ).bind(deviceID).first<{
+      apns_token: string;
+      apns_environment: string;
+      push_disabled_at: number | null;
+    }>()).toEqual({
+      apns_token: "b".repeat(64),
+      apns_environment: "development",
+      push_disabled_at: null,
+    });
   });
 
   it("returns a deliberate conflict when registrations reuse another device’s APNs token", async () => {
@@ -648,7 +701,7 @@ describe("push registration API", () => {
       .toEqual(["device_id", "secret_hash", "deleted_at"]);
   });
 
-  it("tombstones permanent APNs rejection so a later authenticated unregister is idempotent", async () => {
+  it("disables pushes after permanent APNs rejection without deleting server monitoring", async () => {
     await registerDevice();
     const accountID = "019f724a-3414-4d52-ae37-0c7024a1ab98";
     const accountURL = `https://push.example/v1/devices/${deviceID}/accounts/${accountID}`;
@@ -675,17 +728,19 @@ describe("push registration API", () => {
 
     for (const table of ["devices", "monitored_accounts", "usage_history", "account_monitoring_consent"]) {
       expect(await env.DB.prepare(`SELECT COUNT(*) AS count FROM ${table}`)
-        .first<{ count: number }>()).toEqual({ count: 0 });
+        .first<{ count: number }>()).toEqual({ count: 1 });
     }
     expect(await env.DB.prepare(
-      "SELECT secret_hash FROM device_deletion_tombstones WHERE device_id = ?"
-    ).bind(deviceID).first<{ secret_hash: string }>()).toEqual({
-      secret_hash: await testing.hashSecret(deviceSecret),
-    });
-    expect((await SELF.fetch(`https://push.example/v1/devices/${deviceID}`, {
-      method: "DELETE",
+      "SELECT push_disabled_at FROM devices WHERE device_id = ?"
+    ).bind(deviceID).first<{ push_disabled_at: number | null }>()
+    ).toEqual({ push_disabled_at: expect.any(Number) });
+    expect(await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM device_deletion_tombstones WHERE device_id = ?"
+    ).bind(deviceID).first<{ count: number }>()).toEqual({ count: 0 });
+    expect((await SELF.fetch(`https://push.example/v1/devices/${deviceID}/refresh`, {
+      method: "POST",
       headers: { authorization: `Bearer ${deviceSecret}` },
-    })).status).toBe(204);
+    })).status).toBe(409);
   });
 
   it("does not tombstone or delete a live device whose APNs token rotated", async () => {
@@ -709,6 +764,74 @@ describe("push registration API", () => {
     expect(await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM device_deletion_tombstones WHERE device_id = ?"
     ).bind(deviceID).first<{ count: number }>()).toEqual({ count: 0 });
+  });
+
+  it("does not enqueue hourly pushes for a device with a rejected APNs token", async () => {
+    await registerDevice();
+    await env.DB.prepare("UPDATE devices SET push_disabled_at = 123 WHERE device_id = ?")
+      .bind(deviceID).run();
+    const queued: unknown[] = [];
+    const testEnv = {
+      DB: env.DB,
+      PUSH_QUEUE: {
+        sendBatch: async (messages: { body: unknown }[]) => {
+          queued.push(...messages.map((message) => message.body));
+        },
+      },
+    } as unknown as Env;
+
+    await testing.runScheduledRefresh(testEnv, Date.UTC(2033, 4, 18, 4, 0));
+
+    expect(queued).toEqual([]);
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM devices")
+      .first<{ count: number }>()).toEqual({ count: 1 });
+  });
+
+  it("disables an unsupported APNs environment without deleting the registration", async () => {
+    await registerDevice();
+
+    await testing.handleAPNSResult(
+      env,
+      { device_id: deviceID, apns_token: apnsToken },
+      { ok: false, status: 403, reason: "BadEnvironmentKeyInToken" },
+    );
+
+    expect(await env.DB.prepare(
+      "SELECT push_disabled_at FROM devices WHERE device_id = ?"
+    ).bind(deviceID).first<{ push_disabled_at: number | null }>()).toEqual({
+      push_disabled_at: expect.any(Number),
+    });
+    expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM device_deletion_tombstones")
+      .first<{ count: number }>()).toEqual({ count: 0 });
+  });
+
+  it("does not disable a token whose APNs environment rotated after enqueue", async () => {
+    await registerDevice();
+    expect((await SELF.fetch(`https://push.example/v1/devices/${deviceID}`, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify({
+        apns_token: apnsToken,
+        apns_environment: "development",
+      }),
+    })).status).toBe(200);
+
+    await testing.handleAPNSResult(
+      env,
+      {
+        device_id: deviceID,
+        apns_token: apnsToken,
+        apns_environment: "production",
+      },
+      { ok: false, status: 403, reason: "BadEnvironmentKeyInToken" },
+    );
+
+    expect(await env.DB.prepare(
+      "SELECT apns_environment, push_disabled_at FROM devices WHERE device_id = ?"
+    ).bind(deviceID).first()).toEqual({
+      apns_environment: "development",
+      push_disabled_at: null,
+    });
   });
 
   it("does not let an old deletion secret remove a newly registered device", async () => {
@@ -841,17 +964,292 @@ describe("self-hosted account monitoring API", () => {
     expect(responseBody).toMatchObject({
       history: [],
       next_cursor: null,
+      metadata: {
+        name: "Provider Person",
+        email: "person@example.com",
+        plan: "Plus",
+        plan_expires_at: 2_000_000_000,
+        trial_expires_at: 1_999_000_000,
+      },
     });
     expect(responseBody).not.toHaveProperty("credentials");
     expect(JSON.stringify(responseBody)).not.toContain("access-secret");
     expect(JSON.stringify(responseBody)).not.toContain("refresh-secret");
     expect(JSON.stringify(responseBody)).not.toContain("id-secret");
     const row = await env.DB.prepare(
-      "SELECT encrypted_credentials FROM monitored_accounts WHERE device_id = ? AND account_id = ?"
-    ).bind(deviceID, accountID).first<{ encrypted_credentials: string }>();
+      `SELECT encrypted_credentials, profile_name, email, plan,
+              plan_expires_at, trial_expires_at
+       FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first<{
+      encrypted_credentials: string;
+      profile_name: string;
+      email: string;
+      plan: string;
+      plan_expires_at: number;
+      trial_expires_at: number;
+    }>();
+    expect(row).toMatchObject({
+      profile_name: "Provider Person",
+      email: "person@example.com",
+      plan: "Plus",
+      plan_expires_at: 2_000_000_000,
+      trial_expires_at: 1_999_000_000,
+    });
     expect(row?.encrypted_credentials).not.toContain("access-secret");
     expect(row?.encrypted_credentials).not.toContain("refresh-secret");
     expect(JSON.parse(row!.encrypted_credentials)).toMatchObject({ v: 1 });
+  });
+
+  it("accepts legacy uploads without identity metadata and rejects malformed metadata", async () => {
+    await registerDevice();
+    const { metadata: _metadata, ...legacyBody } = accountRequestBody();
+    const legacy = await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(legacyBody),
+    });
+    expect(legacy.status).toBe(201);
+    expect(await legacy.json()).toMatchObject({
+      metadata: {
+        name: null,
+        email: null,
+        plan: "Plus",
+        plan_expires_at: null,
+        trial_expires_at: null,
+      },
+    });
+
+    const malformed = accountRequestBody("chatgpt", 2);
+    malformed.metadata.email = "x".repeat(321);
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(malformed),
+    })).status).toBe(400);
+  });
+
+  it("imports a read-only remote account without returning or duplicating credentials", async () => {
+    await registerDevice();
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(accountRequestBody()),
+    })).status).toBe(201);
+    const fetchedAt = Math.floor(Date.now() / 1_000) - 60;
+    const snapshot = {
+      provider_id: "chatgpt",
+      plan: "Plus",
+      fetched_at: fetchedAt,
+      windows: [{
+        position: 0,
+        metric_id: "weekly",
+        title: "Weekly limit",
+        kind: "weekly",
+        window_minutes: 10_080,
+        remaining_percent: 72,
+        resets_at: fetchedAt + 86_400,
+      }],
+      available_reset_count: 1,
+      reset_credits: [],
+    };
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE monitored_accounts SET latest_snapshot = ?, last_success_at = ?
+         WHERE device_id = ? AND account_id = ?`
+      ).bind(JSON.stringify(snapshot), fetchedAt, deviceID, accountID),
+      env.DB.prepare(
+        `INSERT INTO usage_history (
+           device_id, account_id, provider_id, metric_id, metric_title, kind,
+           window_minutes, remaining_percent, recorded_at, resets_at,
+           seconds_until_reset, plan
+         ) VALUES (?, ?, 'chatgpt', 'weekly', 'Weekly limit', 'weekly',
+                   10080, 72, ?, ?, 86400, 'Plus')`
+      ).bind(deviceID, accountID, fetchedAt, fetchedAt + 86_400),
+    ]);
+
+    const subscriberDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab99";
+    const subscriberSecret = "B".repeat(43);
+    const subscriberToken = "b".repeat(64);
+    const localAccountID = "019f724a-3414-4d52-ae37-0c7024a1aba0";
+    await registerDevice(subscriberDeviceID, subscriberSecret, subscriberToken);
+    const remoteAccountsURL = `https://push.example/v1/devices/${subscriberDeviceID}/remote-accounts`;
+    expect((await SELF.fetch(remoteAccountsURL)).status).toBe(401);
+    const candidatesResponse = await SELF.fetch(remoteAccountsURL, {
+      headers: { authorization: `Bearer ${subscriberSecret}` },
+    });
+    expect(candidatesResponse.status).toBe(200);
+    expect(candidatesResponse.headers.get("cache-control")).toBe("no-store");
+    const candidates = await candidatesResponse.json<{
+      accounts: Array<Record<string, unknown> & { remote_account_id: string }>;
+    }>();
+    expect(candidates.accounts).toHaveLength(1);
+    expect(candidates.accounts[0]).toMatchObject({
+      provider_id: "chatgpt",
+      display_name: "Worker account",
+      plan: "Plus",
+      metadata: {
+        name: "Provider Person",
+        email: "person@example.com",
+        plan: "Plus",
+        plan_expires_at: 2_000_000_000,
+        trial_expires_at: 1_999_000_000,
+      },
+      last_success_at: fetchedAt,
+    });
+    const serializedCandidates = JSON.stringify(candidates);
+    expect(serializedCandidates).not.toContain(deviceID);
+    expect(serializedCandidates).not.toContain(accountID);
+    expect(serializedCandidates).not.toContain("workspace-123");
+    expect(serializedCandidates).not.toContain("access-secret");
+    expect(serializedCandidates).not.toContain("refresh-secret");
+    expect(serializedCandidates).not.toContain("id-secret");
+
+    const imported = await SELF.fetch(remoteAccountsURL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${subscriberSecret}` },
+      body: JSON.stringify({
+        remote_account_id: candidates.accounts[0].remote_account_id,
+        local_account_id: localAccountID.toUpperCase(),
+      }),
+    });
+    expect(imported.status).toBe(201);
+    const importedBody = await imported.json<Record<string, unknown>>();
+    expect(importedBody).toMatchObject({
+      account: {
+        metadata: {
+          name: "Provider Person",
+          email: "person@example.com",
+          plan: "Plus",
+          plan_expires_at: 2_000_000_000,
+          trial_expires_at: 1_999_000_000,
+        },
+      },
+    });
+    expect(JSON.stringify(importedBody)).not.toContain("access-secret");
+    expect(await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM monitored_accounts"
+    ).first()).toEqual({ count: 1 });
+    expect(await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM remote_account_subscriptions"
+    ).first()).toEqual({ count: 1 });
+    const repeatedImport = await SELF.fetch(remoteAccountsURL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${subscriberSecret}` },
+      body: JSON.stringify({
+        remote_account_id: candidates.accounts[0].remote_account_id,
+        local_account_id: localAccountID,
+      }),
+    });
+    expect(repeatedImport.status).toBe(200);
+    expect(JSON.stringify(await repeatedImport.json())).not.toContain("access-secret");
+
+    const sync = await SELF.fetch(
+      `https://push.example/v1/devices/${subscriberDeviceID}/accounts/${localAccountID}/sync?since=0`,
+      { headers: { authorization: `Bearer ${subscriberSecret}` } },
+    );
+    expect(sync.status).toBe(200);
+    expect(await sync.json()).toMatchObject({
+      snapshot,
+      metadata: {
+        name: "Provider Person",
+        email: "person@example.com",
+        plan: "Plus",
+        plan_expires_at: 2_000_000_000,
+        trial_expires_at: 1_999_000_000,
+      },
+      history: [{ metric_id: "weekly", remaining_percent: 72 }],
+      consent_revision: 1,
+    });
+
+    await testing.handleAPNSResult(
+      env,
+      { device_id: subscriberDeviceID, apns_token: subscriberToken },
+      { ok: false, status: 410, reason: "Unregistered" },
+    );
+    expect(await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM remote_account_subscriptions"
+    ).first()).toEqual({ count: 1 });
+    expect((await SELF.fetch(
+      `https://push.example/v1/devices/${subscriberDeviceID}/accounts/${localAccountID}/sync?since=0`,
+      { headers: { authorization: `Bearer ${subscriberSecret}` } },
+    )).status).toBe(200);
+
+    expect((await SELF.fetch(
+      `https://push.example/v1/devices/${subscriberDeviceID}/accounts/${localAccountID}`,
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${subscriberSecret}` },
+        body: JSON.stringify(accountRequestBody()),
+      },
+    )).status).toBe(409);
+    expect((await SELF.fetch(
+      `https://push.example/v1/devices/${subscriberDeviceID}/accounts/${localAccountID}?consent_revision=2`,
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${subscriberSecret}` },
+      },
+    )).status).toBe(204);
+    expect(await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM monitored_accounts"
+    ).first()).toEqual({ count: 1 });
+    expect(await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM remote_account_subscriptions"
+    ).first()).toEqual({ count: 0 });
+  });
+
+  it("does not overwrite refreshed Worker credentials or backoff on an idempotent upload", async () => {
+    await registerDevice();
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(accountRequestBody("chatgpt", 1)),
+    })).status).toBe(201);
+    const delayedUntil = Math.floor(Date.now() / 1_000) + 7_200;
+    await env.DB.prepare(
+      `UPDATE monitored_accounts
+       SET next_refresh_at = ?, last_error = 'Provider rate limit reached; retrying later.'
+       WHERE device_id = ? AND account_id = ?`
+    ).bind(delayedUntil, deviceID, accountID).run();
+    const original = await env.DB.prepare(
+      `SELECT encrypted_credentials, credential_fingerprint, credential_revision, next_refresh_at
+       FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first<{
+      encrypted_credentials: string;
+      credential_fingerprint: string;
+      credential_revision: number;
+      next_refresh_at: number;
+    }>();
+
+    const staleUpload = accountRequestBody("chatgpt", 1);
+    staleUpload.credentials.access_token = "stale-device-access-token";
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(staleUpload),
+    })).status).toBe(200);
+    expect(await env.DB.prepare(
+      `SELECT encrypted_credentials, credential_fingerprint, credential_revision, next_refresh_at
+       FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first()).toEqual(original);
+
+    const relinkedUpload = accountRequestBody("chatgpt", 2);
+    relinkedUpload.credentials.access_token = "explicitly-relinked-access-token";
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(relinkedUpload),
+    })).status).toBe(200);
+    const relinked = await env.DB.prepare(
+      `SELECT credential_fingerprint, credential_revision, next_refresh_at
+       FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first<{
+      credential_fingerprint: string;
+      credential_revision: number;
+      next_refresh_at: number;
+    }>();
+    expect(relinked?.credential_revision).toBe(2);
+    expect(relinked?.credential_fingerprint).not.toBe(original?.credential_fingerprint);
+    expect(relinked!.next_refresh_at).toBeLessThan(delayedUntil);
   });
 
   it("keeps a delete tombstone so stale and same-revision uploads cannot recreate credentials", async () => {
@@ -1235,6 +1633,111 @@ describe("self-hosted account monitoring API", () => {
       next_refresh_at: occurrence / 1_000 + FIVE_MINUTES_SECONDS,
     });
     expect(queued).not.toContainEqual(expect.objectContaining({ kind: "push" }));
+  });
+
+  it("serializes monitor messages so provider requests cannot burst concurrently", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const completed: string[] = [];
+    const messages = ["first", "second", "third"].map((runID) => ({
+      body: { kind: "monitor_run" as const, run_id: runID },
+      ack: () => {},
+      retry: () => {},
+    }));
+    const refreshMonitor: Parameters<typeof testing.processQueue>[2] = async (message) => {
+      if (message.body.kind !== "monitor_run") return;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      completed.push(message.body.run_id);
+      active -= 1;
+    };
+
+    await testing.processQueue(
+      { messages } as never,
+      {} as Env,
+      refreshMonitor,
+    );
+
+    expect(maximumActive).toBe(1);
+    expect(completed).toEqual(["first", "second", "third"]);
+  });
+
+  it("backs off a rate-limited provider without repeating the failed run", async () => {
+    await registerDevice();
+    await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(accountRequestBody()),
+    });
+    const queued: Array<{ kind?: string; run_id?: string }> = [];
+    const testEnv = {
+      DB: env.DB,
+      REGISTRATION_ACCESS_KEY: env.REGISTRATION_ACCESS_KEY,
+      CREDENTIAL_ENCRYPTION_KEY: env.CREDENTIAL_ENCRYPTION_KEY,
+      PUSH_QUEUE: {
+        sendBatch: async (messages: { body: { kind?: string; run_id?: string } }[]) => {
+          queued.push(...messages.map((message) => message.body));
+        },
+      },
+    } as unknown as Env;
+    const occurrence = Math.ceil(Date.now() / FIVE_MINUTES_MILLISECONDS)
+      * FIVE_MINUTES_MILLISECONDS;
+    await testing.runScheduledRefresh(testEnv, occurrence);
+    const runID = queued.find((body) => body.kind === "monitor_run")!.run_id!;
+    let fetchCount = 0;
+    let acknowledgements = 0;
+    const queueMessage = {
+      body: { kind: "monitor_run", run_id: runID },
+      ack: () => { acknowledgements += 1; },
+      retry: () => {},
+    };
+    const rateLimited: Parameters<typeof testing.refreshMonitorRun>[2] = async () => {
+      fetchCount += 1;
+      throw new ProviderFetchError("Provider rate limit reached; retrying later.", 429, true, 120);
+    };
+
+    await testing.refreshMonitorRun(queueMessage as never, testEnv, rateLimited);
+    const account = await env.DB.prepare(
+      `SELECT last_refresh_at, next_refresh_at, last_error FROM monitored_accounts
+       WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first<{
+      last_refresh_at: number;
+      next_refresh_at: number;
+      last_error: string;
+    }>();
+    expect(account).not.toBeNull();
+    expect(account!.next_refresh_at - account!.last_refresh_at).toBe(30 * 60);
+    expect(account!.last_error).toBe("Provider rate limit reached; retrying later.");
+    expect(await env.DB.prepare(
+      `SELECT status, failure_retryable, failure_retry_after_seconds
+       FROM monitor_runs WHERE run_id = ?`
+    ).bind(runID).first()).toEqual({
+      status: "failed",
+      failure_retryable: 1,
+      failure_retry_after_seconds: 30 * 60,
+    });
+
+    const mustNotFetch: Parameters<typeof testing.refreshMonitorRun>[2] = async () => {
+      fetchCount += 1;
+      throw new Error("terminal rate-limited run must not fetch again");
+    };
+    await testing.refreshMonitorRun(queueMessage as never, testEnv, mustNotFetch);
+    expect(fetchCount).toBe(1);
+    expect(acknowledgements).toBe(2);
+  });
+
+  it("increases repeated provider backoff without exceeding eight hours", () => {
+    expect(testing.monitorRetryDelaySeconds(true, 30 * 60, FIVE_MINUTES_SECONDS, 0))
+      .toBe(30 * 60);
+    expect(testing.monitorRetryDelaySeconds(true, 30 * 60, FIVE_MINUTES_SECONDS, 1))
+      .toBe(60 * 60);
+    expect(testing.monitorRetryDelaySeconds(true, 30 * 60, FIVE_MINUTES_SECONDS, 3))
+      .toBe(4 * 60 * 60);
+    expect(testing.monitorRetryDelaySeconds(true, 30 * 60, FIVE_MINUTES_SECONDS, 8))
+      .toBe(8 * 60 * 60);
+    expect(testing.monitorRetryDelaySeconds(false, 6 * 60 * 60, FIVE_MINUTES_SECONDS, 1))
+      .toBe(8 * 60 * 60);
   });
 
   it("recovers a pending queue gap without scheduling a second provider run", async () => {

@@ -21,6 +21,7 @@ struct AddAccountView: View {
     @State private var compatibleEndpoint = ""
     @State private var compatibleAPIKey = ""
     @State private var isAddingDemo = false
+    @State private var showingRemoteWorkerAccounts = false
 
     init(relinkingAccount: MonitoredAccount? = nil) {
         self.relinkingAccount = relinkingAccount
@@ -54,6 +55,9 @@ struct AddAccountView: View {
             .onDisappear {
                 completionTask?.cancel()
             }
+            .sheet(isPresented: $showingRemoteWorkerAccounts) {
+                RemoteWorkerAccountsView()
+            }
             .alert("Couldn’t link account", isPresented: .init(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
             } message: { Text(store.errorMessage ?? "Unknown error") }
@@ -71,6 +75,41 @@ struct AddAccountView: View {
                          : "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.")
                         .font(.body)
                         .foregroundStyle(.secondary)
+                }
+
+                if relinkingAccount == nil, store.pushServerStatus == .registered {
+                    Button {
+                        showingRemoteWorkerAccounts = true
+                    } label: {
+                        HStack(spacing: 14) {
+                            Image(systemName: "lock.icloud.fill")
+                                .font(.title2)
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 42, height: 42)
+                                .background(Color.accentColor.opacity(0.11), in: .rect(cornerRadius: 13))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Add from self-hosted Worker")
+                                    .font(.headline)
+                                    .foregroundStyle(.primary)
+                                Text("Uses server-side refreshes without downloading provider credentials.")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 20))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 20)
+                                .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
 
                 if !availableProviders.isEmpty {

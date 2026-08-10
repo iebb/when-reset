@@ -23,6 +23,8 @@ It is not an App Store Connect API key and grants no access to Apple accounts, a
 
 The remaining exposure is intentional: anyone with this public key, its public identifiers, and a valid production device token for `ad.neko.when` can send an APNs payload to that device. The key cannot discover device tokens. Each self-hosted Worker keeps its tokens in its own D1 database, and the API never logs them.
 
+The app labels each APNs token as development or production. App Store and TestFlight builds use production. A locally signed Debug build uses Apple’s sandbox, which this production-only shared key cannot access; the Worker disables push hints for that token after Apple returns `BadEnvironmentKeyInToken`, while preserving server monitoring, subscriptions, snapshot sync, and history. A later authenticated production-token rotation re-enables pushes.
+
 Bundled key SHA-256: `9512a4e0063a0aa9ca5974d458c0d4fff6abd936c0d97e97d1814cd919530917`.
 
 ## Deploy
@@ -44,6 +46,8 @@ After deployment:
 The QR contains only the Worker HTTPS origin and a random, five-minute, one-use token. It never contains either deployment secret or any provider credential. Scanning only loads authenticated Worker metadata. When Reset does not register the device, save the Worker configuration, or upload any selected account credentials until the user confirms. The confirmation explains that the Worker operator is inside the credential trust boundary and identifies every account that will be uploaded.
 
 After the device registers, enable **Monitor on Self-hosted Server** in each account that you want the Worker to fetch. The global **Server monitoring** picker controls the selected accounts’ cadence, starting at 5 minutes. Per-quota “Show as 100%” choices are sent as minimal metric descriptors so server-side chart samples preserve that behavior when a provider omits a quota. The Worker cron runs every 5 minutes and writes each successful per-quota sample to D1; When Reset merges downloaded server samples into the same 24-hour, 7-day, and 30-day charts as on-device refreshes. Silent device refresh hints remain hourly. APNs background delivery is best-effort: iOS may coalesce, delay, or suppress it, so a server sample can reach the on-device chart later than it was recorded.
+
+A registered device can also choose **Add from self-hosted Worker**. The account list contains only an opaque keyed reference, provider, display name, plan, and last-success time. Importing creates a read-only subscription to the existing monitored account; it does not copy or return the provider credential envelope, fingerprint, workspace identifier, source device identifier, or source account identifier. The imported iOS account has no provider credentials in its Keychain and cannot fall back to a local provider request. Manual, launch, background, and silent-push refreshes only download the Worker snapshot and history. Imports are idempotent, and an existing local remote-only account can repair a missing subscription from its opaque reference without receiving credentials. Multiple subscribed devices still share the same persisted cron run and single provider fetch. Removing an imported account deletes only that device’s subscription and cached local data, not the Worker’s source account.
 
 ### Manual deployment
 
@@ -69,7 +73,7 @@ Each app installation creates a random UUID and a 256-bit device secret. D1 stor
 
 An APNs token can belong to only one device UUID. Link claims, access-key registrations, and authenticated token rotations return `409 apns_token_conflict` instead of silently transferring a token owned by another registration.
 
-Device unregister is idempotent when a successful response is lost. The same D1 transaction first stores a deletion tombstone and then deletes the live device, cascading its accounts, credentials, consent records, and history. Permanent APNs rejection uses that same transaction, matched against both the device UUID and rejected APNs token; a registration whose token has already rotated is left untouched. The tombstone contains only the device UUID, SHA-256 device-secret hash, and deletion timestamp—never an APNs token or provider data. An authenticated retry returns `204`; a wrong secret returns `401`. Successful registration or QR relinking clears an older tombstone, and authentication against a live re-registered device always takes precedence so its previous secret cannot delete it. Remaining tombstones are pruned after 90 days.
+Device unregister is idempotent when a successful response is lost. The D1 transaction first stores a deletion tombstone and then deletes the live device, cascading its accounts, credentials, consent records, and history. A permanent APNs rejection does not unregister the device: it disables further pushes only when both the device UUID and rejected token still match, preserving monitored accounts, remote subscriptions, snapshots, and history. A later authenticated token rotation clears that push-disabled state. The deletion tombstone contains only the device UUID, SHA-256 device-secret hash, and deletion timestamp—never an APNs token or provider data. An authenticated unregister retry returns `204`; a wrong secret returns `401`. Successful registration or QR relinking clears an older tombstone, and authentication against a live re-registered device always takes precedence so its previous secret cannot delete it. Remaining tombstones are pruned after 90 days.
 
 The browser link page asks for the deployment’s registration key over HTTPS and uses it only to create a link session. D1 stores only a SHA-256 hash of the random session token. A session expires after five minutes and its claim is a conditional D1 transaction, so only one device can consume it. Expired sessions are pruned by cron. The long-lived registration key is never returned by the Worker, embedded in a QR code, or stored by the app when QR linking is used.
 
@@ -77,7 +81,7 @@ Provider credentials are write-only through the Worker API: the app can upload t
 
 For scheduled monitoring, the Worker derives a keyed HMAC fingerprint over the exact credential set and its provider, workspace, and plan scope. The fingerprint cannot be reversed without the deployment secret and is never sent to a client or placed in a Queue message. Accounts from multiple app installations with the same scope are grouped into one persisted cron run. Its Queue message contains only an opaque run ID; an atomic D1 claim permits at most one provider fetch for that credential scope and cron occurrence even when Cloudflare delivers duplicate messages. Scheduling reserves each target, and a newer occurrence prevents an older result from overwriting it. The encrypted refreshed credential result is persisted only long enough to fan the snapshot and history out to every still-consenting target, then erased. Queue-send and fan-out gaps are re-enqueued by cron, and a retry resumes from a persisted result without calling the provider again. If execution stops after the run is claimed but before the result is saved, that occurrence fails closed and a later cron occurrence tries again instead of risking a duplicate fetch. Removing the last target erases any transient result but retains a credential-free idempotency tombstone until normal pruning.
 
-Disabling monitoring for an account deletes its server credentials, latest snapshot, and history. Removing the device registration deletes all of its monitored accounts. History older than 35 days is pruned by cron.
+Disabling monitoring for a source account deletes its server credentials, latest snapshot, and history. Removing a remote-only import deletes only its subscription. Removing the device registration deletes that device’s monitored accounts and subscriptions. History older than 35 days is pruned by cron.
 
 ### Monitoring consent revisions
 
@@ -91,7 +95,7 @@ Account monitoring uses a monotonic consent tombstone per device and account so 
 
 Because this is a fresh deployment, there are no existing monitored accounts to seed. For client compatibility, an older app that omits the revision is treated as revision 1. This allows an initial legacy enable or disable, but an omitted revision can never cross an existing disabled or newer tombstone. A newer explicit revision is required to re-enable monitoring after deletion.
 
-Cron enqueues devices seen within the last 45 days. Provider-monitoring messages are deduplicated by cron occurrence and credential scope before they enter the Queue. Queue consumers retry result fan-out without repeating the provider request, and delete registrations rejected by APNs as invalid or unregistered. A short-lived APNs provider JWT is cached in D1 and rotated after 50 minutes.
+Cron enqueues push-enabled devices seen within the last 45 days. Provider-monitoring messages are deduplicated by cron occurrence and credential scope before they enter the Queue. Queue consumers retry result fan-out without repeating the provider request. Invalid or unregistered APNs tokens disable only push delivery; server-side provider monitoring and authenticated snapshot sync continue. A short-lived APNs provider JWT is cached in D1 and rotated after 50 minutes.
 
 ## HTTP API
 
@@ -104,9 +108,11 @@ Cron enqueues devices seen within the last 45 days. Provider-monitoring messages
 - `PUT /v1/devices/:id` — rotate an existing APNs token using the device secret
 - `DELETE /v1/devices/:id` — idempotently remove a registration using the device secret
 - `POST /v1/devices/:id/refresh` — send one silent test push using the device secret
+- `GET /v1/devices/:id/remote-accounts` — list sanitized, unsubscribed Worker accounts using opaque references and account metadata (name, email, plan, and expiry)
+- `POST /v1/devices/:id/remote-accounts` — create a read-only local subscription; no provider credential is copied or returned
 - `PUT /v1/devices/:id/accounts/:account` — opt in or update encrypted provider credentials; JSON includes `consent_revision`
 - `DELETE /v1/devices/:id/accounts/:account?consent_revision=N` — persist a consent tombstone and remove the server-side account and history
-- `GET /v1/devices/:id/accounts/:account/sync` — return the latest quota, status, and paginated history; credentials are never returned
+- `GET /v1/devices/:id/accounts/:account/sync` — return account metadata, the latest quota, status, and paginated history; credentials are never returned
 
 All account routes require the device secret. Sync responses use `Cache-Control: no-store`.
 

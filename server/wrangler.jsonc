@@ -28,6 +28,7 @@
         "queue": "when-reset-push",
         "max_batch_size": 20,
         "max_batch_timeout": 5,
+        "max_concurrency": 1,
         "max_retries": 3,
         "retry_delay": 60
       }
