@@ -93,9 +93,8 @@ jobs:
             -authenticationKeyID "$ASC_KEY_ID" \
             -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             CODE_SIGN_STYLE=Automatic \
-            'CODE_SIGN_STYLE[sdk=macosx*]=Automatic' \
+            CODE_SIGN_IDENTITY= \
             PROVISIONING_PROFILE_SPECIFIER= \
-            'PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]=' \
             "${platform_settings[@]}"
 
           echo "archive_path=$archive_path" >> "$GITHUB_ENV"
@@ -117,7 +116,7 @@ jobs:
           plutil -insert manageAppVersionAndBuildNumber -bool YES "$export_options"
           plutil -insert uploadSymbols -bool YES "$export_options"
 
-          xcodebuild -exportArchive \
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin xcodebuild -exportArchive \
             -archivePath "$archive_path" \
             -exportPath "$export_path" \
             -exportOptionsPlist "$export_options" \
