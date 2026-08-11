@@ -73,4 +73,10 @@ The OpenAI Blossom is used only to identify the ChatGPT provider. OpenAI, ChatGP
 
 The optional [Cloudflare Worker](server/README.md) is self-hosted in the user’s Cloudflare account. It sends hourly silent refresh hints and can, only for accounts individually opted in by the user, encrypt provider credentials in D1 and record quota every 5 minutes or longer. The app merges those server samples into its 24-hour, 7-day, and 30-day usage charts. Credential upload is write-only through the Worker API, and overlapping client accounts are fetched once per credential scope and cron occurrence. When Reset does not operate an official server.
 
+### Intentional shared APNs credential
+
+The APNs signing key under `server/apns/` is deliberately versioned, not an accidentally committed deployment secret. This follows [Bark Server’s implementation](https://github.com/Finb/bark-server/blob/master/apns/apns_certs.go), which bundles its APNs signing credential so independent self-hosted servers can send notifications to the official app.
+
+When Reset’s key is production-only and topic-specific to `ad.neko.when`. It cannot access App Store Connect, another app or topic, or discover device tokens. A sender still needs a valid production device token, so each deployment must protect its device tokens and registration API. See the [shared APNs key security model](server/README.md#shared-apns-key) for the exact restrictions and trust boundary.
+
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iebb/when-reset/tree/master/server)
