@@ -1,0 +1,138 @@
+name: App Store Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform archive to upload
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - ios
+          - macos
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-store-release
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Upload ${{ matrix.platform }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        platform: ${{ fromJSON(inputs.platform == 'both' && '["ios", "macos"]' || format('["{0}"]', inputs.platform)) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Verify toolchain
+        run: xcodebuild -version
+
+      - name: Prepare App Store Connect credential
+        id: credential
+        env:
+          PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          if [[ -z "$PRIVATE_KEY" || -z "$KEY_ID" || -z "$ISSUER_ID" ]]; then
+            echo "Required App Store Connect secrets are missing." >&2
+            exit 1
+          fi
+
+          key_directory="$RUNNER_TEMP/app-store-connect"
+          key_path="$key_directory/AuthKey_${KEY_ID}.p8"
+          mkdir -p "$key_directory"
+          chmod 700 "$key_directory"
+          umask 077
+          printf '%s' "$PRIVATE_KEY" > "$key_path"
+
+          if ! openssl pkey -in "$key_path" -noout -check >/dev/null 2>&1; then
+            echo "The App Store Connect private-key secret is invalid." >&2
+            exit 1
+          fi
+
+          echo "path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Archive
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          RELEASE_PLATFORM: ${{ matrix.platform }}
+        run: |
+          if [[ "$RELEASE_PLATFORM" == "ios" ]]; then
+            destination='generic/platform=iOS'
+            archive_path="$RUNNER_TEMP/WhenReset-iOS.xcarchive"
+            platform_settings=()
+          else
+            destination='generic/platform=macOS'
+            archive_path="$RUNNER_TEMP/WhenReset-macOS.xcarchive"
+            platform_settings=("ARCHS=arm64 x86_64" "ONLY_ACTIVE_ARCH=NO")
+          fi
+
+          xcodebuild archive \
+            -project WhenReset.xcodeproj \
+            -scheme WhenReset \
+            -configuration Release \
+            -destination "$destination" \
+            -archivePath "$archive_path" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            'CODE_SIGN_STYLE[sdk=macosx*]=Automatic' \
+            PROVISIONING_PROFILE_SPECIFIER= \
+            'PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]=' \
+            "${platform_settings[@]}"
+
+          echo "archive_path=$archive_path" >> "$GITHUB_ENV"
+
+      - name: Upload to App Store Connect
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          export_options="$RUNNER_TEMP/ExportOptions.plist"
+          export_path="$RUNNER_TEMP/AppStoreExport"
+
+          plutil -create xml1 "$export_options"
+          plutil -insert method -string app-store-connect "$export_options"
+          plutil -insert destination -string upload "$export_options"
+          plutil -insert signingStyle -string automatic "$export_options"
+          plutil -insert teamID -string 7P8CLHDH5G "$export_options"
+          plutil -insert manageAppVersionAndBuildNumber -bool YES "$export_options"
+          plutil -insert uploadSymbols -bool YES "$export_options"
+
+          xcodebuild -exportArchive \
+            -archivePath "$archive_path" \
+            -exportPath "$export_path" \
+            -exportOptionsPlist "$export_options" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$ASC_KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+
+          echo "Uploaded ${{ matrix.platform }} archive to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary credential
+        if: always()
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+        run: |
+          if [[ -n "$ASC_KEY_PATH" ]]; then
+            rm -f "$ASC_KEY_PATH"
+          fi

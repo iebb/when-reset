@@ -37,6 +37,21 @@ Keep code signing enabled when testing account linking in Simulator. An unsigned
 (`CODE_SIGNING_ALLOWED=NO`) cannot access Keychain and fails with OSStatus `-34018` after
 OAuth succeeds.
 
+## Continuous integration and App Store uploads
+
+GitHub Actions replaces Xcode Cloud for this repository:
+
+- `CI` tests the iOS app, builds unsigned iOS and universal macOS release configurations, and checks the Cloudflare Worker on every push and pull request targeting `master`.
+- `App Store Release` is a manual workflow that uploads the iOS app, macOS app, or both to App Store Connect. It uses Xcode cloud signing, so signing certificates and provisioning profiles are created or downloaded by Xcode on the ephemeral runner.
+
+The release workflow reads these encrypted GitHub Actions repository secrets:
+
+- `APP_STORE_CONNECT_KEY_ID`
+- `APP_STORE_CONNECT_ISSUER_ID`
+- `APP_STORE_CONNECT_PRIVATE_KEY`
+
+The private key exists only in the runner’s temporary directory for the duration of the job. Trigger `App Store Release` from the Actions tab and select `both`, `ios`, or `macos`.
+
 ## Provider notes
 
 - ChatGPT reads private `wham` usage and banked-reset endpoints.
