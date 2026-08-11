@@ -10,6 +10,7 @@
 		A10000000000000000000001 /* AdditionalProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* AdditionalProviders.swift */; };
 		A10000000000000000000002 /* AdditionalProvidersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* AdditionalProvidersTests.swift */; };
 		A20000000000000000000001 /* MacContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* MacContentView.swift */; };
+		A30000000000000000000001 /* MacPresentationModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000002 /* MacPresentationModels.swift */; };
 		237E05B56E282DBF83011284 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E56A8D973908F22ACF39FDD3 /* Assets.xcassets */; };
 		293B02FC50A842C7BB11F0BD /* MiniMaxProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F71ACA1AAFC4988D7EC2195 /* MiniMaxProviderTests.swift */; };
 		2B37DECABBB04ED510C81E4F /* SharedSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93F9A2ACBFE25C6459321176 /* SharedSnapshotStore.swift */; };
@@ -83,6 +84,7 @@
 		A20000000000000000000003 /* Info-Mac.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Info-Mac.plist"; sourceTree = "<group>"; };
 		A20000000000000000000004 /* WhenResetMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WhenResetMac.entitlements; sourceTree = "<group>"; };
 		A20000000000000000000005 /* WhenResetWidgetsMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WhenResetWidgetsMac.entitlements; sourceTree = "<group>"; };
+		A30000000000000000000002 /* MacPresentationModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPresentationModels.swift; sourceTree = "<group>"; };
 		0641289E032A261E47434CBF /* ParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParsingTests.swift; sourceTree = "<group>"; };
 		0AD0CC240637ABF3167FD5BD /* ZAIProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZAIProvider.swift; sourceTree = "<group>"; };
 		2BC303AE3A75F5DEF32ABF4C /* WhenResetWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = WhenResetWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -190,6 +192,7 @@
 		C9A9CAE323282CD702283481 /* Shared */ = {
 			isa = PBXGroup;
 			children = (
+				A30000000000000000000002 /* MacPresentationModels.swift */,
 				D574EEB928D033EAB5E512DB /* Models.swift */,
 				4403896FFA105EA62664D653 /* ProviderIcon.swift */,
 				93F9A2ACBFE25C6459321176 /* SharedSnapshotStore.swift */,
@@ -359,6 +362,7 @@
 				7B386A6C9F5BB07F3B3CFBC4 /* KeychainStore.swift in Sources */,
 				7CC0B1B1FDA652EAD20CCE8C /* KimiProvider.swift in Sources */,
 				A20000000000000000000001 /* MacContentView.swift in Sources */,
+				A30000000000000000000001 /* MacPresentationModels.swift in Sources */,
 				9DF929661C68AC3A7E5931E1 /* MiniMaxProvider.swift in Sources */,
 				7E4E214E19F10141C96294EF /* Models.swift in Sources */,
 				C50057D10040307300EE37BE /* ProviderIcon.swift in Sources */,
@@ -404,7 +408,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = WhenResetWidgets/WhenResetWidgets.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenResetWidgets/WhenResetWidgetsMac.entitlements;
-				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 27;
 				CODE_SIGN_IDENTITY = "Apple Distribution";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
@@ -561,7 +565,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;
-				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 27;
 				CODE_SIGN_IDENTITY = "Apple Distribution";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
@@ -590,7 +594,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;
-				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 27;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				INFOPLIST_FILE = WhenReset/Info.plist;
@@ -648,7 +652,7 @@
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = WhenResetWidgets/WhenResetWidgets.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenResetWidgets/WhenResetWidgetsMac.entitlements;
-				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 27;
 				INFOPLIST_FILE = WhenResetWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

@@ -158,7 +158,7 @@ private enum WidgetDataCatalog {
 }
 
 private struct WidgetMetricTarget: Hashable, Sendable {
-    enum Kind: Hashable, Sendable { case quota, bankedReset }
+    enum Kind: Hashable, Sendable { case quota, bankedReset, unavailable }
 
     var kind: Kind
     var metricID: String
@@ -169,15 +169,23 @@ private struct WidgetMetricTarget: Hashable, Sendable {
     var grantedAt: Date?
 
     static func targets(for snapshot: UsageSnapshot, after date: Date = .distantPast) -> [WidgetMetricTarget] {
-        var result = snapshot.usageWindows.filter { $0.resetsAt > date }.map {
+        var metricIDs = Set<String>()
+        var result = snapshot.usageWindows.filter {
+            $0.resetsAt > date && metricIDs.insert($0.metricID).inserted
+        }.map {
             WidgetMetricTarget(kind: .quota, metricID: $0.metricID, title: $0.displayTitle,
                                expiresAt: $0.resetsAt, remainingPercent: $0.remainingPercent,
                                resetCount: nil, grantedAt: nil)
         }
         if let credit = snapshot.nextBankedResetCredit(after: date), let expiry = credit.expiresAt {
+            let activeCreditCount = snapshot.availableResetCredits.filter { credit in
+                credit.expiresAt.map { $0 > date } ?? true
+            }.count
             result.append(.init(kind: .bankedReset, metricID: "banked-resets", title: "Banked resets",
                                 expiresAt: expiry, remainingPercent: nil,
-                                resetCount: snapshot.availableResetCount, grantedAt: credit.grantedAt))
+                                resetCount: max(snapshot.availableResetCount,
+                                                activeCreditCount),
+                                grantedAt: credit.grantedAt))
         }
         return result.sorted {
             if $0.expiresAt != $1.expiresAt { return $0.expiresAt < $1.expiresAt }
@@ -187,15 +195,39 @@ private struct WidgetMetricTarget: Hashable, Sendable {
 
     func progress(at date: Date) -> Double {
         if let remainingPercent { return remainingPercent / 100 }
+        if kind == .unavailable { return 0 }
         guard let grantedAt, expiresAt > grantedAt else { return 0 }
         return max(0, min(1, expiresAt.timeIntervalSince(date) / expiresAt.timeIntervalSince(grantedAt)))
     }
 
     var valueLabel: String {
         switch kind {
-        case .quota: "\(Int(remainingPercent ?? 0))% left"
+        case .quota: "\(Int((remainingPercent ?? 0).rounded()))% left"
         case .bankedReset: resetCountLabel(resetCount ?? 0)
+        case .unavailable: "No data"
         }
+    }
+
+    var tint: Color {
+        switch kind {
+        case .quota: .blue
+        case .bankedReset: .teal
+        case .unavailable: .secondary
+        }
+    }
+
+    var accessibilityValue: String {
+        guard kind != .unavailable else { return "No reset data. Open When Reset to refresh." }
+        return "\(valueLabel). Reset date \(expiresAt.formatted(date: .abbreviated, time: .shortened))."
+    }
+
+    static func unavailable(
+        title: String = "No reset data",
+        metricID: String = "unavailable",
+        at date: Date
+    ) -> Self {
+        Self(kind: .unavailable, metricID: metricID, title: title,
+             expiresAt: date, remainingPercent: nil, resetCount: nil, grantedAt: nil)
     }
 }
 
@@ -209,20 +241,100 @@ private struct UsageEntry: TimelineEntry {
 private enum WidgetEntryResolver {
     static func resolve(account: WidgetAccountEntity?, metric: WidgetMetricEntity?,
                         displayStyle: LockScreenDisplayStyle = .automatic,
+                        usesPreviewData: Bool = false,
                         now: Date = .now) -> UsageEntry {
-        let stored = SharedSnapshotStore.load()
-        let snapshots = stored.isEmpty ? [.preview] : stored
-        let requestedAccountID = account?.id ?? metric?.accountID
+        if usesPreviewData {
+            let snapshot = UsageSnapshot.preview
+            let target = WidgetMetricTarget.targets(for: snapshot, after: now).first
+                ?? .unavailable(at: now)
+            return UsageEntry(date: now, snapshot: snapshot, target: target,
+                              displayStyle: displayStyle)
+        }
 
-        let snapshot = snapshots.first { $0.accountID.uuidString == requestedAccountID }
-            ?? snapshots.min { nearestDate(in: $0, after: now) < nearestDate(in: $1, after: now) }
-            ?? .preview
-        let targets = WidgetMetricTarget.targets(for: snapshot, after: now)
+        let stored = SharedSnapshotStore.load()
+        let requestedAccountID = account?.id ?? metric?.accountID
+        guard !stored.isEmpty else {
+            return unavailableEntry(
+                accountID: requestedAccountID,
+                accountName: account?.name ?? metric?.accountName ?? "When Reset",
+                providerName: account?.providerName ?? "Add an account",
+                metric: metric,
+                displayStyle: displayStyle,
+                now: now
+            )
+        }
+
+        let snapshot: UsageSnapshot
+        if let requestedAccountID {
+            guard let requestedSnapshot = stored.first(where: {
+                $0.accountID.uuidString == requestedAccountID
+            }) else {
+                return unavailableEntry(
+                    accountID: requestedAccountID,
+                    accountName: account?.name ?? metric?.accountName ?? "Account unavailable",
+                    providerName: account?.providerName ?? "Open When Reset",
+                    metric: metric,
+                    displayStyle: displayStyle,
+                    now: now
+                )
+            }
+            snapshot = requestedSnapshot
+        } else {
+            snapshot = stored.min {
+                nearestDate(in: $0, after: now) < nearestDate(in: $1, after: now)
+            } ?? stored[0]
+        }
+
+        let futureTargets = WidgetMetricTarget.targets(for: snapshot, after: now)
+        let allTargets = WidgetMetricTarget.targets(for: snapshot)
         let selectedMetricID = metric?.accountID == snapshot.accountID.uuidString ? metric?.metricID : nil
-        let target = targets.first { $0.metricID == selectedMetricID }
-            ?? targets.first
-            ?? WidgetMetricTarget.targets(for: .preview).first!
+        let target: WidgetMetricTarget
+        if let selectedMetricID {
+            target = futureTargets.first { $0.metricID == selectedMetricID }
+                ?? .unavailable(
+                    title: allTargets.first { $0.metricID == selectedMetricID }?.title
+                        ?? metric?.name
+                        ?? "No reset data",
+                    metricID: selectedMetricID,
+                    at: now
+                )
+        } else {
+            target = futureTargets.first
+                ?? .unavailable(at: now)
+        }
         return UsageEntry(date: now, snapshot: snapshot, target: target, displayStyle: displayStyle)
+    }
+
+    private static func unavailableEntry(
+        accountID: String?,
+        accountName: String,
+        providerName: String,
+        metric: WidgetMetricEntity?,
+        displayStyle: LockScreenDisplayStyle,
+        now: Date
+    ) -> UsageEntry {
+        let fallbackID = UUID(uuidString: "00000000-0000-4000-8000-000000000000") ?? UUID()
+        let snapshot = UsageSnapshot(
+            accountID: accountID.flatMap { UUID(uuidString: $0) } ?? fallbackID,
+            providerName: providerName,
+            accountName: accountName,
+            accountProviderID: nil,
+            accountSymbolName: "clock.arrow.circlepath",
+            plan: nil,
+            primary: nil,
+            secondary: nil,
+            availableResetCount: 0,
+            resetCredits: [],
+            fetchedAt: now,
+            extraWindows: []
+        )
+        let target = WidgetMetricTarget.unavailable(
+            title: metric?.name ?? "No reset data",
+            metricID: metric?.metricID ?? "unavailable",
+            at: now
+        )
+        return UsageEntry(date: now, snapshot: snapshot, target: target,
+                          displayStyle: displayStyle)
     }
 
     private static func nearestDate(in snapshot: UsageSnapshot, after date: Date) -> Date {
@@ -232,38 +344,49 @@ private enum WidgetEntryResolver {
 
 private struct UsageWidgetProvider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> UsageEntry {
-        WidgetEntryResolver.resolve(account: nil, metric: nil)
+        WidgetEntryResolver.resolve(account: nil, metric: nil, usesPreviewData: true)
     }
 
     func snapshot(for configuration: UsageWidgetConfigurationIntent, in context: Context) async -> UsageEntry {
-        WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric)
+        WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric,
+                                    usesPreviewData: context.isPreview)
     }
 
     func timeline(for configuration: UsageWidgetConfigurationIntent, in context: Context) async -> Timeline<UsageEntry> {
         let entry = WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric)
-        return Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(15 * 60)))
+        return Timeline(entries: [entry], policy: .after(WidgetTimelinePolicy.reloadDate(for: entry)))
     }
 }
 
 #if os(iOS)
 private struct UsageLockScreenWidgetProvider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> UsageEntry {
-        WidgetEntryResolver.resolve(account: nil, metric: nil, displayStyle: .detailed)
+        WidgetEntryResolver.resolve(account: nil, metric: nil, displayStyle: .detailed,
+                                    usesPreviewData: true)
     }
 
     func snapshot(for configuration: UsageLockScreenConfigurationIntent, in context: Context) async -> UsageEntry {
         WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric,
-                                    displayStyle: configuration.displayStyle)
+                                    displayStyle: configuration.displayStyle,
+                                    usesPreviewData: context.isPreview)
     }
 
     func timeline(for configuration: UsageLockScreenConfigurationIntent,
                   in context: Context) async -> Timeline<UsageEntry> {
         let entry = WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric,
                                                 displayStyle: configuration.displayStyle)
-        return Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(15 * 60)))
+        return Timeline(entries: [entry], policy: .after(WidgetTimelinePolicy.reloadDate(for: entry)))
     }
 }
 #endif
+
+private enum WidgetTimelinePolicy {
+    static func reloadDate(for entry: UsageEntry, now: Date = .now) -> Date {
+        let regularReload = now.addingTimeInterval(15 * 60)
+        guard entry.target.expiresAt > now else { return regularReload }
+        return min(regularReload, entry.target.expiresAt.addingTimeInterval(1))
+    }
+}
 
 struct UsageWidget: Widget {
     var body: some WidgetConfiguration {
@@ -286,9 +409,19 @@ private struct HomeWidgetView: View {
     let entry: UsageEntry
 
     var body: some View {
+        if family == .systemLarge {
+            LargeHomeWidgetView(entry: entry)
+        } else {
+            compactContent
+        }
+    }
+
+    private var compactContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 7) {
-                SnapshotAccountIcon(snapshot: entry.snapshot).frame(width: 20, height: 20)
+                SnapshotAccountIcon(snapshot: entry.snapshot)
+                    .frame(width: 20, height: 20)
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(entry.snapshot.resolvedAccountName).font(.headline).lineLimit(1)
                     if family == .systemMedium {
@@ -301,17 +434,133 @@ private struct HomeWidgetView: View {
             HStack(alignment: .firstTextBaseline) {
                 Text(entry.target.valueLabel).font(family == .systemMedium ? .title2.bold() : .headline)
                 Spacer()
-                WidgetCountdown(expiry: entry.target.expiresAt)
-                    .font(.caption.monospacedDigit()).minimumScaleFactor(0.65)
+                if entry.target.kind == .unavailable {
+                    Text("Open app to refresh")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else {
+                    WidgetCountdown(expiry: entry.target.expiresAt)
+                        .font(.caption.monospacedDigit()).minimumScaleFactor(0.65)
+                }
             }
             ProgressView(value: entry.target.progress(at: entry.date), total: 1)
-                .tint(entry.target.kind == .bankedReset ? .teal : .blue)
+                .tint(entry.target.tint)
             if family == .systemMedium, let plan = entry.snapshot.plan, !plan.isEmpty {
                 Text(plan.replacingOccurrences(of: "_", with: " "))
                     .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
             }
             Spacer(minLength: 0)
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
+        .accessibilityValue(entry.target.accessibilityValue)
+    }
+}
+
+private struct LargeHomeWidgetView: View {
+    let entry: UsageEntry
+
+    private var additionalTargets: [WidgetMetricTarget] {
+        WidgetMetricTarget.targets(for: entry.snapshot, after: entry.date)
+            .filter { $0.metricID != entry.target.metricID }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                SnapshotAccountIcon(snapshot: entry.snapshot)
+                    .frame(width: 34, height: 34)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.snapshot.resolvedAccountName)
+                        .font(.title3.bold())
+                        .lineLimit(1)
+                    Text(accountSubtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Text("Updated \(entry.snapshot.fetchedAt, format: .relative(presentation: .named))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(entry.target.title)
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(entry.target.valueLabel)
+                        .font(.title2.bold().monospacedDigit())
+                }
+                if entry.target.kind == .unavailable {
+                    Text("Open When Reset to refresh this account.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(entry.target.kind == .bankedReset ? "Next expiry" : "Resets")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        WidgetCountdown(expiry: entry.target.expiresAt)
+                            .font(.headline.monospacedDigit())
+                    }
+                }
+                ProgressView(value: entry.target.progress(at: entry.date), total: 1)
+                    .tint(entry.target.tint)
+            }
+            .padding(12)
+            .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(entry.target.title)
+            .accessibilityValue(entry.target.accessibilityValue)
+
+            if !additionalTargets.isEmpty {
+                Text("Other upcoming resets")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                VStack(spacing: 9) {
+                    ForEach(additionalTargets.prefix(3), id: \.metricID) { target in
+                        LargeWidgetTargetRow(target: target, date: entry.date)
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var accountSubtitle: String {
+        guard let plan = entry.snapshot.plan?.replacingOccurrences(of: "_", with: " "),
+              !plan.isEmpty else { return entry.snapshot.providerName }
+        return "\(entry.snapshot.providerName) · \(plan)"
+    }
+}
+
+private struct LargeWidgetTargetRow: View {
+    let target: WidgetMetricTarget
+    let date: Date
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(target.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                    Spacer()
+                    Text(target.valueLabel).font(.caption.bold().monospacedDigit())
+                }
+                ProgressView(value: target.progress(at: date), total: 1)
+                    .tint(target.tint)
+            }
+            WidgetCountdown(expiry: target.expiresAt)
+                .font(.caption.monospacedDigit())
+                .frame(width: 72, alignment: .trailing)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(target.title)
+        .accessibilityValue(target.accessibilityValue)
     }
 }
 

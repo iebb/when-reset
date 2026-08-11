@@ -1921,6 +1921,175 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertTrue(points.allSatisfy { $0.source == .server && $0.plan == "Max" })
     }
 
+    func testMacStatusTargetsDeduplicateMetricsAndResolveBankedCreditCount() throws {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            providerID: .chatGPT,
+            displayName: "Work account",
+            workspaceID: "workspace",
+            plan: "Plus",
+            addedAt: now
+        )
+        let snapshot = UsageSnapshot(
+            accountID: account.id,
+            providerName: account.providerID.displayName,
+            accountName: account.displayName,
+            accountProviderID: account.providerID,
+            plan: account.plan,
+            primary: UsageWindow(
+                title: "Primary",
+                usedPercent: 25,
+                resetsAt: now.addingTimeInterval(600),
+                windowMinutes: 300,
+                identifier: "same-metric"
+            ),
+            secondary: UsageWindow(
+                title: "Duplicate",
+                usedPercent: 90,
+                resetsAt: now.addingTimeInterval(1_200),
+                windowMinutes: 10_080,
+                identifier: "same-metric"
+            ),
+            availableResetCount: 0,
+            resetCredits: [
+                ResetCredit(
+                    id: "credit",
+                    expiresAt: now.addingTimeInterval(300),
+                    status: "available"
+                )
+            ],
+            fetchedAt: now,
+            extraWindows: [
+                UsageWindow(
+                    title: "Expired",
+                    usedPercent: 100,
+                    resetsAt: now.addingTimeInterval(-1),
+                    windowMinutes: nil,
+                    identifier: "expired"
+                )
+            ]
+        )
+
+        let targets = MacStatusTarget.targets(
+            accounts: [account],
+            snapshots: [account.id: snapshot],
+            settings: [:],
+            now: now
+        )
+
+        XCTAssertEqual(targets.count, 2)
+        XCTAssertEqual(targets.map(\.title), ["Banked resets", "5h limit"])
+        XCTAssertEqual(targets.first?.valueLabel, "1 available")
+        XCTAssertEqual(targets.last?.valueLabel, "75% left")
+        XCTAssertEqual(
+            MacUsagePresentation.availableResetCount(in: snapshot, after: now),
+            1
+        )
+
+        var expiredSnapshot = snapshot
+        expiredSnapshot.availableResetCount = 0
+        expiredSnapshot.resetCredits[0].expiresAt = now.addingTimeInterval(-1)
+        XCTAssertEqual(
+            MacUsagePresentation.availableResetCount(in: expiredSnapshot, after: now),
+            0
+        )
+    }
+
+    func testMacStatusTargetsRespectVisibilityAndUseDeterministicTieBreaks() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let resetDate = now.addingTimeInterval(600)
+        let first = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            providerID: .claude,
+            displayName: "Same name",
+            workspaceID: "first",
+            plan: nil,
+            addedAt: now
+        )
+        let second = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
+            providerID: .claude,
+            displayName: "Same name",
+            workspaceID: "second",
+            plan: nil,
+            addedAt: now
+        )
+        func snapshot(for account: MonitoredAccount) -> UsageSnapshot {
+            UsageSnapshot(
+                accountID: account.id,
+                providerName: account.providerID.displayName,
+                accountName: account.displayName,
+                accountProviderID: account.providerID,
+                plan: nil,
+                primary: UsageWindow(
+                    title: "Quota",
+                    usedPercent: 50,
+                    resetsAt: resetDate,
+                    windowMinutes: nil,
+                    identifier: "quota"
+                ),
+                secondary: nil,
+                availableResetCount: 0,
+                resetCredits: [],
+                fetchedAt: now
+            )
+        }
+
+        let ordered = MacStatusTarget.targets(
+            accounts: [second, first],
+            snapshots: [first.id: snapshot(for: first), second.id: snapshot(for: second)],
+            settings: [:],
+            now: now
+        )
+        XCTAssertEqual(ordered.map(\.id), [
+            "\(first.id.uuidString):quota",
+            "\(second.id.uuidString):quota"
+        ])
+
+        let hidden = MacStatusTarget.targets(
+            accounts: [first],
+            snapshots: [first.id: snapshot(for: first)],
+            settings: [first.id: AccountMonitorSettings(hiddenMetricIDs: ["quota"])],
+            now: now
+        )
+        XCTAssertTrue(hidden.isEmpty)
+    }
+
+    func testPeriodicRefreshPolicyTracksIntervalsSettingsAndClockChanges() {
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        var policy = PeriodicRefreshPolicy(startingAt: start)
+
+        XCTAssertFalse(policy.shouldRefresh(
+            at: start.addingTimeInterval(299),
+            interval: .fiveMinutes
+        ))
+        XCTAssertTrue(policy.shouldRefresh(
+            at: start.addingTimeInterval(300),
+            interval: .fiveMinutes
+        ))
+
+        policy.recordRefresh(at: start.addingTimeInterval(450))
+        XCTAssertFalse(policy.shouldRefresh(
+            at: start.addingTimeInterval(749),
+            interval: .fiveMinutes
+        ))
+        XCTAssertTrue(policy.shouldRefresh(
+            at: start.addingTimeInterval(750),
+            interval: .fiveMinutes
+        ))
+
+        XCTAssertFalse(policy.shouldRefresh(
+            at: start.addingTimeInterval(900),
+            interval: .off
+        ))
+        XCTAssertFalse(policy.shouldRefresh(
+            at: start.addingTimeInterval(899),
+            interval: .fiveMinutes
+        ))
+        XCTAssertEqual(policy.lastAttempt, start.addingTimeInterval(899))
+    }
+
     private func makeStore() throws -> UsageHistoryStore {
         UsageHistoryStore(fileURL: try makeStoreFileURL())
     }

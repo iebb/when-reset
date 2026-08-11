@@ -45,6 +45,11 @@ final class WhenResetAppDelegate: NSObject, UIApplicationDelegate, UNUserNotific
 final class WhenResetMacAppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
+        MacAppRuntime.shared.applicationDidFinishLaunching()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        MacAppRuntime.shared.applicationWillTerminate()
     }
 
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
@@ -68,6 +73,64 @@ final class WhenResetMacAppDelegate: NSObject, NSApplicationDelegate, UNUserNoti
         Task { _ = await RemotePushCoordinator.shared.handle(userInfo: userInfo) }
     }
 }
+
+@MainActor
+private final class MacAppRuntime {
+    static let shared = MacAppRuntime()
+
+    private weak var store: AppStore?
+    private var isApplicationRunning = false
+    private var task: Task<Void, Never>?
+
+    func configure(store: AppStore) {
+        self.store = store
+        startIfReady()
+    }
+
+    func applicationDidFinishLaunching() {
+        isApplicationRunning = true
+        startIfReady()
+    }
+
+    func applicationWillTerminate() {
+        task?.cancel()
+        task = nil
+    }
+
+    private func startIfReady() {
+        guard isApplicationRunning, task == nil, let store else { return }
+        task = Task { [weak store] in
+            guard let store else { return }
+            await store.start()
+            await store.synchronizeAccountsFromICloudKeychain()
+
+            var refreshPolicy = PeriodicRefreshPolicy(startingAt: .now)
+            var keychainSyncPolicy = PeriodicRefreshPolicy(startingAt: .now)
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(30))
+                } catch {
+                    return
+                }
+
+                let now = Date.now
+                if keychainSyncPolicy.shouldRefresh(at: now, interval: .fiveMinutes) {
+                    await store.synchronizeAccountsFromICloudKeychain()
+                }
+                if let latestFetch = store.snapshots.values.map(\.fetchedAt).max(),
+                   latestFetch <= now {
+                    refreshPolicy.recordRefresh(at: latestFetch)
+                }
+                if refreshPolicy.shouldRefresh(
+                    at: now,
+                    interval: store.refreshSettings.inAppInterval
+                ) {
+                    _ = await store.refreshAll(source: .background)
+                }
+            }
+        }
+    }
+}
 #endif
 
 @MainActor
@@ -85,10 +148,12 @@ enum BackgroundRefreshScheduler {
     }
 }
 
+#if os(iOS)
 private struct ForegroundRefreshTaskID: Equatable {
     var isActive: Bool
     var interval: RefreshInterval
 }
+#endif
 
 @main
 struct WhenResetApp: App {
@@ -104,6 +169,9 @@ struct WhenResetApp: App {
         let store = AppStore()
         _store = State(initialValue: store)
         RemotePushCoordinator.shared.configure(store: store)
+#if os(macOS)
+        MacAppRuntime.shared.configure(store: store)
+#endif
     }
 
     var body: some Scene {
@@ -139,16 +207,9 @@ struct WhenResetApp: App {
         Window("When Reset", id: "main") {
             MacContentView()
                 .environment(store)
-                .task { await startStore() }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }
                     await store.synchronizeAccountsFromICloudKeychain()
-                }
-                .task(id: ForegroundRefreshTaskID(
-                    isActive: scenePhase == .active,
-                    interval: store.refreshSettings.inAppInterval
-                )) {
-                    await runPeriodicRefresh(while: scenePhase == .active)
                 }
         }
         .defaultSize(width: 980, height: 680)
@@ -156,7 +217,6 @@ struct WhenResetApp: App {
         MenuBarExtra("When Reset", systemImage: "clock.arrow.circlepath") {
             MacMenuBarView()
                 .environment(store)
-                .task { await startStore() }
         }
         .menuBarExtraStyle(.window)
 
@@ -168,6 +228,7 @@ struct WhenResetApp: App {
 #endif
     }
 
+#if os(iOS)
     private func startStore() async {
         BackgroundRefreshScheduler.scheduleNext(after: store.refreshSettings.backgroundInterval)
         await store.start()
@@ -186,4 +247,5 @@ struct WhenResetApp: App {
             _ = await store.refreshAll(source: .background)
         }
     }
+#endif
 }
