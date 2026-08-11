@@ -1,3 +1,4 @@
+#if os(iOS)
 import Charts
 import SwiftUI
 import UIKit
@@ -2205,3 +2206,4 @@ struct LimitRow: View {
         }
     }
 }
+#endif

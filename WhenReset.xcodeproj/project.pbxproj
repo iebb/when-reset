@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* AdditionalProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000003 /* AdditionalProviders.swift */; };
 		A10000000000000000000002 /* AdditionalProvidersTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* AdditionalProvidersTests.swift */; };
+		A20000000000000000000001 /* MacContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* MacContentView.swift */; };
 		237E05B56E282DBF83011284 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = E56A8D973908F22ACF39FDD3 /* Assets.xcassets */; };
 		293B02FC50A842C7BB11F0BD /* MiniMaxProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3F71ACA1AAFC4988D7EC2195 /* MiniMaxProviderTests.swift */; };
 		2B37DECABBB04ED510C81E4F /* SharedSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 93F9A2ACBFE25C6459321176 /* SharedSnapshotStore.swift */; };
@@ -78,6 +79,10 @@
 /* Begin PBXFileReference section */
 		A10000000000000000000003 /* AdditionalProviders.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdditionalProviders.swift; sourceTree = "<group>"; };
 		A10000000000000000000004 /* AdditionalProvidersTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdditionalProvidersTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* MacContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacContentView.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* Info-Mac.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = "Info-Mac.plist"; sourceTree = "<group>"; };
+		A20000000000000000000004 /* WhenResetMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WhenResetMac.entitlements; sourceTree = "<group>"; };
+		A20000000000000000000005 /* WhenResetWidgetsMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = WhenResetWidgetsMac.entitlements; sourceTree = "<group>"; };
 		0641289E032A261E47434CBF /* ParsingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ParsingTests.swift; sourceTree = "<group>"; };
 		0AD0CC240637ABF3167FD5BD /* ZAIProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ZAIProvider.swift; sourceTree = "<group>"; };
 		2BC303AE3A75F5DEF32ABF4C /* WhenResetWidgets.appex */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = "wrapper.app-extension"; path = WhenResetWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -129,12 +134,15 @@
 				9483198499BE8FA9AAA70721 /* ContentView.swift */,
 				8CBF163971E273F2B9CEF551 /* CopilotProvider.swift */,
 				9967789DE61B27E5AC4B515A /* DemoUsageFactory.swift */,
+				A20000000000000000000003 /* Info-Mac.plist */,
 				890F08D83D74BD869685B52C /* Info.plist */,
 				A0584614E923036E4057D702 /* KeychainStore.swift */,
+				A20000000000000000000002 /* MacContentView.swift */,
 				4EECEFE18766517276D0EA21 /* KimiProvider.swift */,
 				7FC7BEDD54B2367F7AE9D12C /* MiniMaxProvider.swift */,
 				44C03C63FA5B98872D5DD44C /* PushServer.swift */,
 				E85CC39EC256C4C92F2F5EFC /* WhenReset.entitlements */,
+				A20000000000000000000004 /* WhenResetMac.entitlements */,
 				C1BC256FA84ACAA97F0D2E84 /* WhenResetApp.swift */,
 				9A2AE0B7FC1E0DCA65EA4D1F /* WorkerQRScannerView.swift */,
 				0AD0CC240637ABF3167FD5BD /* ZAIProvider.swift */,
@@ -148,6 +156,7 @@
 				3EB0B5BDFB2E529C5F0A849E /* Assets.xcassets */,
 				3876C46818ADC92F27EEA561 /* Info.plist */,
 				C2DE2CE6E046B84BBD8A8E9D /* WhenResetWidgets.entitlements */,
+				A20000000000000000000005 /* WhenResetWidgetsMac.entitlements */,
 				ED627E4DF6E715DBF4E8EF54 /* WhenResetWidgets.swift */,
 			);
 			path = WhenResetWidgets;
@@ -349,6 +358,7 @@
 				470977A5FD4664C1703C0CC3 /* DemoUsageFactory.swift in Sources */,
 				7B386A6C9F5BB07F3B3CFBC4 /* KeychainStore.swift in Sources */,
 				7CC0B1B1FDA652EAD20CCE8C /* KimiProvider.swift in Sources */,
+				A20000000000000000000001 /* MacContentView.swift in Sources */,
 				9DF929661C68AC3A7E5931E1 /* MiniMaxProvider.swift in Sources */,
 				7E4E214E19F10141C96294EF /* Models.swift in Sources */,
 				C50057D10040307300EE37BE /* ProviderIcon.swift in Sources */,
@@ -393,8 +403,12 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = WhenResetWidgets/WhenResetWidgets.entitlements;
+				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenResetWidgets/WhenResetWidgetsMac.entitlements;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
 				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
+				"CODE_SIGN_STYLE[sdk=macosx*]" = Manual;
 				INFOPLIST_FILE = WhenResetWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -403,8 +417,13 @@
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = ad.neko.when.widgets;
 				PROVISIONING_PROFILE_SPECIFIER = "When Reset Widgets App Store";
-				SDKROOT = iphoneos;
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = "When Reset Widgets macOS App Store";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = auto;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -541,16 +560,26 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
+				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
 				CODE_SIGN_IDENTITY = "Apple Distribution";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Distribution";
 				CODE_SIGN_STYLE = Manual;
+				"CODE_SIGN_STYLE[sdk=macosx*]" = Manual;
 				INFOPLIST_FILE = WhenReset/Info.plist;
+				"INFOPLIST_FILE[sdk=macosx*]" = "WhenReset/Info-Mac.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = ad.neko.when;
 				PROVISIONING_PROFILE_SPECIFIER = "When Reset App Store";
-				SDKROOT = iphoneos;
+				"PROVISIONING_PROFILE_SPECIFIER[sdk=macosx*]" = "When Reset macOS App Store";
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Release;
@@ -560,14 +589,22 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
+				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				INFOPLIST_FILE = WhenReset/Info.plist;
+				"INFOPLIST_FILE[sdk=macosx*]" = "WhenReset/Info-Mac.plist";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = ad.neko.when;
-				SDKROOT = iphoneos;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = auto;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;
@@ -610,6 +647,8 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				CODE_SIGN_ENTITLEMENTS = WhenResetWidgets/WhenResetWidgets.entitlements;
+				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenResetWidgets/WhenResetWidgetsMac.entitlements;
+				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 26;
 				INFOPLIST_FILE = WhenResetWidgets/Info.plist;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -617,8 +656,12 @@
 					"@executable_path/../../Frameworks",
 				);
 				PRODUCT_BUNDLE_IDENTIFIER = ad.neko.when.widgets;
-				SDKROOT = iphoneos;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = auto;
 				SKIP_INSTALL = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
+				SUPPORTS_MACCATALYST = NO;
+				SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD = NO;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
 			name = Debug;

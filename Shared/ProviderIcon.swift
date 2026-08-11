@@ -1,5 +1,9 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 struct ProviderIcon: View {
     let providerID: ProviderID
@@ -39,8 +43,18 @@ struct ProviderIcon: View {
     }
 
     private var customSymbolName: String? {
-        guard let symbolName, UIImage(systemName: symbolName) != nil else { return nil }
+        guard let symbolName, Self.hasSystemSymbol(named: symbolName) else { return nil }
         return symbolName
+    }
+
+    private static func hasSystemSymbol(named name: String) -> Bool {
+#if canImport(UIKit)
+        UIImage(systemName: name) != nil
+#elseif canImport(AppKit)
+        NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil
+#else
+        false
+#endif
     }
 
     private var iconBackgroundColor: Color {

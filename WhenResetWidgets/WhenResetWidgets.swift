@@ -1,4 +1,6 @@
+#if os(iOS)
 import ActivityKit
+#endif
 import AppIntents
 import SwiftUI
 import WidgetKit
@@ -7,8 +9,10 @@ import WidgetKit
 struct WhenResetWidgetBundle: WidgetBundle {
     var body: some Widget {
         UsageWidget()
+#if os(iOS)
         UsageLockScreenWidget()
         UsageLiveActivity()
+#endif
     }
 }
 
@@ -241,6 +245,7 @@ private struct UsageWidgetProvider: AppIntentTimelineProvider {
     }
 }
 
+#if os(iOS)
 private struct UsageLockScreenWidgetProvider: AppIntentTimelineProvider {
     func placeholder(in context: Context) -> UsageEntry {
         WidgetEntryResolver.resolve(account: nil, metric: nil, displayStyle: .detailed)
@@ -258,6 +263,7 @@ private struct UsageLockScreenWidgetProvider: AppIntentTimelineProvider {
         return Timeline(entries: [entry], policy: .after(.now.addingTimeInterval(15 * 60)))
     }
 }
+#endif
 
 struct UsageWidget: Widget {
     var body: some WidgetConfiguration {
@@ -267,7 +273,11 @@ struct UsageWidget: Widget {
         }
         .configurationDisplayName("Usage limits")
         .description("Choose an account and quota to monitor.")
+#if os(macOS)
+        .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
+#else
         .supportedFamilies([.systemSmall, .systemMedium])
+#endif
     }
 }
 
@@ -305,6 +315,7 @@ private struct HomeWidgetView: View {
     }
 }
 
+#if os(iOS)
 struct UsageLockScreenWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: "UsageLockScreenWidget",
@@ -456,7 +467,9 @@ private struct LockAccountHeader: View {
         }
     }
 }
+#endif
 
+#if os(iOS)
 struct UsageLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: UsageActivityAttributes.self) { context in
@@ -726,6 +739,7 @@ private struct LiveActivityPinnedMarker: View {
             .accessibilityLabel("Pinned")
     }
 }
+#endif
 
 private struct WidgetCountdown: View {
     let expiry: Date
@@ -751,6 +765,7 @@ private struct SnapshotAccountIcon: View {
     }
 }
 
+#if os(iOS)
 private extension UsageActivityTarget {
     var valueLabel: String? {
         switch kind {
@@ -766,6 +781,7 @@ private extension UsageActivityTarget {
         }
     }
 }
+#endif
 
 private func resetCountLabel(_ count: Int) -> String {
     "\(count) reset\(count == 1 ? "" : "s")"

@@ -1,6 +1,10 @@
 import Foundation
 import Security
+#if os(iOS)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 enum PushServerMode: String, Codable, CaseIterable, Hashable, Sendable {
     case disabled
@@ -1283,12 +1287,17 @@ final class RemotePushCoordinator {
 
     func requestRegistrationIfNeeded() {
         guard let store, store.pushServerSettings.mode != .disabled else { return }
+#if os(iOS)
         UIApplication.shared.registerForRemoteNotifications()
+#elseif os(macOS)
+        NSApplication.shared.registerForRemoteNotifications()
+#endif
         if let deviceToken {
             Task { await store.updatePushRegistration(deviceToken: deviceToken) }
         }
     }
 
+#if os(iOS)
     func handle(userInfo: [AnyHashable: Any]) async -> UIBackgroundFetchResult {
         guard let marker = userInfo["when_reset"] as? [String: Any],
               marker["action"] as? String == "refresh",
@@ -1297,6 +1306,16 @@ final class RemotePushCoordinator {
         if store.isRefreshing { return .noData }
         return await store.refreshAll(source: .background) ? .newData : .failed
     }
+#elseif os(macOS)
+    func handle(userInfo: [AnyHashable: Any]) async -> Bool {
+        guard let marker = userInfo["when_reset"] as? [String: Any],
+              marker["action"] as? String == "refresh",
+              let store,
+              store.pushServerSettings.mode != .disabled,
+              !store.isRefreshing else { return false }
+        return await store.refreshAll(source: .background)
+    }
+#endif
 }
 
 private extension Data {

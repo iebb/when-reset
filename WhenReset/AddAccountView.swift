@@ -1,3 +1,4 @@
+#if os(iOS)
 import SwiftUI
 
 struct AddAccountView: View {
@@ -697,3 +698,4 @@ private struct ProviderCard: View {
         .contentShape(.rect)
     }
 }
+#endif

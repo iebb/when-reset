@@ -1,9 +1,13 @@
+#if os(iOS)
 @preconcurrency import ActivityKit
+#endif
 import Foundation
 import Observation
 import Security
 @preconcurrency import UserNotifications
+#if os(iOS)
 import UIKit
+#endif
 import WidgetKit
 
 struct DeviceLinkPresentation: Sendable {
@@ -101,6 +105,7 @@ enum ServerMonitoringRecovery {
     }
 }
 
+#if os(iOS)
 enum LiveActivityLifecyclePolicy {
     static let rotationInterval: TimeInterval = 7 * 60 * 60
 
@@ -120,6 +125,7 @@ enum LiveActivityLifecyclePolicy {
         return date.timeIntervalSince(startedAt) >= rotationInterval
     }
 }
+#endif
 
 struct AccountRefreshFailure: Equatable, Sendable {
     enum Kind: Equatable, Sendable {
@@ -356,12 +362,14 @@ final class AppStore {
     private static let maximumServerConsentRevision: Int64 = 9_007_199_254_740_991
     private static let globalActivityID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
 
+#if os(iOS)
     private static var runningGlobalActivities: [Activity<UsageActivityAttributes>] {
         Activity<UsageActivityAttributes>.activities.filter {
             $0.attributes.accountID == globalActivityID
                 && LiveActivityLifecyclePolicy.isRunning($0.activityState)
         }
     }
+#endif
 
     init() {
         let cachedAccounts = UserDefaults.standard.data(forKey: accountsKey)
@@ -420,6 +428,7 @@ final class AppStore {
         }
         normalizeServerConsentRevisions()
         reconcilePendingServerAccountDeletionConsents()
+#if os(iOS)
         let globalActivityIsRunning = !Self.runningGlobalActivities.isEmpty
         hasLiveActivity = globalActivityIsRunning
         if globalActivityIsRunning {
@@ -430,6 +439,10 @@ final class AppStore {
         } else {
             setLiveActivityStartedAt(nil)
         }
+#else
+        hasLiveActivity = false
+        setLiveActivityStartedAt(nil)
+#endif
     }
 
     func start() async {
@@ -1224,15 +1237,20 @@ final class AppStore {
     }
 
     private func endGlobalLiveActivity() async {
+#if os(iOS)
         let finalContent = ActivityContent(state: activityState(), staleDate: nil)
         for activity in Activity<UsageActivityAttributes>.activities {
             await activity.end(finalContent, dismissalPolicy: .immediate)
         }
         hasLiveActivity = false
         setLiveActivityStartedAt(nil)
+#else
+        hasLiveActivity = false
+#endif
     }
 
     private func startGlobalLiveActivity() async {
+#if os(iOS)
         guard UIApplication.shared.applicationState == .active,
               ActivityAuthorizationInfo().areActivitiesEnabled,
               hasEligibleLiveActivityContent else { return }
@@ -1248,6 +1266,9 @@ final class AppStore {
             errorMessage = error.localizedDescription
             hasLiveActivity = false
         }
+#else
+        hasLiveActivity = false
+#endif
     }
 
     func settings(for account: MonitoredAccount) -> AccountMonitorSettings { monitorSettings[account.id] ?? .init() }
@@ -1823,6 +1844,7 @@ final class AppStore {
     }
 
     private func reconcileLiveActivity(at date: Date = .now) async {
+#if os(iOS)
         let running = !Self.runningGlobalActivities.isEmpty
         let shouldRun: Bool
         switch liveActivitySettings.mode {
@@ -1848,8 +1870,12 @@ final class AppStore {
                 setLiveActivityStartedAt(nil)
             }
         }
+#else
+        hasLiveActivity = false
+#endif
     }
 
+#if os(iOS)
     private var hasEligibleLiveActivityContent: Bool {
         switch liveActivitySettings.mode {
         case .automatic: !activityEvents(matchingRules: true).isEmpty
@@ -1941,8 +1967,10 @@ final class AppStore {
             updatedAt: events.map(\.fetchedAt).max() ?? snapshots.values.map(\.fetchedAt).max() ?? .now
         )
     }
+#endif
 
     private func updateLiveActivity() async {
+#if os(iOS)
         let state = activityState()
         let activities = Activity<UsageActivityAttributes>.activities
         let legacyActivities = activities.filter { $0.attributes.accountID != Self.globalActivityID }
@@ -1959,6 +1987,9 @@ final class AppStore {
         } else if !hasLiveActivity {
             setLiveActivityStartedAt(nil)
         }
+#else
+        hasLiveActivity = false
+#endif
     }
 
     private func setLiveActivityStartedAt(_ date: Date?) {

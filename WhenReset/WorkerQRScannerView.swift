@@ -1,3 +1,4 @@
+#if os(iOS)
 import SwiftUI
 @preconcurrency import VisionKit
 
@@ -107,3 +108,4 @@ private struct WorkerDataScannerRepresentable: UIViewControllerRepresentable {
         }
     }
 }
+#endif
