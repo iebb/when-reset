@@ -88,6 +88,8 @@ private enum APIBillingSupport {
         title: String = "API spend this month",
         accessExpiresAt: Date? = nil,
         isUnlimited: Bool = false,
+        kind: APIBalanceKind? = nil,
+        unitLabel: String? = nil,
         now: Date
     ) -> UsageSnapshot {
         let limit = budget(monthlyBudget)
@@ -112,7 +114,42 @@ private enum APIBillingSupport {
                 periodStart: period.start,
                 periodEnd: period.end,
                 accessExpiresAt: accessExpiresAt,
-                isUnlimited: isUnlimited
+                isUnlimited: isUnlimited,
+                kind: kind,
+                unitLabel: unitLabel
+            )
+        )
+    }
+
+    static func walletSnapshot(
+        account: MonitoredAccount,
+        providerName: String,
+        title: String,
+        remaining: Double,
+        currencyCode: String,
+        accessExpiresAt: Date? = nil,
+        unitLabel: String? = nil,
+        now: Date
+    ) -> UsageSnapshot {
+        UsageSnapshot(
+            accountID: account.id,
+            providerName: providerName,
+            accountName: account.displayName,
+            accountProviderID: account.providerID,
+            plan: account.plan,
+            primary: nil,
+            secondary: nil,
+            availableResetCount: 0,
+            resetCredits: [],
+            fetchedAt: now,
+            apiBalance: APIBalance(
+                title: title,
+                currencyCode: currencyCode.uppercased(),
+                spent: 0,
+                remaining: max(0, remaining),
+                accessExpiresAt: accessExpiresAt,
+                kind: .wallet,
+                unitLabel: unitLabel
             )
         )
     }
@@ -315,6 +352,418 @@ struct AnthropicAPIProvider {
             currencyCode: currency,
             monthlyBudget: monthlyBudget,
             period: APIBillingSupport.monthlyPeriod(containing: now),
+            now: now
+        )
+    }
+}
+
+// MARK: - Mainstream API providers
+
+struct OpenRouterProvider {
+    static let keyURL = URL(string: "https://openrouter.ai/api/v1/key")!
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
+
+    func link(apiKey rawAPIKey: String) async throws -> LinkedIdentity {
+        let apiKey = try APIBillingSupport.apiKey(rawAPIKey, provider: "OpenRouter")
+        let data = try await request(apiKey: apiKey)
+        let credentials = AccountCredentials(
+            accessToken: apiKey,
+            refreshToken: "",
+            idToken: "",
+            currencyCode: "USD"
+        )
+        return try Self.linkedIdentity(data: data, credentials: credentials)
+    }
+
+    func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws
+        -> UsageSnapshot {
+        try Self.parseUsage(
+            account: account,
+            data: await request(apiKey: credentials.accessToken),
+            now: .now
+        )
+    }
+
+    private func request(apiKey: String) async throws -> Data {
+        try await APIBillingSupport.request(
+            Self.keyURL,
+            headers: ["Authorization": "Bearer \(apiKey)"],
+            session: session,
+            provider: "OpenRouter"
+        )
+    }
+
+    static func linkedIdentity(data: Data, credentials: AccountCredentials) throws -> LinkedIdentity {
+        let payload = try payload(data)
+        let creatorID = AdditionalProviderParsing.string(payload["creator_user_id"])
+        let workspaceID = creatorID.map {
+            "openrouter-user-\(AdditionalProviderParsing.fingerprint($0))"
+        }
+            ?? "openrouter-key-\(AdditionalProviderParsing.fingerprint(credentials.accessToken))"
+        let plan = (payload["is_free_tier"] as? Bool) == true ? "Free tier" : nil
+        return LinkedIdentity(
+            workspaceID: workspaceID,
+            displayName: "OpenRouter account",
+            plan: plan,
+            credentials: credentials
+        )
+    }
+
+    static func parseUsage(
+        account: MonitoredAccount,
+        data: Data,
+        now: Date = .now
+    ) throws -> UsageSnapshot {
+        let payload = try payload(data)
+        guard let usage = AdditionalProviderParsing.number(payload["usage"]) else {
+            throw AdditionalProviderError.noBillingData("OpenRouter")
+        }
+        let limit = AdditionalProviderParsing.number(payload["limit"])
+        let reportedRemaining = AdditionalProviderParsing.number(payload["limit_remaining"])
+        let reset = AdditionalProviderParsing.string(payload["limit_reset"])?.lowercased()
+        let period = reset.flatMap { resetPeriod($0, containing: now) }
+        let periodUsage: Double? = switch reset {
+        case "daily": AdditionalProviderParsing.number(payload["usage_daily"])
+        case "weekly": AdditionalProviderParsing.number(payload["usage_weekly"])
+        case "monthly": AdditionalProviderParsing.number(payload["usage_monthly"])
+        default: nil
+        }
+        let remaining = limit.map { limit in
+            min(limit, max(0, reportedRemaining ?? limit - (periodUsage ?? usage)))
+        }
+        let spent = limit.flatMap { limit in remaining.map { max(0, limit - $0) } }
+            ?? periodUsage ?? usage
+        let title = switch reset {
+        case "daily": "Daily API key limit"
+        case "weekly": "Weekly API key limit"
+        case "monthly": "Monthly API key limit"
+        default: limit == nil ? "API key usage" : "API key spending limit"
+        }
+        let expires = AdditionalProviderParsing.date(payload["expires_at"])
+        return UsageSnapshot(
+            accountID: account.id,
+            providerName: "OpenRouter",
+            accountName: account.displayName,
+            accountProviderID: account.providerID,
+            plan: account.plan,
+            primary: nil,
+            secondary: nil,
+            availableResetCount: 0,
+            resetCredits: [],
+            fetchedAt: now,
+            apiBalance: APIBalance(
+                title: title,
+                currencyCode: "USD",
+                spent: max(0, spent),
+                limit: limit,
+                remaining: remaining.map { max(0, $0) },
+                periodStart: period?.start,
+                periodEnd: period?.end,
+                accessExpiresAt: expires,
+                isUnlimited: limit == nil,
+                kind: .budget
+            )
+        )
+    }
+
+    private static func payload(_ data: Data) throws -> [String: Any] {
+        let root = try AdditionalProviderParsing.json(data, provider: "OpenRouter")
+        guard let payload = AdditionalProviderParsing.dictionary(root["data"]) else {
+            throw AdditionalProviderError.invalidResponse("OpenRouter")
+        }
+        return payload
+    }
+
+    private static func resetPeriod(_ reset: String, containing date: Date) -> DateInterval? {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        switch reset {
+        case "daily":
+            let start = calendar.startOfDay(for: date)
+            return calendar.date(byAdding: .day, value: 1, to: start)
+                .map { DateInterval(start: start, end: $0) }
+        case "weekly":
+            let day = calendar.component(.weekday, from: date)
+            let daysSinceMonday = (day + 5) % 7
+            let startOfDay = calendar.startOfDay(for: date)
+            guard let start = calendar.date(byAdding: .day, value: -daysSinceMonday, to: startOfDay),
+                  let end = calendar.date(byAdding: .day, value: 7, to: start) else { return nil }
+            return DateInterval(start: start, end: end)
+        case "monthly":
+            return APIBillingSupport.monthlyPeriod(containing: date)
+        default:
+            return nil
+        }
+    }
+}
+
+struct FireworksAccountProfile: Equatable, Sendable {
+    let resourceName: String
+    let displayName: String
+    let email: String?
+}
+
+struct FireworksAIProvider {
+    static let accountsURL = URL(string: "https://api.fireworks.ai/v1/accounts?pageSize=200")!
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
+
+    func link(apiKey rawAPIKey: String, accountID rawAccountID: String?) async throws
+        -> LinkedIdentity {
+        let apiKey = try APIBillingSupport.apiKey(rawAPIKey, provider: "Fireworks AI")
+        let accountID = try Self.normalizedAccountID(rawAccountID)
+        let profile: FireworksAccountProfile
+        if let accountID {
+            let data = try await request(Self.accountURL(accountID), apiKey: apiKey)
+            profile = try Self.parseAccount(data, fallbackID: accountID)
+        } else {
+            let data = try await request(Self.accountsURL, apiKey: apiKey)
+            profile = try Self.parseSingleAccount(data)
+        }
+        let credentials = AccountCredentials(
+            accessToken: apiKey,
+            refreshToken: "",
+            idToken: "",
+            projectID: profile.resourceName,
+            currencyCode: "USD"
+        )
+        let pending = pendingAccount(providerID: .fireworksAI, name: profile.displayName)
+        _ = try await fetchUsage(account: pending, credentials: credentials)
+        return Self.linkedIdentity(profile: profile, credentials: credentials)
+    }
+
+    func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws
+        -> UsageSnapshot {
+        guard let accountID = try Self.normalizedAccountID(credentials.projectID) else {
+            throw AdditionalProviderError.invalidCredential(
+                "Fireworks AI", "Reconnect Fireworks AI and select an account."
+            )
+        }
+        let data = try await request(Self.quotasURL(accountID), apiKey: credentials.accessToken)
+        return try Self.parseUsage(account: account, data: data, now: .now)
+    }
+
+    private func request(_ url: URL, apiKey: String) async throws -> Data {
+        try await APIBillingSupport.request(
+            url,
+            headers: ["Authorization": "Bearer \(apiKey)"],
+            session: session,
+            provider: "Fireworks AI"
+        )
+    }
+
+    static func parseSingleAccount(_ data: Data) throws -> FireworksAccountProfile {
+        let root = try AdditionalProviderParsing.json(data, provider: "Fireworks AI")
+        let accounts = AdditionalProviderParsing.dictionaries(root["accounts"])
+        guard accounts.count == 1 else {
+            let guidance = accounts.isEmpty
+                ? "This API key did not expose a Fireworks account."
+                : "This API key can access multiple Fireworks accounts. Enter the account ID."
+            throw AdditionalProviderError.invalidCredential("Fireworks AI", guidance)
+        }
+        return try parseAccountObject(accounts[0])
+    }
+
+    static func linkedIdentity(
+        profile: FireworksAccountProfile,
+        credentials: AccountCredentials
+    ) -> LinkedIdentity {
+        LinkedIdentity(
+            workspaceID: profile.resourceName,
+            displayName: profile.displayName,
+            email: profile.email,
+            plan: nil,
+            credentials: credentials
+        )
+    }
+
+    static func parseAccount(_ data: Data, fallbackID: String) throws -> FireworksAccountProfile {
+        let root = try AdditionalProviderParsing.json(data, provider: "Fireworks AI")
+        return try parseAccountObject(root, fallbackID: fallbackID)
+    }
+
+    static func parseUsage(
+        account: MonitoredAccount,
+        data: Data,
+        now: Date = .now
+    ) throws -> UsageSnapshot {
+        let root = try AdditionalProviderParsing.json(data, provider: "Fireworks AI")
+        let quotas = AdditionalProviderParsing.dictionaries(root["quotas"])
+        guard let quota = quotas.first(where: { item in
+            let name = AdditionalProviderParsing.string(item["name"])?.lowercased() ?? ""
+            return name.contains("monthly-spend") || name.contains("monthly_spend")
+        }), let usage = AdditionalProviderParsing.number(quota["usage"]),
+           let limit = AdditionalProviderParsing.number(quota["value"])
+                ?? AdditionalProviderParsing.number(quota["maxValue"]), limit > 0 else {
+            throw AdditionalProviderError.noBillingData("Fireworks AI")
+        }
+        return APIBillingSupport.snapshot(
+            account: account,
+            providerName: "Fireworks AI",
+            spent: max(0, usage),
+            currencyCode: "USD",
+            monthlyBudget: limit,
+            period: APIBillingSupport.monthlyPeriod(containing: now),
+            title: "Monthly API spend limit",
+            kind: .budget,
+            now: now
+        )
+    }
+
+    static func normalizedAccountID(_ rawValue: String?) throws -> String? {
+        guard let rawValue else { return nil }
+        var value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if value.hasPrefix("accounts/") { value.removeFirst("accounts/".count) }
+        guard value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"#,
+                          options: .regularExpression) != nil else {
+            throw AdditionalProviderError.invalidCredential(
+                "Fireworks AI", "Enter a valid Fireworks account ID."
+            )
+        }
+        return value
+    }
+
+    private static func parseAccountObject(
+        _ object: [String: Any], fallbackID: String? = nil
+    ) throws -> FireworksAccountProfile {
+        let name = AdditionalProviderParsing.string(object["name"])
+            ?? fallbackID.map { "accounts/\($0)" }
+        guard let name, let accountID = try normalizedAccountID(name) else {
+            throw AdditionalProviderError.invalidResponse("Fireworks AI")
+        }
+        let displayName = AdditionalProviderParsing.string(object["displayName"])
+            ?? "Fireworks AI account"
+        return FireworksAccountProfile(
+            resourceName: "accounts/\(accountID)",
+            displayName: displayName,
+            email: AdditionalProviderParsing.string(object["email"])
+        )
+    }
+
+    private static func accountURL(_ accountID: String) -> URL {
+        fireworksURL(accountID: accountID, includesQuotas: false)
+    }
+
+    private static func quotasURL(_ accountID: String) -> URL {
+        fireworksURL(accountID: accountID, includesQuotas: true)
+    }
+
+    private static func fireworksURL(accountID: String, includesQuotas: Bool) -> URL {
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = "api.fireworks.ai"
+        components.path = "/v1/accounts/\(accountID)" + (includesQuotas ? "/quotas" : "")
+        if includesQuotas { components.queryItems = [.init(name: "pageSize", value: "200")] }
+        return components.url!
+    }
+}
+
+struct DeepSeekProvider {
+    static let balanceURL = URL(string: "https://api.deepseek.com/user/balance")!
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
+
+    func link(apiKey rawAPIKey: String) async throws -> LinkedIdentity {
+        let apiKey = try APIBillingSupport.apiKey(rawAPIKey, provider: "DeepSeek API")
+        let credentials = AccountCredentials(accessToken: apiKey, refreshToken: "", idToken: "")
+        let account = pendingAccount(providerID: .deepSeek, name: "DeepSeek API account")
+        _ = try await fetchUsage(account: account, credentials: credentials)
+        return LinkedIdentity(
+            workspaceID: "deepseek-key-\(AdditionalProviderParsing.fingerprint(apiKey))",
+            displayName: "DeepSeek API account",
+            plan: nil,
+            credentials: credentials
+        )
+    }
+
+    func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws
+        -> UsageSnapshot {
+        let data = try await APIBillingSupport.request(
+            Self.balanceURL,
+            headers: ["Authorization": "Bearer \(credentials.accessToken)"],
+            session: session,
+            provider: "DeepSeek API"
+        )
+        return try Self.parseUsage(account: account, data: data, now: .now)
+    }
+
+    static func parseUsage(
+        account: MonitoredAccount,
+        data: Data,
+        now: Date = .now
+    ) throws -> UsageSnapshot {
+        let root = try AdditionalProviderParsing.json(data, provider: "DeepSeek API")
+        let balances = AdditionalProviderParsing.dictionaries(root["balance_infos"])
+        let selected = balances.first(where: {
+            AdditionalProviderParsing.string($0["currency"])?.uppercased() == "USD"
+        }) ?? balances.first
+        guard let selected,
+              let remaining = AdditionalProviderParsing.number(selected["total_balance"]),
+              let currency = AdditionalProviderParsing.string(selected["currency"]) else {
+            throw AdditionalProviderError.noBillingData("DeepSeek API")
+        }
+        return APIBillingSupport.walletSnapshot(
+            account: account,
+            providerName: "DeepSeek API",
+            title: "API wallet balance",
+            remaining: remaining,
+            currencyCode: currency,
+            now: now
+        )
+    }
+}
+
+struct PoeProvider {
+    static let balanceURL = URL(string: "https://api.poe.com/usage/current_balance")!
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
+
+    func link(apiKey rawAPIKey: String) async throws -> LinkedIdentity {
+        let apiKey = try APIBillingSupport.apiKey(rawAPIKey, provider: "Poe API")
+        let credentials = AccountCredentials(accessToken: apiKey, refreshToken: "", idToken: "")
+        let account = pendingAccount(providerID: .poe, name: "Poe API account")
+        _ = try await fetchUsage(account: account, credentials: credentials)
+        return LinkedIdentity(
+            workspaceID: "poe-key-\(AdditionalProviderParsing.fingerprint(apiKey))",
+            displayName: "Poe API account",
+            plan: nil,
+            credentials: credentials
+        )
+    }
+
+    func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws
+        -> UsageSnapshot {
+        let data = try await APIBillingSupport.request(
+            Self.balanceURL,
+            headers: ["Authorization": "Bearer \(credentials.accessToken)"],
+            session: session,
+            provider: "Poe API"
+        )
+        return try Self.parseUsage(account: account, data: data, now: .now)
+    }
+
+    static func parseUsage(
+        account: MonitoredAccount,
+        data: Data,
+        now: Date = .now
+    ) throws -> UsageSnapshot {
+        let root = try AdditionalProviderParsing.json(data, provider: "Poe API")
+        guard let points = AdditionalProviderParsing.number(root["current_point_balance"]) else {
+            throw AdditionalProviderError.noBillingData("Poe API")
+        }
+        return APIBillingSupport.walletSnapshot(
+            account: account,
+            providerName: "Poe API",
+            title: "API point balance",
+            remaining: points,
+            currencyCode: "POINTS",
+            unitLabel: "points",
             now: now
         )
     }

@@ -364,4 +364,226 @@ describe("server-side provider adapters", () => {
       remaining: null,
     });
   });
+
+  it("fetches an OpenRouter key limit with its documented UTC reset period and stable creator", async () => {
+    const now = Date.UTC(2030, 0, 2, 12) / 1_000;
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({
+      data: {
+        creator_user_id: "user-stable",
+        is_free_tier: true,
+        limit: 100,
+        limit_remaining: 74.5,
+        limit_reset: "monthly",
+        usage: 25.5,
+        usage_monthly: 25.5,
+        expires_at: "2031-01-01T00:00:00Z",
+      },
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchProviderUsage({
+      provider_id: "openrouter",
+      workspace_id: "local-openrouter-account",
+      plan: "Developer",
+    }, {
+      access_token: "openrouter-test-key",
+      refresh_token: "",
+      id_token: "",
+      expires_at: null,
+    }, now);
+
+    expect(result.account_identity).toBe("creator:user-stable");
+    expect(result.snapshot.plan).toBe("Free tier");
+    expect(result.snapshot.windows).toEqual([]);
+    expect(result.snapshot.api_balance).toMatchObject({
+      title: "Monthly API key limit",
+      currency_code: "USD",
+      spent: 25.5,
+      limit: 100,
+      remaining: 74.5,
+      period_start: Date.UTC(2030, 0, 1) / 1_000,
+      period_end: Date.UTC(2030, 1, 1) / 1_000,
+      access_expires_at: Date.UTC(2031, 0, 1) / 1_000,
+      is_unlimited: false,
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://openrouter.ai/api/v1/key");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: expect.objectContaining({ authorization: "Bearer openrouter-test-key" }),
+      redirect: "manual",
+    });
+  });
+
+  it("clamps OpenRouter remaining spend to the declared key limit", () => {
+    const parsed = providerTesting.openRouterAPIBalance({
+      data: {
+        limit: 100,
+        limit_remaining: 150,
+        limit_reset: "monthly",
+        usage_monthly: 0,
+      },
+    }, Date.UTC(2030, 0, 2) / 1_000);
+    expect(parsed.balance).toMatchObject({
+      spent: 0,
+      limit: 100,
+      remaining: 100,
+      is_unlimited: false,
+    });
+  });
+
+  it.each(["accounts/team-one", "team-one"])(
+    "fetches the Fireworks monthly spending quota for account reference %s",
+    async (workspaceID) => {
+      const fetchMock = vi.fn().mockResolvedValue(Response.json({
+        quotas: [{
+          name: "accounts/team-one/quotas/monthly-spend-usd",
+          value: "50",
+          maxValue: "500",
+          usage: 12.5,
+          updateTime: "2030-01-02T00:00:00Z",
+        }],
+      }));
+      vi.stubGlobal("fetch", fetchMock);
+
+      const result = await fetchProviderUsage({
+        provider_id: "fireworks",
+        workspace_id: workspaceID,
+        plan: null,
+      }, {
+        access_token: "fireworks-test-key",
+        refresh_token: "",
+        id_token: "",
+        expires_at: null,
+      }, Date.UTC(2030, 0, 2) / 1_000);
+
+      expect(result.account_identity).toBe("account:team-one");
+      expect(result.snapshot.api_balance).toMatchObject({
+        title: "Monthly API budget",
+        currency_code: "USD",
+        spent: 12.5,
+        limit: 50,
+        remaining: 37.5,
+        is_unlimited: false,
+      });
+      expect(fetchMock.mock.calls[0]?.[0]).toBe(
+        "https://api.fireworks.ai/v1/accounts/team-one/quotas?pageSize=200"
+      );
+      expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+        headers: expect.objectContaining({ authorization: "Bearer fireworks-test-key" }),
+        redirect: "manual",
+      });
+    },
+  );
+
+  it("uses the Fireworks quota maximum when no configured value is returned", () => {
+    expect(providerTesting.fireworksAPIBalance({
+      quotas: [{
+        name: "monthly-spend-usd",
+        maxValue: "500",
+        usage: "125.50",
+      }],
+    }, null, Date.UTC(2030, 0, 2) / 1_000)).toMatchObject({
+      title: "Monthly API budget",
+      spent: 125.5,
+      limit: 500,
+      remaining: 374.5,
+    });
+  });
+
+  it("rejects an invalid Fireworks account path before making a provider request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchProviderUsage({
+      provider_id: "fireworks",
+      workspace_id: "fireworks-accounts/team-one",
+      plan: null,
+    }, {
+      access_token: "fireworks-test-key",
+      refresh_token: "",
+      id_token: "",
+      expires_at: null,
+    }, 2_000_000_000)).rejects.toMatchObject({ status: 400, retryable: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps DeepSeek wallet balance separate from reset-window quota", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({
+      is_available: true,
+      balance_infos: [
+        { currency: "CNY", total_balance: "110.00" },
+        { currency: "USD", total_balance: "15.25" },
+      ],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchProviderUsage({
+      provider_id: "deepseek",
+      workspace_id: "local-deepseek-account",
+      plan: null,
+    }, {
+      access_token: "deepseek-test-key",
+      refresh_token: "",
+      id_token: "",
+      expires_at: null,
+    }, 2_000_000_000);
+
+    expect(result.account_identity).toBeUndefined();
+    expect(result.snapshot.windows).toEqual([]);
+    expect(result.snapshot.api_balance).toEqual({
+      title: "API wallet balance",
+      currency_code: "USD",
+      spent: 0,
+      limit: null,
+      remaining: 15.25,
+      period_start: null,
+      period_end: null,
+      access_expires_at: null,
+      is_unlimited: false,
+      kind: "wallet",
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.deepseek.com/user/balance");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: expect.objectContaining({ authorization: "Bearer deepseek-test-key" }),
+      redirect: "manual",
+    });
+  });
+
+  it("keeps Poe points as a non-renewal balance", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({
+      current_point_balance: 295_932_027,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchProviderUsage({
+      provider_id: "poe",
+      workspace_id: "local-poe-account",
+      plan: null,
+    }, {
+      access_token: "poe-test-key",
+      refresh_token: "",
+      id_token: "",
+      expires_at: null,
+    }, 2_000_000_000);
+
+    expect(result.account_identity).toBeUndefined();
+    expect(result.snapshot.windows).toEqual([]);
+    expect(result.snapshot.api_balance).toEqual({
+      title: "API point balance",
+      currency_code: "POINTS",
+      spent: 0,
+      limit: null,
+      remaining: 295_932_027,
+      period_start: null,
+      period_end: null,
+      access_expires_at: null,
+      is_unlimited: false,
+      kind: "wallet",
+      unit_label: "points",
+    });
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("https://api.poe.com/usage/current_balance");
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      headers: expect.objectContaining({ authorization: "Bearer poe-test-key" }),
+      redirect: "manual",
+    });
+  });
 });

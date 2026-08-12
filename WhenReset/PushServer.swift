@@ -777,6 +777,8 @@ enum PushServerClient {
         var periodEnd: TimeInterval?
         var accessExpiresAt: TimeInterval?
         var isUnlimited: Bool
+        var kind: APIBalanceKind?
+        var unitLabel: String?
 
         enum CodingKeys: String, CodingKey {
             case title, spent, limit, remaining
@@ -785,6 +787,8 @@ enum PushServerClient {
             case periodEnd = "period_end"
             case accessExpiresAt = "access_expires_at"
             case isUnlimited = "is_unlimited"
+            case kind
+            case unitLabel = "unit_label"
         }
 
         var apiBalance: APIBalance {
@@ -797,7 +801,9 @@ enum PushServerClient {
                 periodStart: periodStart.map(Date.init(timeIntervalSince1970:)),
                 periodEnd: periodEnd.map(Date.init(timeIntervalSince1970:)),
                 accessExpiresAt: accessExpiresAt.map(Date.init(timeIntervalSince1970:)),
-                isUnlimited: isUnlimited
+                isUnlimited: isUnlimited,
+                kind: kind,
+                unitLabel: unitLabel
             )
         }
     }

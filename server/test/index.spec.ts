@@ -1172,6 +1172,141 @@ describe("self-hosted account monitoring API", () => {
     )).toBe(true);
   });
 
+  it("rotates a key-scoped provider credential without changing its Worker account scope", async () => {
+    await registerDevice();
+    const original = accountRequestBody("deepseek", 1);
+    original.workspace_id = "deepseek-key-existing-scope";
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(original),
+    })).status).toBe(201);
+
+    const replacementBody = accountRequestBody("deepseek", 1);
+    replacementBody.workspace_id = original.workspace_id;
+    replacementBody.credentials.access_token = "rotated-deepseek-access-secret";
+    const replacementUpload = await testing.parseAccountUpload(new Request(
+      "https://push.example/credential-replacement-test",
+      { method: "PUT", body: JSON.stringify(replacementBody) },
+    ));
+    const replacement = await testing.upsertMonitoredAccount(
+      env,
+      deviceID,
+      accountID,
+      replacementUpload!,
+      true,
+      async (providerAccount, credentials, checkedAt) => ({
+        credentials,
+        snapshot: {
+          provider_id: providerAccount.provider_id,
+          plan: providerAccount.plan,
+          fetched_at: checkedAt ?? Math.floor(Date.now() / 1_000),
+          windows: [],
+          available_reset_count: 0,
+          reset_credits: [],
+        },
+      }),
+    );
+    expect(replacement.status).toBe(200);
+    const replacementJSON = await replacement.json<Record<string, unknown>>();
+    expect(replacementJSON).not.toHaveProperty("credentials");
+    expect(JSON.stringify(replacementJSON)).not.toContain("rotated-deepseek-access-secret");
+
+    const row = await env.DB.prepare(
+      "SELECT * FROM monitored_accounts WHERE device_id = ? AND account_id = ?"
+    ).bind(deviceID, accountID).first();
+    expect(row).not.toBeNull();
+    expect(row!.workspace_id).toBe(original.workspace_id);
+    expect((await testing.decryptCredentials(env, row as never)).access_token)
+      .toBe("rotated-deepseek-access-secret");
+
+    const wrongScope = accountRequestBody("deepseek", 1);
+    wrongScope.workspace_id = "deepseek-key-different-scope";
+    wrongScope.credentials.access_token = "other-deepseek-access-secret";
+    const wrongScopeUpload = await testing.parseAccountUpload(new Request(
+      "https://push.example/credential-replacement-test",
+      { method: "PUT", body: JSON.stringify(wrongScope) },
+    ));
+    let providerCalled = false;
+    const rejected = await testing.upsertMonitoredAccount(
+      env,
+      deviceID,
+      accountID,
+      wrongScopeUpload!,
+      true,
+      async () => {
+        providerCalled = true;
+        throw new Error("A mismatched scope must be rejected before provider access.");
+      },
+    );
+    expect(rejected.status).toBe(409);
+    expect(providerCalled).toBe(false);
+  });
+
+  it("rotates an imported remote credential without exposing its source workspace", async () => {
+    const subscriberDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab99";
+    const subscriberSecret = "B".repeat(43);
+    const localAccountID = "019f724a-3414-4d52-ae37-0c7024a1aba0";
+    await registerDevice();
+    await registerDevice(subscriberDeviceID, subscriberSecret, "b".repeat(64));
+
+    const sourceBody = accountRequestBody("deepseek", 1);
+    sourceBody.workspace_id = "deepseek-key-source-scope";
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(sourceBody),
+    })).status).toBe(201);
+    await env.DB.prepare(
+      `INSERT INTO remote_account_subscriptions (
+         subscriber_device_id, local_account_id, source_device_id, source_account_id, created_at
+       ) VALUES (?, ?, ?, ?, ?)`
+    ).bind(subscriberDeviceID, localAccountID, deviceID, accountID, 2_000_000_000).run();
+
+    const replacementBody = accountRequestBody("deepseek", 1);
+    replacementBody.workspace_id = `when-reset.remote.${"r".repeat(43)}`;
+    replacementBody.credentials.access_token = "rotated-remote-deepseek-secret";
+    const replacementUpload = await testing.parseAccountUpload(new Request(
+      "https://push.example/credential-replacement-test",
+      { method: "PUT", body: JSON.stringify(replacementBody) },
+    ));
+    let verifiedScope: string | null = null;
+    const replacement = await testing.upsertMonitoredAccount(
+      env,
+      subscriberDeviceID,
+      localAccountID,
+      replacementUpload!,
+      true,
+      async (providerAccount, credentials, checkedAt) => {
+        verifiedScope = providerAccount.workspace_id;
+        return {
+          credentials,
+          snapshot: {
+            provider_id: providerAccount.provider_id,
+            plan: providerAccount.plan,
+            fetched_at: checkedAt ?? Math.floor(Date.now() / 1_000),
+            windows: [],
+            available_reset_count: 0,
+            reset_credits: [],
+          },
+        };
+      },
+    );
+    expect(replacement.status).toBe(200);
+    expect(verifiedScope).toBe(sourceBody.workspace_id);
+    const responseJSON = await replacement.json<Record<string, unknown>>();
+    expect(responseJSON).not.toHaveProperty("workspace_id");
+    expect(responseJSON).not.toHaveProperty("credentials");
+    expect(JSON.stringify(responseJSON)).not.toContain("rotated-remote-deepseek-secret");
+
+    const sourceRow = await env.DB.prepare(
+      "SELECT * FROM monitored_accounts WHERE device_id = ? AND account_id = ?"
+    ).bind(deviceID, accountID).first();
+    expect(sourceRow!.workspace_id).toBe(sourceBody.workspace_id);
+    expect((await testing.decryptCredentials(env, sourceRow as never)).access_token)
+      .toBe("rotated-remote-deepseek-secret");
+  });
+
   it("accepts legacy uploads without identity metadata and rejects malformed metadata", async () => {
     await registerDevice();
     const { metadata: _metadata, ...legacyBody } = accountRequestBody();
@@ -2573,5 +2708,36 @@ describe("self-hosted account monitoring API", () => {
       limit: 25,
       remaining: 23,
     });
+  });
+
+  it("accepts write-only monitoring uploads for the four new API providers", async () => {
+    for (const providerID of ["openrouter", "fireworks", "deepseek", "poe"] as const) {
+      const parsed = await testing.parseAccountUpload(new Request(
+        "https://push.example/provider-upload-test",
+        { method: "PUT", body: JSON.stringify(accountRequestBody(providerID)) },
+      ));
+      expect(parsed?.provider_id).toBe(providerID);
+      expect(parsed?.credentials.access_token).toBe("access-secret");
+    }
+  });
+
+  it("canonicalizes Fireworks account uploads and rejects legacy synthetic prefixes", async () => {
+    for (const workspaceID of ["accounts/team-one", "team-one"]) {
+      const body = { ...accountRequestBody("fireworks"), workspace_id: workspaceID };
+      const parsed = await testing.parseAccountUpload(new Request(
+        "https://push.example/provider-upload-test",
+        { method: "PUT", body: JSON.stringify(body) },
+      ));
+      expect(parsed?.workspace_id).toBe("accounts/team-one");
+    }
+
+    const legacyBody = {
+      ...accountRequestBody("fireworks"),
+      workspace_id: "fireworks-accounts/team-one",
+    };
+    await expect(testing.parseAccountUpload(new Request(
+      "https://push.example/provider-upload-test",
+      { method: "PUT", body: JSON.stringify(legacyBody) },
+    ))).resolves.toBeNull();
   });
 });

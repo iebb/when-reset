@@ -140,6 +140,33 @@ enum UsageHistoryLineSegmentation {
         }
         return result
     }
+
+    /// Reduces chart cost without reclassifying intentionally skipped samples as missing data.
+    /// Gap connectors are computed from the complete source series first, then always retained.
+    static func downsampledChartPoints(
+        from points: [UsageHistoryPoint],
+        seriesID: String,
+        maximumSolidPoints: Int
+    ) -> [UsageHistoryLineChartPoint] {
+        let segmented = chartPoints(from: points, seriesID: seriesID)
+        let solidCount = segmented.lazy.filter { !$0.isGapConnector }.count
+        guard maximumSolidPoints > 1, solidCount > maximumSolidPoints else { return segmented }
+
+        let stride = max(1, Int(ceil(Double(solidCount) / Double(maximumSolidPoints))))
+        var lastSolidIndexBySegment: [String: Int] = [:]
+        for (index, point) in segmented.enumerated() where !point.isGapConnector {
+            lastSolidIndexBySegment[point.segmentID] = index
+        }
+
+        var ordinalBySegment: [String: Int] = [:]
+        return segmented.enumerated().compactMap { index, chartPoint in
+            guard !chartPoint.isGapConnector else { return chartPoint }
+            let ordinal = ordinalBySegment[chartPoint.segmentID, default: 0]
+            ordinalBySegment[chartPoint.segmentID] = ordinal + 1
+            let isEndpoint = ordinal == 0 || lastSolidIndexBySegment[chartPoint.segmentID] == index
+            return isEndpoint || ordinal.isMultiple(of: stride) ? chartPoint : nil
+        }
+    }
 }
 
 struct UsageNotificationEvent: Codable, Hashable, Identifiable, Sendable {

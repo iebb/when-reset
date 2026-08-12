@@ -15,6 +15,10 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 - Synthetic rolling 5-hour and weekly quota monitoring
 - Ollama Cloud session and weekly quota monitoring from an on-device browser session
 - Warp monthly request-credit monitoring
+- OpenRouter per-key credit-limit and reset-period monitoring
+- Fireworks AI account quota and monthly spend-limit monitoring
+- DeepSeek API balance monitoring in the provider-reported currency
+- Poe API point-balance monitoring
 - OpenAI and Anthropic organization API spend, with optional monthly balance budgets
 - New API-compatible key allowance, usage, remaining balance, and expiry
 - Experimental Antigravity OAuth quota monitoring for Gemini, Claude, and GPT pools
@@ -22,7 +26,8 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 - Provider marks in the app, widgets, and Live Activity
 - Duration-classified 5-hour and weekly usage windows with live countdowns
 - Nearest banked reset expiry with a day-aware countdown and exact local time
-- Home Screen, Lock Screen, Dynamic Island, and Live Activity views
+- Home Screen widgets in selectable Market chart, Quota ring, Quota board, Gauge, and Heatmap styles, with automatic family-aware layouts
+- Small, medium, and large Home Screen widgets on iOS and macOS, plus Lock Screen, Dynamic Island, and Live Activity views
 - Accounts and tokens synchronized through iCloud Keychain; sanitized snapshots in an App Group
 - Optional encrypted server-side quota monitoring and hourly silent refresh hints through a self-hosted Cloudflare Worker
 - Per-quota usage charts for the last 24 hours, 7 days, or 30 days
@@ -65,6 +70,8 @@ The private key exists only in the runner’s temporary directory for the durati
 - Z.AI uses a user-provided GLM Coding Plan key to read the same quota data shown by Usage Statistics. The quota endpoint is not documented as a public API; general-purpose and pay-as-you-go keys are outside this app’s scope.
 - MiniMax uses a user-provided Subscription Key and its documented Token Plan remaining-quota endpoint. When Reset tries the global service first, then the mainland-China service for regional keys. Standard pay-as-you-go keys are outside this app’s scope.
 - Synthetic and Warp use user-provided API keys with fixed quota endpoints. Both can opt in to self-hosted Worker monitoring.
+- OpenRouter reads the authenticated key's official credit-limit response, including its stable creator identity and daily, weekly, or monthly limit period when configured. Fireworks AI resolves the key's official account resource before reading account quotas, including the monthly USD spend limit when present. Both use fixed provider hosts and can opt in to self-hosted Worker monitoring.
+- DeepSeek reads its official user-balance response and prefers USD when the service returns both USD and CNY balances. Poe reads the official current point balance. Neither response documents a reset timestamp, so When Reset displays the available balance without inventing a reset date. Both fixed-host integrations can opt in to self-hosted Worker monitoring.
 - OpenAI and Anthropic billing use their organization Cost APIs and require Admin API keys; standard inference keys cannot read organization billing. Without an optional monthly budget, When Reset displays month-to-date spend instead of inventing a remaining balance. Their fixed-host integrations can opt in to self-hosted Worker monitoring.
 - New API-compatible accounts read `/v1/dashboard/billing/subscription` and `/v1/dashboard/billing/usage` from the user-selected HTTPS origin. The custom origin and key remain on-device.
 - Ollama Cloud currently exposes quota windows on its signed-in settings page, not through its API-key endpoints. Its session cookie therefore remains on-device.

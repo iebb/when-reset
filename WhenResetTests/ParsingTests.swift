@@ -754,6 +754,41 @@ final class ParsingTests: XCTestCase {
         XCTAssertTrue(result.history.isEmpty)
     }
 
+    func testWorkerAccountResponsePreservesWalletBalanceSemantics() throws {
+        let account = MonitoredAccount(
+            id: UUID(), providerID: .poe, displayName: "Poe API account",
+            workspaceID: "poe-key-test", plan: nil, addedAt: .now
+        )
+        let response = Data(#"""
+        {
+          "consent_revision": 3,
+          "snapshot": {
+            "provider_id": "poe",
+            "fetched_at": 2000000000,
+            "windows": [],
+            "available_reset_count": 0,
+            "reset_credits": [],
+            "api_balance": {
+              "title": "API point balance",
+              "currency_code": "POINTS",
+              "spent": 0,
+              "remaining": 123456,
+              "is_unlimited": false,
+              "kind": "wallet",
+              "unit_label": "points"
+            }
+          },
+          "history": []
+        }
+        """#.utf8)
+
+        let result = try PushServerClient.decodeAccountResponse(response, account: account)
+
+        XCTAssertEqual(result.snapshot?.apiBalance?.kind, .wallet)
+        XCTAssertEqual(result.snapshot?.apiBalance?.unitLabel, "points")
+        XCTAssertEqual(result.snapshot?.apiBalance?.remaining, 123_456)
+    }
+
     func testRemoteWorkerCandidateDecodesSanitizedAccountMetadata() throws {
         let response = Data(#"""
         {
@@ -2433,6 +2468,60 @@ final class MacUsageHistoryPresentationTests: XCTestCase {
         XCTAssertEqual(solid.map(\.point.recordedAt), [start, oneHour, afterLongGap])
         XCTAssertEqual(solid[0].segmentID, solid[1].segmentID)
         XCTAssertNotEqual(solid[1].segmentID, solid[2].segmentID)
+    }
+
+    func testDownsamplingDoesNotTurnContinuousHistoryIntoDashedGaps() {
+        let accountID = UUID()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        var points: [UsageHistoryPoint] = []
+        for index in 0...(7 * 24 * 12) {
+            points.append(point(
+                accountID: accountID,
+                recordedAt: start.addingTimeInterval(TimeInterval(index * 5 * 60)),
+                remaining: 100 - Double(index % 100),
+                source: .manual
+            ))
+        }
+
+        let chartPoints = UsageHistoryLineSegmentation.downsampledChartPoints(
+            from: points,
+            seriesID: "weekly",
+            maximumSolidPoints: 80
+        )
+
+        XCTAssertLessThanOrEqual(chartPoints.count, 82)
+        XCTAssertFalse(chartPoints.contains { $0.isGapConnector })
+        XCTAssertEqual(chartPoints.first?.point.recordedAt, points.first?.recordedAt)
+        XCTAssertEqual(chartPoints.last?.point.recordedAt, points.last?.recordedAt)
+    }
+
+    func testDownsamplingRetainsRealGapConnector() {
+        let accountID = UUID()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        var points = (0..<100).map { index in
+            point(accountID: accountID,
+                  recordedAt: start.addingTimeInterval(TimeInterval(index * 5 * 60)),
+                  remaining: 90,
+                  source: .manual)
+        }
+        let secondStart = points.last!.recordedAt.addingTimeInterval(60 * 60 + 1)
+        points.append(contentsOf: (0..<100).map { index in
+            point(accountID: accountID,
+                  recordedAt: secondStart.addingTimeInterval(TimeInterval(index * 5 * 60)),
+                  remaining: 70,
+                  source: .server)
+        })
+
+        let chartPoints = UsageHistoryLineSegmentation.downsampledChartPoints(
+            from: points,
+            seriesID: "weekly",
+            maximumSolidPoints: 40
+        )
+        let gap = chartPoints.filter(\.isGapConnector)
+
+        XCTAssertEqual(gap.count, 2)
+        XCTAssertEqual(gap.first?.point.recordedAt, points[99].recordedAt)
+        XCTAssertEqual(gap.last?.point.recordedAt, points[100].recordedAt)
     }
 
     func testArbitraryDateRangeIsPreservedAndClampedToAvailableHistory() throws {

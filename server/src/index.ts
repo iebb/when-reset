@@ -1,6 +1,7 @@
 import APNSPrivateKey from "../apns/WhenResetSharedAPNs.p8";
 import {
   fetchProviderUsage,
+  normalizeFireworksAccountResource,
   providerRetryDelaySeconds,
   ProviderFetchError,
   type ProviderAccount,
@@ -1131,6 +1132,10 @@ function providerDisplayName(providerID: ProviderID): string {
     case "warp": return "Warp";
     case "openai_api": return "OpenAI API";
     case "anthropic_api": return "Anthropic API";
+    case "openrouter": return "OpenRouter";
+    case "fireworks": return "Fireworks AI";
+    case "deepseek": return "DeepSeek API";
+    case "poe": return "Poe API";
   }
 }
 
@@ -1169,6 +1174,10 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
       || historyRetentionDays < MIN_HISTORY_RETENTION_DAYS
       || historyRetentionDays > MAX_HISTORY_RETENTION_DAYS
       || consentRevision === null || !isRecord(rawCredentials) || missingQuotas === null) return null;
+  const normalizedWorkspaceID = value.provider_id === "fireworks"
+    ? normalizeFireworksAccountResource(workspaceID)
+    : workspaceID;
+  if (normalizedWorkspaceID === null) return null;
   const accessToken = requiredBoundedString(rawCredentials.access_token, 32_768, true);
   const refreshToken = requiredBoundedString(rawCredentials.refresh_token, 32_768, true);
   const idToken = requiredBoundedString(rawCredentials.id_token, 32_768, true);
@@ -1181,7 +1190,7 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
       || !credentialsSufficient(value.provider_id, accessToken, refreshToken)) return null;
   return {
     provider_id: value.provider_id,
-    workspace_id: workspaceID,
+    workspace_id: normalizedWorkspaceID,
     display_name: displayName,
     profile_name: metadata.profile_name,
     email: metadata.email,
@@ -1304,6 +1313,7 @@ async function upsertMonitoredAccount(
         accountID,
         remoteSubscription,
         upload,
+        false,
         fetchUsage,
       );
     }
@@ -1320,9 +1330,13 @@ async function upsertMonitoredAccount(
         accountID,
         directTarget,
         upload,
+        true,
         fetchUsage,
       );
     }
+    return json({ error: "remote_account_not_found" }, 404, {
+      "cache-control": "no-store",
+    });
   }
   const now = Math.floor(Date.now() / 1_000);
   const encrypted = await encryptCredentials(
@@ -1428,10 +1442,11 @@ async function replaceAccountCredential(
   localAccountID: string,
   source: CredentialTargetRow,
   upload: AccountUpload,
+  requiresWorkspaceMatch: boolean,
   fetchUsage: typeof fetchProviderUsage = fetchProviderUsage,
 ): Promise<Response> {
   if (source.provider_id !== upload.provider_id
-      || source.workspace_id !== upload.workspace_id) {
+      || (requiresWorkspaceMatch && source.workspace_id !== upload.workspace_id)) {
     return json({ error: "provider_account_mismatch" }, 409, {
       "cache-control": "no-store",
     });
@@ -3223,7 +3238,7 @@ function decodeBase64URL(value: string): Uint8Array<ArrayBuffer> {
 function isProviderID(value: unknown): value is ProviderID {
   return typeof value === "string"
     && ["chatgpt", "claude", "grok", "kimi", "github_copilot", "zai", "minimax", "synthetic", "warp",
-      "openai_api", "anthropic_api"]
+      "openai_api", "anthropic_api", "openrouter", "fireworks", "deepseek", "poe"]
       .includes(value);
 }
 

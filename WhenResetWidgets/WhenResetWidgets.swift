@@ -83,13 +83,34 @@ struct LockWidgetMetricOptionsProvider: DynamicOptionsProvider {
 
 struct UsageWidgetConfigurationIntent: WidgetConfigurationIntent {
     static let title: LocalizedStringResource = "Configure Usage Widget"
-    static let description = IntentDescription("Choose the account and quota to display.")
+    static let description = IntentDescription("Choose the account, quota, and visual style to display.")
 
     @Parameter(title: "Account") var account: WidgetAccountEntity?
     @Parameter(title: "Metric", optionsProvider: UsageWidgetMetricOptionsProvider())
     var metric: WidgetMetricEntity?
+    @Parameter(title: "Appearance", default: .automatic)
+    var appearance: HomeWidgetDisplayStyle
 
     init() {}
+}
+
+enum HomeWidgetDisplayStyle: String, AppEnum, Sendable {
+    case automatic
+    case market
+    case ring
+    case board
+    case gauge
+    case heatmap
+
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Widget appearance"
+    static let caseDisplayRepresentations: [HomeWidgetDisplayStyle: DisplayRepresentation] = [
+        .automatic: "Automatic",
+        .market: "Market chart",
+        .ring: "Quota ring",
+        .board: "Quota board",
+        .gauge: "Quota gauge",
+        .heatmap: "Quota heatmap"
+    ]
 }
 
 enum LockScreenDisplayStyle: String, AppEnum, Sendable {
@@ -142,7 +163,7 @@ private enum WidgetDataCatalog {
                             accountID: snapshot.accountID.uuidString, metricID: target.metricID,
                             name: target.title, accountName: snapshot.resolvedAccountName
                         ),
-                        target.expiresAt
+                        target.expiresAt ?? .distantFuture
                     )
                 }
             }
@@ -165,15 +186,16 @@ private enum WidgetDataCatalog {
 }
 
 private struct WidgetMetricTarget: Hashable, Sendable {
-    enum Kind: Hashable, Sendable { case quota, bankedReset, unavailable }
+    enum Kind: Hashable, Sendable { case quota, bankedReset, apiBalance, unavailable }
 
     var kind: Kind
     var metricID: String
     var title: String
-    var expiresAt: Date
+    var expiresAt: Date?
     var remainingPercent: Double?
     var resetCount: Int?
     var grantedAt: Date?
+    var apiBalance: APIBalance?
 
     static func targets(for snapshot: UsageSnapshot, after date: Date = .distantPast) -> [WidgetMetricTarget] {
         var metricIDs = Set<String>()
@@ -182,7 +204,7 @@ private struct WidgetMetricTarget: Hashable, Sendable {
         }.map {
             WidgetMetricTarget(kind: .quota, metricID: $0.metricID, title: $0.displayTitle,
                                expiresAt: $0.resetsAt, remainingPercent: $0.remainingPercent,
-                               resetCount: nil, grantedAt: nil)
+                               resetCount: nil, grantedAt: nil, apiBalance: nil)
         }
         if let credit = snapshot.nextBankedResetCredit(after: date), let expiry = credit.expiresAt {
             let activeCreditCount = snapshot.availableResetCredits.filter { credit in
@@ -192,18 +214,31 @@ private struct WidgetMetricTarget: Hashable, Sendable {
                                 expiresAt: expiry, remainingPercent: nil,
                                 resetCount: max(snapshot.availableResetCount,
                                                 activeCreditCount),
-                                grantedAt: credit.grantedAt))
+                                grantedAt: credit.grantedAt, apiBalance: nil))
+        }
+        if let balance = snapshot.apiBalance {
+            result.append(.init(
+                kind: .apiBalance,
+                metricID: "api-balance",
+                title: balance.title,
+                expiresAt: balance.periodEnd,
+                remainingPercent: balance.fractionRemaining.map { $0 * 100 },
+                resetCount: nil,
+                grantedAt: balance.periodStart,
+                apiBalance: balance
+            ))
         }
         return result.sorted {
-            if $0.expiresAt != $1.expiresAt { return $0.expiresAt < $1.expiresAt }
+            let lhsDate = $0.expiresAt ?? .distantFuture
+            let rhsDate = $1.expiresAt ?? .distantFuture
+            if lhsDate != rhsDate { return lhsDate < rhsDate }
             return $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending
         }
     }
 
-    func progress(at date: Date) -> Double {
-        if let remainingPercent { return remainingPercent / 100 }
-        if kind == .unavailable { return 0 }
-        guard let grantedAt, expiresAt > grantedAt else { return 0 }
+    func progress(at date: Date) -> Double? {
+        if let remainingPercent { return min(1, max(0, remainingPercent / 100)) }
+        guard kind == .bankedReset, let grantedAt, let expiresAt, expiresAt > grantedAt else { return nil }
         return max(0, min(1, expiresAt.timeIntervalSince(date) / expiresAt.timeIntervalSince(grantedAt)))
     }
 
@@ -211,21 +246,63 @@ private struct WidgetMetricTarget: Hashable, Sendable {
         switch kind {
         case .quota: "\(Int((remainingPercent ?? 0).rounded()))% left"
         case .bankedReset: resetCountLabel(resetCount ?? 0)
+        case .apiBalance: apiBalance?.widgetValueLabel ?? "Balance unavailable"
         case .unavailable: "No data"
         }
+    }
+
+    var compactValueLabel: String {
+        switch kind {
+        case .quota: "\(Int((remainingPercent ?? 0).rounded()))%"
+        case .bankedReset: "\(resetCount ?? 0)"
+        case .apiBalance: apiBalance?.widgetPrimaryValue ?? "—"
+        case .unavailable: "—"
+        }
+    }
+
+    var valueCaption: String {
+        switch kind {
+        case .quota: "left"
+        case .bankedReset: (resetCount ?? 0) == 1 ? "reset" : "resets"
+        case .apiBalance: apiBalance?.widgetPrimaryLabel ?? "balance"
+        case .unavailable: "unavailable"
+        }
+    }
+
+    var condensedValueLabel: String {
+        kind == .apiBalance ? compactValueLabel : valueLabel
     }
 
     var tint: Color {
         switch kind {
         case .quota: .blue
         case .bankedReset: .teal
+        case .apiBalance: .indigo
         case .unavailable: .secondary
         }
     }
 
     var accessibilityValue: String {
-        guard kind != .unavailable else { return "No reset data. Open When Reset to refresh." }
-        return "\(valueLabel). Reset date \(expiresAt.formatted(date: .abbreviated, time: .shortened))."
+        switch kind {
+        case .quota:
+            guard let expiresAt else { return valueLabel }
+            return "\(valueLabel). Reset date \(expiresAt.formatted(date: .abbreviated, time: .shortened))."
+        case .bankedReset:
+            guard let expiresAt else { return valueLabel }
+            return "\(valueLabel). Expiry date \(expiresAt.formatted(date: .abbreviated, time: .shortened))."
+        case .apiBalance:
+            guard let balance = apiBalance else { return "Balance unavailable. Open When Reset to refresh." }
+            var result = balance.widgetValueLabel
+            if let periodEnd = balance.periodEnd {
+                result += ". Period ends \(periodEnd.formatted(date: .abbreviated, time: .shortened))"
+            }
+            if let accessExpiresAt = balance.accessExpiresAt {
+                result += ". Access expires \(accessExpiresAt.formatted(date: .abbreviated, time: .shortened))"
+            }
+            return result
+        case .unavailable:
+            return "No balance or reset data. Open When Reset to refresh."
+        }
     }
 
     static func unavailable(
@@ -234,7 +311,65 @@ private struct WidgetMetricTarget: Hashable, Sendable {
         at date: Date
     ) -> Self {
         Self(kind: .unavailable, metricID: metricID, title: title,
-             expiresAt: date, remainingPercent: nil, resetCount: nil, grantedAt: nil)
+             expiresAt: nil, remainingPercent: nil, resetCount: nil, grantedAt: nil,
+             apiBalance: nil)
+    }
+}
+
+private extension APIBalance {
+    var widgetPrimaryValue: String {
+        if isUnlimited { return "Unlimited" }
+        return widgetFormatted(remaining ?? spent, compact: true)
+    }
+
+    var widgetPrimaryLabel: String {
+        if isUnlimited { return "allowance" }
+        let qualifier = remaining == nil ? "spent" : "left"
+        guard let widgetUnitLabel else { return qualifier }
+        return "\(widgetUnitLabel) \(qualifier)"
+    }
+
+    var widgetValueLabel: String {
+        if isUnlimited { return "Unlimited allowance" }
+        return "\(widgetFormatted(remaining ?? spent, compact: false)) \(widgetPrimaryLabel)"
+    }
+
+    private var widgetUnitLabel: String? {
+        if let unitLabel = unitLabel?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !unitLabel.isEmpty {
+            return unitLabel
+        }
+        let code = currencyCode.uppercased()
+        return code == "PTS" || code == "POINTS" ? "points" : nil
+    }
+
+    private func widgetFormatted(_ amount: Double, compact: Bool) -> String {
+        let compactScale: (divisor: Double, suffix: String)? = if compact && abs(amount) >= 1_000_000_000 {
+            (1_000_000_000, "B")
+        } else if compact && abs(amount) >= 1_000_000 {
+            (1_000_000, "M")
+        } else {
+            nil
+        }
+        if widgetUnitLabel != nil {
+            if let compactScale {
+                let number = (amount / compactScale.divisor).formatted(
+                    .number.precision(.fractionLength(0...1))
+                )
+                return "\(number)\(compactScale.suffix)"
+            }
+            return amount.formatted(
+                .number.precision(.fractionLength(amount.rounded() == amount ? 0 : 2))
+            )
+        }
+        if let compactScale {
+            let value = (amount / compactScale.divisor).formatted(
+                .currency(code: currencyCode.uppercased())
+                    .precision(.fractionLength(0...1))
+            )
+            return "\(value)\(compactScale.suffix)"
+        }
+        return amount.formatted(.currency(code: currencyCode.uppercased()))
     }
 }
 
@@ -242,12 +377,14 @@ private struct UsageEntry: TimelineEntry {
     var date: Date
     var snapshot: UsageSnapshot
     var target: WidgetMetricTarget
+    var homeStyle: HomeWidgetDisplayStyle
     var displayStyle: LockScreenDisplayStyle
     var history: [UsageHistoryPoint]
 }
 
 private enum WidgetEntryResolver {
     static func resolve(account: WidgetAccountEntity?, metric: WidgetMetricEntity?,
+                        homeStyle: HomeWidgetDisplayStyle = .automatic,
                         displayStyle: LockScreenDisplayStyle = .automatic,
                         usesPreviewData: Bool = false,
                         now: Date = .now) -> UsageEntry {
@@ -256,6 +393,7 @@ private enum WidgetEntryResolver {
             let target = WidgetMetricTarget.targets(for: snapshot, after: now).first
                 ?? .unavailable(at: now)
             return UsageEntry(date: now, snapshot: snapshot, target: target,
+                              homeStyle: homeStyle,
                               displayStyle: displayStyle,
                               history: previewHistory(snapshot: snapshot, target: target, now: now))
         }
@@ -268,6 +406,7 @@ private enum WidgetEntryResolver {
                 accountName: account?.name ?? metric?.accountName ?? "When Reset",
                 providerName: account?.providerName ?? "Add an account",
                 metric: metric,
+                homeStyle: homeStyle,
                 displayStyle: displayStyle,
                 now: now
             )
@@ -283,6 +422,7 @@ private enum WidgetEntryResolver {
                     accountName: account?.name ?? metric?.accountName ?? "Account unavailable",
                     providerName: account?.providerName ?? "Open When Reset",
                     metric: metric,
+                    homeStyle: homeStyle,
                     displayStyle: displayStyle,
                     now: now
                 )
@@ -317,6 +457,7 @@ private enum WidgetEntryResolver {
             now: now
         )
         return UsageEntry(date: now, snapshot: snapshot, target: target,
+                          homeStyle: homeStyle,
                           displayStyle: displayStyle, history: history)
     }
 
@@ -325,6 +466,7 @@ private enum WidgetEntryResolver {
         accountName: String,
         providerName: String,
         metric: WidgetMetricEntity?,
+        homeStyle: HomeWidgetDisplayStyle,
         displayStyle: LockScreenDisplayStyle,
         now: Date
     ) -> UsageEntry {
@@ -349,11 +491,12 @@ private enum WidgetEntryResolver {
             at: now
         )
         return UsageEntry(date: now, snapshot: snapshot, target: target,
+                          homeStyle: homeStyle,
                           displayStyle: displayStyle, history: [])
     }
 
     private static func nearestDate(in snapshot: UsageSnapshot, after date: Date) -> Date {
-        WidgetMetricTarget.targets(for: snapshot, after: date).first?.expiresAt ?? .distantFuture
+        WidgetMetricTarget.targets(for: snapshot, after: date).compactMap(\.expiresAt).min() ?? .distantFuture
     }
 
     private static func previewHistory(
@@ -363,7 +506,8 @@ private enum WidgetEntryResolver {
     ) -> [UsageHistoryPoint] {
         guard target.kind == .quota,
               let providerID = snapshot.accountProviderID,
-              let remainingPercent = target.remainingPercent else { return [] }
+              let remainingPercent = target.remainingPercent,
+              let expiresAt = target.expiresAt else { return [] }
         let values = [
             min(100, remainingPercent + 28),
             min(100, remainingPercent + 24),
@@ -383,8 +527,8 @@ private enum WidgetEntryResolver {
                 windowMinutes: nil,
                 remainingPercent: value,
                 recordedAt: recordedAt,
-                resetsAt: target.expiresAt,
-                secondsUntilReset: max(0, target.expiresAt.timeIntervalSince(recordedAt)),
+                resetsAt: expiresAt,
+                secondsUntilReset: max(0, expiresAt.timeIntervalSince(recordedAt)),
                 source: .demo,
                 plan: snapshot.plan
             )
@@ -399,11 +543,13 @@ private struct UsageWidgetProvider: AppIntentTimelineProvider {
 
     func snapshot(for configuration: UsageWidgetConfigurationIntent, in context: Context) async -> UsageEntry {
         WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric,
+                                    homeStyle: configuration.appearance,
                                     usesPreviewData: context.isPreview)
     }
 
     func timeline(for configuration: UsageWidgetConfigurationIntent, in context: Context) async -> Timeline<UsageEntry> {
-        let entry = WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric)
+        let entry = WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric,
+                                                homeStyle: configuration.appearance)
         return Timeline(entries: [entry], policy: .after(WidgetTimelinePolicy.reloadDate(for: entry)))
     }
 }
@@ -433,8 +579,8 @@ private struct UsageLockScreenWidgetProvider: AppIntentTimelineProvider {
 private enum WidgetTimelinePolicy {
     static func reloadDate(for entry: UsageEntry, now: Date = .now) -> Date {
         let regularReload = now.addingTimeInterval(15 * 60)
-        guard entry.target.expiresAt > now else { return regularReload }
-        return min(regularReload, entry.target.expiresAt.addingTimeInterval(1))
+        guard let expiresAt = entry.target.expiresAt, expiresAt > now else { return regularReload }
+        return min(regularReload, expiresAt.addingTimeInterval(1))
     }
 }
 
@@ -445,12 +591,8 @@ struct UsageWidget: Widget {
             HomeWidgetView(entry: entry).containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Usage limits")
-        .description("Choose an account and quota to monitor.")
-#if os(macOS)
+        .description("Choose an account, quota, and market-inspired presentation.")
         .supportedFamilies([.systemSmall, .systemMedium, .systemLarge])
-#else
-        .supportedFamilies([.systemSmall, .systemMedium])
-#endif
     }
 }
 
@@ -458,78 +600,916 @@ private struct HomeWidgetView: View {
     @Environment(\.widgetFamily) private var family
     let entry: UsageEntry
 
-    var body: some View {
-        if family == .systemLarge {
-            LargeHomeWidgetView(entry: entry)
-        } else if family == .systemSmall {
-            SmallHomeWidgetView(entry: entry)
-        } else {
-            compactContent
-        }
+    private var resolvedStyle: HomeWidgetDisplayStyle {
+        guard entry.homeStyle == .automatic else { return entry.homeStyle }
+        return family == .systemLarge ? .board : .market
     }
 
-    private var compactContent: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 7) {
+    @ViewBuilder
+    var body: some View {
+        switch resolvedStyle {
+        case .market:
+            if family == .systemSmall {
+                SmallHomeWidgetView(entry: entry)
+            } else {
+                MarketHomeWidgetView(entry: entry, family: family)
+            }
+        case .ring:
+            RingHomeWidgetView(entry: entry, family: family)
+        case .board:
+            BoardHomeWidgetView(entry: entry, family: family)
+        case .gauge:
+            GaugeHomeWidgetView(entry: entry, family: family)
+        case .heatmap:
+            HeatmapHomeWidgetView(entry: entry, family: family)
+        case .automatic:
+            EmptyView()
+        }
+    }
+}
+
+private extension UsageEntry {
+    var widgetValueText: String {
+        target.compactValueLabel
+    }
+
+    var widgetAccent: Color {
+        guard let remaining = target.remainingPercent else { return target.tint }
+        if remaining <= 20 { return .red }
+        if remaining <= 50 { return .orange }
+        return .green
+    }
+
+    var widgetHistoryChange: (label: String, color: Color)? {
+        let visibleHistory = history.widgetSevenDayPoints
+        guard target.kind == .quota,
+              let first = visibleHistory.first,
+              let last = visibleHistory.last,
+              first.id != last.id else { return nil }
+        let change = last.remainingPercent - first.remainingPercent
+        let rounded = Int(change.rounded())
+        let sign = rounded > 0 ? "+" : ""
+        return ("7D \(sign)\(rounded) pts", rounded >= 0 ? .green : .red)
+    }
+
+    var hasWidgetHistory: Bool {
+        history.widgetSevenDayPoints.count >= 2
+    }
+
+    var widgetTargets: [WidgetMetricTarget] {
+        let available = WidgetMetricTarget.targets(for: snapshot, after: date)
+        if available.isEmpty { return [target] }
+        var ordered = [target]
+        ordered.append(contentsOf: available.filter { $0.metricID != target.metricID })
+        return ordered
+    }
+}
+
+private extension WidgetMetricTarget {
+    var widgetAccent: Color {
+        guard let remainingPercent else { return tint }
+        if remainingPercent <= 20 { return .red }
+        if remainingPercent <= 50 { return .orange }
+        return .green
+    }
+}
+
+private struct MarketHomeWidgetView: View {
+    let entry: UsageEntry
+    let family: WidgetFamily
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: family == .systemLarge ? 12 : 6) {
+            HStack(alignment: .top, spacing: 8) {
                 SnapshotAccountIcon(snapshot: entry.snapshot)
-                    .frame(width: 20, height: 20)
+                    .frame(width: 22, height: 22)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(entry.snapshot.resolvedAccountName).font(.headline).lineLimit(1)
-                    if family == .systemMedium {
-                        Text(entry.snapshot.providerName).font(.caption2).foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.snapshot.resolvedAccountName)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(entry.target.title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 6)
+                VStack(alignment: .trailing, spacing: 1) {
+                    if let change = entry.widgetHistoryChange {
+                        Text(change.label)
+                            .font(.caption2.bold().monospacedDigit())
+                            .foregroundStyle(change.color)
+                    }
+                    if let expiresAt = entry.target.expiresAt {
+                        WidgetCountdown(expiry: expiresAt)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    } else if entry.target.kind == .unavailable {
+                        Text("Refresh")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
                     }
                 }
-                Spacer()
             }
-            Text(entry.target.title).font(.caption.weight(.semibold)).foregroundStyle(.secondary).lineLimit(1)
-            HStack(alignment: .firstTextBaseline) {
-                Text(entry.target.valueLabel).font(family == .systemMedium ? .title2.bold() : .headline)
-                Spacer()
-                if entry.target.kind == .unavailable {
-                    Text("Open app to refresh")
-                        .font(.caption2)
+
+            HStack(alignment: .lastTextBaseline, spacing: 8) {
+                Text(entry.widgetValueText)
+                    .font(.system(size: family == .systemLarge ? 52 : 34,
+                                  weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.55)
+                    .lineLimit(1)
+                if entry.target.kind != .unavailable {
+                    Text(entry.target.valueCaption.uppercased())
+                        .font(.caption2.bold())
                         .foregroundStyle(.secondary)
-                } else {
-                    WidgetCountdown(expiry: entry.target.expiresAt)
-                        .font(.caption.monospacedDigit()).minimumScaleFactor(0.65)
+                }
+                Spacer(minLength: 0)
+                if family == .systemLarge, let plan = entry.snapshot.plan, !plan.isEmpty {
+                    Text(plan.replacingOccurrences(of: "_", with: " "))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
-            ProgressView(value: entry.target.progress(at: entry.date), total: 1)
-                .tint(entry.target.tint)
-            if family == .systemMedium, let plan = entry.snapshot.plan, !plan.isEmpty {
-                Text(plan.replacingOccurrences(of: "_", with: " "))
-                    .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(entry.target.title)
+            .accessibilityValue(entry.target.accessibilityValue)
+
+            if entry.hasWidgetHistory {
+                WidgetQuotaSparkline(points: entry.history, color: entry.widgetAccent, fillsArea: true)
+                    .frame(height: family == .systemLarge ? 108 : 44)
+            }
+
+            if family == .systemLarge {
+                HStack(spacing: 8) {
+                    ForEach(entry.widgetTargets.prefix(3), id: \.metricID) { target in
+                        MarketTargetChip(target: target, date: entry.date)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private struct MarketTargetChip: View {
+    let target: WidgetMetricTarget
+    let date: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(target.title)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(target.kind == .unavailable ? "Refresh" : target.condensedValueLabel)
+                    .font(.caption.bold().monospacedDigit())
+                    .foregroundStyle(target.kind == .unavailable ? .secondary : .primary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                if let expiresAt = target.expiresAt {
+                    WidgetCountdown(expiry: expiresAt)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if target.kind == .unavailable {
+                Capsule()
+                    .fill(.secondary.opacity(0.16))
+                    .frame(height: 4)
+            } else if let progress = target.progress(at: date) {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.tint)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.45), in: .rect(cornerRadius: 10))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(target.title)
+        .accessibilityValue(target.accessibilityValue)
+    }
+}
+
+private struct RingHomeWidgetView: View {
+    let entry: UsageEntry
+    let family: WidgetFamily
+
+    var body: some View {
+        Group {
+            if family == .systemSmall {
+                VStack(spacing: 7) {
+                    compactHeader
+                    WidgetQuotaRing(
+                        progress: entry.target.progress(at: entry.date),
+                        value: entry.widgetValueText,
+                        color: entry.widgetAccent,
+                        lineWidth: 9
+                    )
+                    .frame(width: 68, height: 68)
+                    if entry.target.kind == .unavailable {
+                        Text("Open app to refresh")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    } else if let expiresAt = entry.target.expiresAt {
+                        WidgetCountdown(expiry: expiresAt)
+                            .font(.caption.bold().monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text(entry.target.valueCaption.capitalized)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: family == .systemLarge ? 10 : 8) {
+                    accountHeader
+                    HStack(spacing: family == .systemLarge ? 18 : 12) {
+                        WidgetQuotaRing(
+                            progress: entry.target.progress(at: entry.date),
+                            value: entry.widgetValueText,
+                            color: entry.widgetAccent,
+                            lineWidth: family == .systemLarge ? 12 : 10
+                        )
+                        .frame(width: family == .systemLarge ? 132 : 78,
+                               height: family == .systemLarge ? 132 : 78)
+
+                        VStack(alignment: .leading, spacing: family == .systemLarge ? 8 : 6) {
+                            Text(entry.target.title)
+                                .font(.headline)
+                                .lineLimit(1)
+                            Group {
+                                if entry.target.kind == .unavailable {
+                                    Label("Open app to refresh", systemImage: "arrow.clockwise")
+                                } else if let expiresAt = entry.target.expiresAt {
+                                    Label {
+                                        WidgetCountdown(expiry: expiresAt)
+                                            .monospacedDigit()
+                                    } icon: {
+                                        Image(systemName: "clock")
+                                    }
+                                } else {
+                                    Label(entry.target.valueCaption.capitalized, systemImage: "creditcard")
+                                }
+                            }
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                            if family == .systemLarge, entry.hasWidgetHistory {
+                                WidgetQuotaSparkline(
+                                    points: entry.history,
+                                    color: entry.widgetAccent,
+                                    fillsArea: true
+                                )
+                                .frame(height: 76)
+                            } else {
+                                ForEach(entry.widgetTargets.dropFirst().prefix(1), id: \.metricID) { target in
+                                    RingSecondaryRow(target: target, date: entry.date)
+                                }
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+
+                    if family == .systemLarge {
+                        HStack(spacing: 8) {
+                            ForEach(entry.widgetTargets.dropFirst().prefix(3), id: \.metricID) { target in
+                                RingSecondaryRow(target: target, date: entry.date)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
+        .accessibilityValue(entry.target.accessibilityValue)
+    }
+
+    private var compactHeader: some View {
+        HStack(spacing: 6) {
+            SnapshotAccountIcon(snapshot: entry.snapshot)
+                .frame(width: 17, height: 17)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(entry.snapshot.resolvedAccountName)
+                    .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                Text(entry.target.title)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
             Spacer(minLength: 0)
         }
-        .accessibilityElement(children: .combine)
+    }
+
+    private var accountHeader: some View {
+        HStack(spacing: 8) {
+            SnapshotAccountIcon(snapshot: entry.snapshot)
+                .frame(width: 22, height: 22)
+                .accessibilityHidden(true)
+            Text(entry.snapshot.resolvedAccountName)
+                .font(.headline)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Text(entry.snapshot.providerName)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct WidgetQuotaRing: View {
+    let progress: Double?
+    let value: String
+    let color: Color
+    let lineWidth: CGFloat
+
+    var body: some View {
+        ZStack {
+            if let progress {
+                Circle()
+                    .stroke(.secondary.opacity(0.16), lineWidth: lineWidth)
+                Circle()
+                    .trim(from: 0, to: min(1, max(0, progress)))
+                    .stroke(color.gradient, style: StrokeStyle(
+                        lineWidth: lineWidth,
+                        lineCap: .round
+                    ))
+                    .rotationEffect(.degrees(-90))
+            } else {
+                Circle()
+                    .fill(.secondary.opacity(0.1))
+                Image(systemName: "creditcard")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(color)
+                    .offset(y: -24)
+            }
+            Text(value)
+                .font(.system(size: 27, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .minimumScaleFactor(0.5)
+                .lineLimit(1)
+                .padding(12)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct RingSecondaryRow: View {
+    let target: WidgetMetricTarget
+    let date: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Text(target.title)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(target.kind == .unavailable ? "Refresh" : target.condensedValueLabel)
+                    .font(.caption2.bold().monospacedDigit())
+                    .foregroundStyle(target.kind == .unavailable ? .secondary : .primary)
+                    .lineLimit(1)
+            }
+            if target.kind == .unavailable {
+                Capsule()
+                    .fill(.secondary.opacity(0.16))
+                    .frame(height: 4)
+            } else if let progress = target.progress(at: date) {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.tint)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(target.title)
+        .accessibilityValue(target.accessibilityValue)
+    }
+}
+
+private struct GaugeHomeWidgetView: View {
+    let entry: UsageEntry
+    let family: WidgetFamily
+
+    var body: some View {
+        Group {
+            if family == .systemSmall {
+                compactContent
+            } else if family == .systemMedium {
+                mediumContent
+            } else {
+                largeContent
+            }
+        }
+        .accessibilityElement(children: .contain)
         .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
         .accessibilityValue(entry.target.accessibilityValue)
+    }
+
+    private var compactContent: some View {
+        VStack(spacing: 4) {
+            GaugeAccountHeader(entry: entry, compact: true)
+
+            WidgetQuotaDial(
+                progress: entry.target.progress(at: entry.date),
+                value: entry.widgetValueText,
+                color: entry.widgetAccent,
+                caption: entry.target.valueCaption.uppercased()
+            )
+            .aspectRatio(1, contentMode: .fit)
+            .frame(maxHeight: 88)
+
+            gaugeFooter
+        }
+    }
+
+    private var mediumContent: some View {
+        HStack(spacing: 14) {
+            VStack(spacing: 3) {
+                GaugeAccountHeader(entry: entry, compact: true)
+                WidgetQuotaDial(
+                    progress: entry.target.progress(at: entry.date),
+                    value: entry.widgetValueText,
+                    color: entry.widgetAccent,
+                    caption: entry.target.valueCaption.uppercased()
+                )
+                .aspectRatio(1, contentMode: .fit)
+            }
+            .frame(maxWidth: .infinity)
+
+            VStack(alignment: .leading, spacing: 7) {
+                Text(entry.target.title)
+                    .font(.headline)
+                    .lineLimit(1)
+                gaugeFooter
+                if entry.hasWidgetHistory {
+                    WidgetQuotaSparkline(points: entry.history, color: entry.widgetAccent, fillsArea: true)
+                        .frame(maxHeight: 42)
+                }
+                ForEach(entry.widgetTargets.dropFirst().prefix(1), id: \.metricID) { target in
+                    GaugeTargetSummary(target: target, date: entry.date)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        }
+    }
+
+    private var largeContent: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            GaugeAccountHeader(entry: entry, compact: false)
+
+            HStack(spacing: 18) {
+                WidgetQuotaDial(
+                    progress: entry.target.progress(at: entry.date),
+                    value: entry.widgetValueText,
+                    color: entry.widgetAccent,
+                    caption: entry.target.valueCaption.uppercased()
+                )
+                .aspectRatio(1, contentMode: .fit)
+                .frame(maxWidth: 150)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(entry.target.title)
+                            .font(.title3.bold())
+                            .lineLimit(1)
+                        Spacer(minLength: 6)
+                        if let change = entry.widgetHistoryChange {
+                            Text(change.label)
+                                .font(.caption.bold().monospacedDigit())
+                                .foregroundStyle(change.color)
+                        }
+                    }
+                    gaugeFooter
+                    if entry.hasWidgetHistory {
+                        WidgetQuotaSparkline(points: entry.history, color: entry.widgetAccent, fillsArea: true)
+                            .frame(maxHeight: 78)
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            }
+
+            HStack(spacing: 8) {
+                ForEach(entry.widgetTargets.dropFirst().prefix(3), id: \.metricID) { target in
+                    GaugeTargetSummary(target: target, date: entry.date)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var gaugeFooter: some View {
+        if entry.target.kind == .unavailable {
+            Label("Open app to refresh", systemImage: "arrow.clockwise")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        } else if let expiresAt = entry.target.expiresAt {
+            Label {
+                WidgetCountdown(expiry: expiresAt)
+                    .monospacedDigit()
+            } icon: {
+                Image(systemName: "clock")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        } else {
+            Label {
+                HStack(spacing: 3) {
+                    Text("Updated")
+                    Text(entry.snapshot.fetchedAt, style: .relative)
+                }
+            } icon: {
+                Image(systemName: "clock.arrow.circlepath")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+    }
+}
+
+private struct GaugeAccountHeader: View {
+    let entry: UsageEntry
+    let compact: Bool
+
+    var body: some View {
+        HStack(spacing: compact ? 6 : 8) {
+            SnapshotAccountIcon(snapshot: entry.snapshot)
+                .frame(width: compact ? 18 : 22, height: compact ? 18 : 22)
+                .accessibilityHidden(true)
+            Text(entry.snapshot.resolvedAccountName)
+                .font(compact ? .caption.weight(.semibold) : .headline)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if !compact {
+                Text(entry.snapshot.providerName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+        }
+    }
+}
+
+private struct WidgetQuotaDial: View {
+    let progress: Double?
+    let value: String
+    let color: Color
+    let caption: String
+
+    var body: some View {
+        GeometryReader { proxy in
+            let side = min(proxy.size.width, proxy.size.height)
+            let strokeWidth = max(6, side * 0.075)
+
+            ZStack {
+                if let progress {
+                    Circle()
+                        .trim(from: 0.125, to: 0.875)
+                        .stroke(.secondary.opacity(0.16), style: StrokeStyle(
+                            lineWidth: strokeWidth,
+                            lineCap: .round
+                        ))
+                        .rotationEffect(.degrees(90))
+                    Circle()
+                        .trim(from: 0.125, to: 0.125 + (0.75 * min(1, max(0, progress))))
+                        .stroke(color.gradient, style: StrokeStyle(
+                            lineWidth: strokeWidth,
+                            lineCap: .round
+                        ))
+                        .rotationEffect(.degrees(90))
+                } else {
+                    RoundedRectangle(cornerRadius: side * 0.2)
+                        .fill(color.opacity(0.1))
+                    Image(systemName: "creditcard.fill")
+                        .font(.system(size: side * 0.1, weight: .semibold))
+                        .foregroundStyle(color)
+                        .offset(y: -side * 0.25)
+                }
+
+                VStack(spacing: 0) {
+                    Text(value)
+                        .font(.system(size: side * 0.25, weight: .semibold, design: .rounded))
+                        .monospacedDigit()
+                        .minimumScaleFactor(0.45)
+                        .lineLimit(1)
+                    Text(caption)
+                        .font(.system(size: max(7, side * 0.07), weight: .bold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
+                .offset(y: side * 0.045)
+                .padding(.horizontal, side * 0.18)
+            }
+            .frame(width: side, height: side)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+private struct GaugeTargetSummary: View {
+    let target: WidgetMetricTarget
+    let date: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text(target.title)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 2)
+                Text(target.kind == .unavailable ? "Refresh" : target.condensedValueLabel)
+                    .font(.caption.bold().monospacedDigit())
+                    .lineLimit(1)
+            }
+            if target.kind == .unavailable {
+                Capsule()
+                    .fill(.secondary.opacity(0.16))
+                    .frame(height: 4)
+            } else if let progress = target.progress(at: date) {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.widgetAccent)
+            }
+        }
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.42), in: .rect(cornerRadius: 9))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(target.title)
+        .accessibilityValue(target.accessibilityValue)
+    }
+}
+
+private struct HeatmapHomeWidgetView: View {
+    let entry: UsageEntry
+    let family: WidgetFamily
+
+    private var tileLimit: Int {
+        if family == .systemSmall { return 1 }
+        if family == .systemLarge { return 4 }
+        return 3
+    }
+
+    private var columns: [GridItem] {
+        if family == .systemLarge {
+            return [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)]
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: 7), count: family == .systemSmall ? 1 : 3)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: family == .systemLarge ? 9 : 7) {
+            HStack(spacing: 7) {
+                SnapshotAccountIcon(snapshot: entry.snapshot)
+                    .frame(width: family == .systemSmall ? 18 : 22,
+                           height: family == .systemSmall ? 18 : 22)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(entry.snapshot.resolvedAccountName)
+                        .font(family == .systemSmall ? .subheadline.bold() : .headline)
+                        .lineLimit(1)
+                    if family != .systemSmall {
+                        Text(entry.snapshot.providerName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                if family == .systemSmall {
+                    Image(systemName: "square.grid.2x2.fill")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                        .accessibilityLabel("Usage map")
+                } else {
+                    Label("Usage map", systemImage: "square.grid.2x2.fill")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            LazyVGrid(columns: columns, spacing: 7) {
+                ForEach(entry.widgetTargets.prefix(tileLimit), id: \.metricID) { target in
+                    HeatmapQuotaTile(
+                        target: target,
+                        date: entry.date,
+                        featured: family == .systemSmall
+                    )
+                }
+            }
+            .frame(maxHeight: .infinity)
+
+            if family == .systemLarge,
+               entry.hasWidgetHistory || entry.target.expiresAt != nil {
+                HStack(spacing: 8) {
+                    if let change = entry.widgetHistoryChange {
+                        Text(change.label)
+                            .font(.caption.bold().monospacedDigit())
+                            .foregroundStyle(change.color)
+                    }
+                    if entry.hasWidgetHistory {
+                        WidgetQuotaSparkline(points: entry.history, color: entry.widgetAccent, fillsArea: false)
+                            .frame(maxWidth: .infinity, maxHeight: 36)
+                    }
+                    if let expiresAt = entry.target.expiresAt {
+                        WidgetCountdown(expiry: expiresAt)
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName) usage heatmap")
+    }
+}
+
+private struct HeatmapQuotaTile: View {
+    let target: WidgetMetricTarget
+    let date: Date
+    let featured: Bool
+
+    private var accent: Color { target.widgetAccent }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: featured ? 6 : 4) {
+            HStack(spacing: 4) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(accent)
+                    .frame(width: 5, height: featured ? 18 : 14)
+                    .accessibilityHidden(true)
+                Text(target.title)
+                    .font(featured ? .caption.weight(.semibold) : .caption2.weight(.semibold))
+                    .lineLimit(featured ? 2 : 1)
+                Spacer(minLength: 0)
+            }
+
+            Text(target.kind == .unavailable ? "—" : target.condensedValueLabel)
+                .font(.system(size: featured ? 30 : 18, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .minimumScaleFactor(0.55)
+                .lineLimit(1)
+
+            Spacer(minLength: 0)
+
+            if target.kind == .unavailable {
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            } else if let expiresAt = target.expiresAt {
+                HStack(spacing: 3) {
+                    Image(systemName: "clock")
+                        .accessibilityHidden(true)
+                    WidgetCountdown(expiry: expiresAt)
+                        .monospacedDigit()
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+        }
+        .padding(featured ? 10 : 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [accent.opacity(0.2), accent.opacity(0.07)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: .rect(cornerRadius: 11)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 11)
+                .stroke(accent.opacity(0.24), lineWidth: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(target.title)
+        .accessibilityValue(target.accessibilityValue)
+    }
+}
+
+private struct BoardHomeWidgetView: View {
+    let entry: UsageEntry
+    let family: WidgetFamily
+
+    private var rowLimit: Int {
+        if family == .systemSmall { return 2 }
+        if family == .systemLarge { return 3 }
+        return 3
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: family == .systemLarge ? 9 : 7) {
+            HStack(spacing: 7) {
+                SnapshotAccountIcon(snapshot: entry.snapshot)
+                    .frame(width: family == .systemSmall ? 18 : 22,
+                           height: family == .systemSmall ? 18 : 22)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(entry.snapshot.resolvedAccountName)
+                        .font(family == .systemSmall ? .subheadline.bold() : .headline)
+                        .lineLimit(1)
+                    if family != .systemSmall {
+                        Text(entry.snapshot.providerName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+                Text("USAGE")
+                    .font(.caption2.bold())
+                    .foregroundStyle(.secondary)
+            }
+
+            if family == .systemMedium {
+                HStack(spacing: 8) {
+                    ForEach(entry.widgetTargets.prefix(rowLimit), id: \.metricID) { target in
+                        BoardTargetRow(target: target, date: entry.date, compact: true)
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+            } else {
+                ForEach(entry.widgetTargets.prefix(rowLimit), id: \.metricID) { target in
+                    BoardTargetRow(
+                        target: target,
+                        date: entry.date,
+                        compact: family == .systemSmall
+                    )
+                }
+            }
+
+            if family != .systemSmall, entry.hasWidgetHistory {
+                WidgetQuotaSparkline(
+                    points: entry.history,
+                    color: entry.widgetAccent,
+                    fillsArea: false
+                )
+                .frame(height: family == .systemLarge ? 64 : 34)
+            }
+            Spacer(minLength: 0)
+        }
+    }
+}
+
+private struct BoardTargetRow: View {
+    let target: WidgetMetricTarget
+    let date: Date
+    let compact: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: compact ? 3 : 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Text(target.title)
+                    .font(compact ? .caption2.weight(.semibold) : .caption.weight(.semibold))
+                    .lineLimit(1)
+                Spacer(minLength: 2)
+                if target.kind == .unavailable {
+                    Text("Refresh")
+                        .font(compact ? .caption2.weight(.semibold) : .caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text(target.condensedValueLabel)
+                        .font(compact ? .caption2.bold().monospacedDigit() : .caption.bold().monospacedDigit())
+                        .lineLimit(1)
+                }
+                if !compact, let expiresAt = target.expiresAt {
+                    WidgetCountdown(expiry: expiresAt)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 54, alignment: .trailing)
+                }
+            }
+            if target.kind == .unavailable {
+                Capsule()
+                    .fill(.secondary.opacity(0.16))
+                    .frame(height: 4)
+            } else if let progress = target.progress(at: date) {
+                ProgressView(value: progress, total: 1)
+                    .tint(target.tint)
+            }
+        }
+        .padding(compact ? 6 : 8)
+        .background(.quaternary.opacity(0.42), in: .rect(cornerRadius: 8))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(target.title)
+        .accessibilityValue(target.accessibilityValue)
     }
 }
 
 private struct SmallHomeWidgetView: View {
     let entry: UsageEntry
-
-    private var valueText: String {
-        switch entry.target.kind {
-        case .quota:
-            "\(Int((entry.target.remainingPercent ?? 0).rounded()))%"
-        case .bankedReset:
-            "\(entry.target.resetCount ?? 0)"
-        case .unavailable:
-            "—"
-        }
-    }
-
-    private var accent: Color {
-        guard entry.target.kind == .quota,
-              let remaining = entry.target.remainingPercent else { return entry.target.tint }
-        if remaining <= 20 { return .red }
-        if remaining <= 50 { return .orange }
-        return .green
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -554,35 +1534,45 @@ private struct SmallHomeWidgetView: View {
                     Image(systemName: "arrow.clockwise")
                         .font(.caption.bold())
                         .foregroundStyle(.secondary)
-                } else {
+                } else if let expiresAt = entry.target.expiresAt {
                     VStack(alignment: .trailing, spacing: 1) {
-                        WidgetCountdown(expiry: entry.target.expiresAt)
+                        WidgetCountdown(expiry: expiresAt)
                             .font(.caption.bold().monospacedDigit())
-                            .foregroundStyle(accent)
+                            .foregroundStyle(entry.widgetAccent)
                             .minimumScaleFactor(0.65)
                         Text(entry.target.kind == .bankedReset ? "EXPIRY" : "RESET")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.secondary)
                     }
+                } else if entry.target.kind == .apiBalance {
+                    Image(systemName: "creditcard")
+                        .font(.caption.bold())
+                        .foregroundStyle(entry.widgetAccent)
                 }
             }
 
             Spacer(minLength: 5)
 
-            WidgetQuotaSparkline(points: entry.history, color: accent)
-                .frame(height: 38)
+            if entry.hasWidgetHistory {
+                WidgetQuotaSparkline(
+                    points: entry.history,
+                    color: entry.widgetAccent,
+                    fillsArea: true
+                )
+                    .frame(height: 38)
+            }
 
             Spacer(minLength: 2)
 
             HStack(alignment: .lastTextBaseline, spacing: 4) {
                 Spacer(minLength: 0)
-                Text(valueText)
+                Text(entry.widgetValueText)
                     .font(.system(size: 42, weight: .medium, design: .rounded))
                     .monospacedDigit()
                     .minimumScaleFactor(0.6)
                     .lineLimit(1)
-                if entry.target.kind == .bankedReset {
-                    Text(entry.target.resetCount == 1 ? "RESET" : "RESETS")
+                if entry.target.kind == .bankedReset || entry.target.kind == .apiBalance {
+                    Text(entry.target.valueCaption.uppercased())
                         .font(.caption2.bold())
                         .foregroundStyle(.secondary)
                 }
@@ -597,17 +1587,17 @@ private struct SmallHomeWidgetView: View {
 private struct WidgetQuotaSparkline: View {
     let points: [UsageHistoryPoint]
     let color: Color
+    var fillsArea = false
 
     private var visiblePoints: [UsageHistoryPoint] {
-        guard let latest = points.last else { return [] }
-        let cutoff = latest.recordedAt.addingTimeInterval(-7 * 24 * 60 * 60)
-        return Array(points.filter { $0.recordedAt >= cutoff }.suffix(80))
+        points.widgetSevenDayPoints
     }
 
     private var chartPoints: [UsageHistoryLineChartPoint] {
-        UsageHistoryLineSegmentation.chartPoints(
-            from: visiblePoints,
-            seriesID: "widget"
+        UsageHistoryLineSegmentation.downsampledChartPoints(
+            from: points.widgetSevenDaySourcePoints,
+            seriesID: "widget",
+            maximumSolidPoints: 80
         )
     }
 
@@ -615,6 +1605,20 @@ private struct WidgetQuotaSparkline: View {
         if visiblePoints.count >= 2 {
             Chart(chartPoints) { chartPoint in
                 let point = chartPoint.point
+                if fillsArea && !chartPoint.isGapConnector {
+                    AreaMark(
+                        x: .value("Recorded", point.recordedAt),
+                        yStart: .value("Baseline", 0),
+                        yEnd: .value("Percent remaining", point.remainingPercent),
+                        series: .value("Area segment", chartPoint.segmentID)
+                    )
+                    .interpolationMethod(.monotone)
+                    .foregroundStyle(LinearGradient(
+                        colors: [color.opacity(0.34), color.opacity(0.03)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    ))
+                }
                 LineMark(
                     x: .value("Recorded", point.recordedAt),
                     y: .value("Percent remaining", point.remainingPercent),
@@ -644,110 +1648,25 @@ private struct WidgetQuotaSparkline: View {
     }
 }
 
-private struct LargeHomeWidgetView: View {
-    let entry: UsageEntry
-
-    private var additionalTargets: [WidgetMetricTarget] {
-        WidgetMetricTarget.targets(for: entry.snapshot, after: entry.date)
-            .filter { $0.metricID != entry.target.metricID }
+private extension Array where Element == UsageHistoryPoint {
+    var widgetSevenDaySourcePoints: [UsageHistoryPoint] {
+        let sorted = sorted { $0.recordedAt < $1.recordedAt }
+        guard let latest = sorted.last else { return [] }
+        let cutoff = latest.recordedAt.addingTimeInterval(-7 * 24 * 60 * 60)
+        return sorted.filter { $0.recordedAt >= cutoff }
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 10) {
-                SnapshotAccountIcon(snapshot: entry.snapshot)
-                    .frame(width: 34, height: 34)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(entry.snapshot.resolvedAccountName)
-                        .font(.title3.bold())
-                        .lineLimit(1)
-                    Text(accountSubtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
-                Text("Updated \(entry.snapshot.fetchedAt, format: .relative(presentation: .named))")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
+    var widgetSevenDayPoints: [UsageHistoryPoint] {
+        let filtered = widgetSevenDaySourcePoints
+        let maximumCount = 80
+        guard filtered.count > maximumCount else { return filtered }
 
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text(entry.target.title)
-                        .font(.headline)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    Text(entry.target.valueLabel)
-                        .font(.title2.bold().monospacedDigit())
-                }
-                if entry.target.kind == .unavailable {
-                    Text("Open When Reset to refresh this account.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    HStack(alignment: .firstTextBaseline) {
-                        Text(entry.target.kind == .bankedReset ? "Next expiry" : "Resets")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        WidgetCountdown(expiry: entry.target.expiresAt)
-                            .font(.headline.monospacedDigit())
-                    }
-                }
-                ProgressView(value: entry.target.progress(at: entry.date), total: 1)
-                    .tint(entry.target.tint)
-            }
-            .padding(12)
-            .background(.quaternary.opacity(0.5), in: .rect(cornerRadius: 12))
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(entry.target.title)
-            .accessibilityValue(entry.target.accessibilityValue)
-
-            if !additionalTargets.isEmpty {
-                Text("Other upcoming resets")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                VStack(spacing: 9) {
-                    ForEach(additionalTargets.prefix(3), id: \.metricID) { target in
-                        LargeWidgetTargetRow(target: target, date: entry.date)
-                    }
-                }
-            }
-            Spacer(minLength: 0)
+        let finalIndex = filtered.count - 1
+        return (0..<maximumCount).map { sampleIndex in
+            let fraction = Double(sampleIndex) / Double(maximumCount - 1)
+            let sourceIndex = Int((fraction * Double(finalIndex)).rounded())
+            return filtered[sourceIndex]
         }
-    }
-
-    private var accountSubtitle: String {
-        guard let plan = entry.snapshot.plan?.replacingOccurrences(of: "_", with: " "),
-              !plan.isEmpty else { return entry.snapshot.providerName }
-        return "\(entry.snapshot.providerName) · \(plan)"
-    }
-}
-
-private struct LargeWidgetTargetRow: View {
-    let target: WidgetMetricTarget
-    let date: Date
-
-    var body: some View {
-        HStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(target.title).font(.subheadline.weight(.semibold)).lineLimit(1)
-                    Spacer()
-                    Text(target.valueLabel).font(.caption.bold().monospacedDigit())
-                }
-                ProgressView(value: target.progress(at: date), total: 1)
-                    .tint(target.tint)
-            }
-            WidgetCountdown(expiry: target.expiresAt)
-                .font(.caption.monospacedDigit())
-                .frame(width: 72, alignment: .trailing)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(target.title)
-        .accessibilityValue(target.accessibilityValue)
     }
 }
 
@@ -770,48 +1689,65 @@ private struct LockWidgetView: View {
     let entry: UsageEntry
 
     var body: some View {
-        switch family {
-        case .accessoryCircular:
-            LockCircularView(entry: entry)
-        case .accessoryInline:
-            LockInlineView(entry: entry)
-        default:
-            LockRectangularView(entry: entry)
+        Group {
+            switch family {
+            case .accessoryCircular:
+                LockCircularView(entry: entry)
+            case .accessoryInline:
+                LockInlineView(entry: entry)
+            default:
+                LockRectangularView(entry: entry)
+            }
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
+        .accessibilityValue(entry.target.accessibilityValue)
     }
 }
 
 private struct LockCircularView: View {
     let entry: UsageEntry
     private var style: LockScreenDisplayStyle {
-        entry.displayStyle == .automatic ? (entry.target.kind == .quota ? .progress : .countdown)
-            : entry.displayStyle
+        guard entry.displayStyle == .automatic else { return entry.displayStyle }
+        if entry.target.progress(at: entry.date) != nil { return .progress }
+        return entry.target.expiresAt == nil ? .remaining : .countdown
     }
 
     var body: some View {
         switch style {
         case .progress:
-            Gauge(value: entry.target.progress(at: entry.date), in: 0...1) {
-                Image(systemName: entry.snapshot.accountSymbolName
-                      ?? entry.snapshot.accountProviderID?.systemImageName ?? "gauge.with.dots.needle.33percent")
-            } currentValueLabel: {
-                Text(entry.target.kind == .quota ? "\(Int(entry.target.remainingPercent ?? 0))" : "\(entry.target.resetCount ?? 0)")
+            if let progress = entry.target.progress(at: entry.date) {
+                Gauge(value: progress, in: 0...1) {
+                    Image(systemName: entry.snapshot.accountSymbolName
+                          ?? entry.snapshot.accountProviderID?.systemImageName ?? "gauge.with.dots.needle.33percent")
+                } currentValueLabel: {
+                    Text(entry.target.compactValueLabel)
+                }
+                .gaugeStyle(.accessoryCircularCapacity)
+            } else {
+                compactValue
             }
-            .gaugeStyle(.accessoryCircularCapacity)
         case .remaining:
-            VStack(spacing: 1) {
-                Image(systemName: entry.snapshot.accountSymbolName
-                      ?? entry.snapshot.accountProviderID?.systemImageName ?? "clock.arrow.circlepath")
-                Text(entry.target.kind == .quota ? "\(Int(entry.target.remainingPercent ?? 0))%"
-                     : "\(entry.target.resetCount ?? 0)")
-                    .font(.caption.bold()).minimumScaleFactor(0.65)
-            }
+            compactValue
         case .countdown, .detailed, .automatic:
-            VStack(spacing: 1) {
-                Image(systemName: "clock")
-                WidgetCountdown(expiry: entry.target.expiresAt)
-                    .font(.caption2.bold()).minimumScaleFactor(0.5)
+            if let expiresAt = entry.target.expiresAt {
+                VStack(spacing: 1) {
+                    Image(systemName: "clock")
+                    WidgetCountdown(expiry: expiresAt)
+                        .font(.caption2.bold()).minimumScaleFactor(0.5)
+                }
+            } else {
+                compactValue
             }
+        }
+    }
+
+    private var compactValue: some View {
+        VStack(spacing: 1) {
+            Image(systemName: entry.snapshot.accountSymbolName
+                  ?? entry.snapshot.accountProviderID?.systemImageName ?? "clock.arrow.circlepath")
+            Text(entry.target.compactValueLabel)
+                .font(.caption.bold()).minimumScaleFactor(0.45)
         }
     }
 }
@@ -825,18 +1761,27 @@ private struct LockInlineView: View {
                 switch entry.displayStyle {
                 case .remaining:
                     Text(entry.snapshot.resolvedAccountName)
-                    Text("· \(entry.target.valueLabel)")
+                    Text("· \(entry.target.condensedValueLabel)")
                 case .progress:
                     Text(entry.target.title)
-                    Text("· \(entry.target.valueLabel)")
+                    Text("· \(entry.target.condensedValueLabel)")
                 case .countdown:
                     Text(entry.target.title)
-                    Text("·")
-                    WidgetCountdown(expiry: entry.target.expiresAt)
+                    if let expiresAt = entry.target.expiresAt {
+                        Text("·")
+                        WidgetCountdown(expiry: expiresAt)
+                    } else {
+                        Text("· \(entry.target.condensedValueLabel)")
+                    }
                 case .automatic, .detailed:
                     Text(entry.snapshot.resolvedAccountName)
-                    Text("· \(entry.target.title) ·")
-                    WidgetCountdown(expiry: entry.target.expiresAt)
+                    Text("· \(entry.target.title)")
+                    if let expiresAt = entry.target.expiresAt {
+                        Text("·")
+                        WidgetCountdown(expiry: expiresAt)
+                    } else {
+                        Text("· \(entry.target.condensedValueLabel)")
+                    }
                 }
             }
         } icon: {
@@ -858,25 +1803,33 @@ private struct LockRectangularView: View {
             VStack(alignment: .leading, spacing: 2) {
                 LockAccountHeader(snapshot: entry.snapshot)
                 Text(entry.target.title).font(.caption2).lineLimit(1)
-                WidgetCountdown(expiry: entry.target.expiresAt)
-                    .font(.headline.monospacedDigit()).minimumScaleFactor(0.65)
+                if let expiresAt = entry.target.expiresAt {
+                    WidgetCountdown(expiry: expiresAt)
+                        .font(.headline.monospacedDigit()).minimumScaleFactor(0.65)
+                } else {
+                    Text(entry.target.condensedValueLabel).font(.headline).lineLimit(1)
+                }
             }
         case .remaining:
             VStack(alignment: .leading, spacing: 2) {
                 LockAccountHeader(snapshot: entry.snapshot)
                 Text(entry.target.title).font(.caption2).lineLimit(1)
-                Text(entry.target.valueLabel).font(.headline).lineLimit(1)
+                Text(entry.target.condensedValueLabel).font(.headline).lineLimit(1)
             }
         case .progress:
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
                     Text(entry.target.title).font(.caption).lineLimit(1)
                     Spacer()
-                    Text(entry.target.valueLabel).font(.caption.bold())
+                    Text(entry.target.condensedValueLabel).font(.caption.bold())
                 }
-                ProgressView(value: entry.target.progress(at: entry.date), total: 1)
-                WidgetCountdown(expiry: entry.target.expiresAt)
-                    .font(.caption2.monospacedDigit()).frame(maxWidth: .infinity, alignment: .trailing)
+                if let progress = entry.target.progress(at: entry.date) {
+                    ProgressView(value: progress, total: 1)
+                }
+                if let expiresAt = entry.target.expiresAt {
+                    WidgetCountdown(expiry: expiresAt)
+                        .font(.caption2.monospacedDigit()).frame(maxWidth: .infinity, alignment: .trailing)
+                }
             }
         case .automatic, .detailed:
             VStack(alignment: .leading, spacing: 2) {
@@ -884,10 +1837,15 @@ private struct LockRectangularView: View {
                 HStack {
                     Text(entry.target.title).font(.caption).lineLimit(1)
                     Spacer()
-                    Text(entry.target.valueLabel).font(.caption.bold()).lineLimit(1)
+                    Text(entry.target.condensedValueLabel).font(.caption.bold()).lineLimit(1)
                 }
-                WidgetCountdown(expiry: entry.target.expiresAt)
-                    .font(.headline.monospacedDigit()).minimumScaleFactor(0.65)
+                if let expiresAt = entry.target.expiresAt {
+                    WidgetCountdown(expiry: expiresAt)
+                        .font(.headline.monospacedDigit()).minimumScaleFactor(0.65)
+                } else {
+                    Text(entry.target.condensedValueLabel)
+                        .font(.caption.monospacedDigit()).lineLimit(1).minimumScaleFactor(0.65)
+                }
             }
         }
     }

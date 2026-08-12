@@ -1,4 +1,5 @@
 const MAX_PROVIDER_RESPONSE_BYTES = 1_048_576;
+const PROVIDER_REQUEST_TIMEOUT_MILLISECONDS = 20_000;
 const USER_AGENT = "WhenReset-Worker/1.0";
 const TRANSIENT_RETRY_FLOOR_SECONDS = 15 * 60;
 const RATE_LIMIT_RETRY_FLOOR_SECONDS = 30 * 60;
@@ -6,7 +7,8 @@ const CREDENTIAL_ERROR_RETRY_FLOOR_SECONDS = 6 * 60 * 60;
 const MAX_PROVIDER_RETRY_SECONDS = 8 * 60 * 60;
 
 export type ProviderID = "chatgpt" | "claude" | "grok" | "kimi" | "github_copilot" | "zai" | "minimax"
-  | "synthetic" | "warp" | "openai_api" | "anthropic_api";
+  | "synthetic" | "warp" | "openai_api" | "anthropic_api" | "openrouter" | "fireworks"
+  | "deepseek" | "poe";
 export type WindowKind = "fiveHour" | "weekly" | "additional";
 
 export type ProviderCredentials = {
@@ -65,6 +67,8 @@ export type ProviderAPIBalance = {
   period_end: number | null;
   access_expires_at: number | null;
   is_unlimited: boolean;
+  kind?: "budget" | "wallet";
+  unit_label?: string | null;
 };
 
 export type ProviderFetchResult = {
@@ -116,6 +120,10 @@ export async function fetchProviderUsage(
     case "warp": return fetchWarp(account, originalCredentials, now);
     case "openai_api": return fetchOpenAIAPI(account, originalCredentials, now);
     case "anthropic_api": return fetchAnthropicAPI(account, originalCredentials, now);
+    case "openrouter": return fetchOpenRouter(account, originalCredentials, now);
+    case "fireworks": return fetchFireworks(account, originalCredentials, now);
+    case "deepseek": return fetchDeepSeek(account, originalCredentials, now);
+    case "poe": return fetchPoe(account, originalCredentials, now);
   }
 }
 
@@ -320,6 +328,233 @@ async function fetchAnthropicAPI(
   return { credentials, snapshot: result };
 }
 
+async function fetchOpenRouter(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const value = await getJSON("https://openrouter.ai/api/v1/key", {
+    authorization: `Bearer ${credentials.access_token}`,
+    accept: "application/json",
+    "user-agent": USER_AGENT,
+  });
+  const parsed = openRouterAPIBalance(value, now);
+  const result = snapshot(
+    account.provider_id,
+    parsed.freeTier ? "Free tier" : account.plan,
+    now,
+    [],
+    0,
+    [],
+  );
+  result.api_balance = parsed.balance;
+  return {
+    credentials,
+    snapshot: result,
+    account_identity: parsed.creatorUserID ? `creator:${parsed.creatorUserID}` : undefined,
+  };
+}
+
+function openRouterAPIBalance(value: unknown, now: number): {
+  balance: ProviderAPIBalance;
+  creatorUserID: string | null;
+  freeTier: boolean;
+} {
+  const root = requiredRecord(value, "OpenRouter returned unreadable API key data.");
+  const data = asRecord(root.data);
+  if (!data) throw new ProviderFetchError("OpenRouter returned unreadable API key data.");
+  const rawLimit = number(data.limit);
+  const limit = rawLimit !== null && rawLimit >= 0 ? rawLimit : null;
+  const rawRemaining = number(data.limit_remaining);
+  const reset = text(data.limit_reset)?.toLowerCase() ?? null;
+  const period = apiKeyResetPeriod(reset, now);
+  const periodUsage = reset === "daily" ? number(data.usage_daily)
+    : reset === "weekly" ? number(data.usage_weekly)
+    : reset === "monthly" ? number(data.usage_monthly)
+    : number(data.usage);
+  const spent = limit !== null && rawRemaining !== null
+    ? Math.max(0, limit - rawRemaining)
+    : Math.max(0, periodUsage ?? 0);
+  if (limit === null && periodUsage === null && rawRemaining === null) {
+    throw new ProviderFetchError("OpenRouter returned unreadable API key usage.");
+  }
+  const remaining = limit === null ? null
+    : Math.min(limit, Math.max(0, rawRemaining ?? limit - spent));
+  const resetTitle = reset === "daily" ? "Daily" : reset === "weekly" ? "Weekly"
+    : reset === "monthly" ? "Monthly" : null;
+  return {
+    balance: {
+      title: limit === null ? "API key usage"
+        : resetTitle ? `${resetTitle} API key limit` : "API key spending limit",
+      currency_code: "USD",
+      spent,
+      limit,
+      remaining,
+      period_start: period?.start ?? null,
+      period_end: period?.end ?? null,
+      access_expires_at: timestamp(data.expires_at),
+      is_unlimited: limit === null,
+      kind: "budget",
+    },
+    creatorUserID: text(data.creator_user_id),
+    freeTier: data.is_free_tier === true,
+  };
+}
+
+async function fetchFireworks(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const accountID = fireworksAccountID(account.workspace_id);
+  if (!accountID) {
+    throw new ProviderFetchError("Fireworks account ID is missing or invalid.", 400);
+  }
+  const value = await getJSON(
+    `https://api.fireworks.ai/v1/accounts/${encodeURIComponent(accountID)}/quotas?pageSize=200`,
+    {
+      authorization: `Bearer ${credentials.access_token}`,
+      accept: "application/json",
+      "user-agent": USER_AGENT,
+    },
+  );
+  const result = snapshot(account.provider_id, account.plan, now, [], 0, []);
+  result.api_balance = fireworksAPIBalance(value, credentials.monthly_budget ?? null, now);
+  return {
+    credentials,
+    snapshot: result,
+    // A successful authenticated request verifies that this key can access the official
+    // Fireworks account resource used as the quota scope.
+    account_identity: `account:${accountID}`,
+  };
+}
+
+function fireworksAccountID(value: string): string | null {
+  return normalizeFireworksAccountResource(value)?.slice("accounts/".length) ?? null;
+}
+
+export function normalizeFireworksAccountResource(value: string): string | null {
+  const trimmed = value.trim();
+  const identifier = trimmed.startsWith("accounts/") ? trimmed.slice("accounts/".length) : trimmed;
+  return /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(identifier)
+    ? `accounts/${identifier}`
+    : null;
+}
+
+function fireworksAPIBalance(
+  value: unknown,
+  fallbackBudget: number | null,
+  now: number,
+): ProviderAPIBalance {
+  const root = requiredRecord(value, "Fireworks returned unreadable quota data.");
+  const quotas = asRecords(root.quotas);
+  if (!quotas) throw new ProviderFetchError("Fireworks returned unreadable quota data.");
+  const quota = quotas.find((candidate) => {
+    const name = text(candidate.name)?.toLowerCase().replaceAll("_", "-") ?? "";
+    const leaf = name.split("/").at(-1) ?? name;
+    return leaf === "monthly-spend-usd"
+      || (leaf.includes("monthly") && leaf.includes("spend") && leaf.includes("usd"));
+  });
+  if (!quota) throw new ProviderFetchError("Fireworks returned no monthly spending quota.");
+  const rawSpent = currencyNumber(quota.usage);
+  if (rawSpent === null || rawSpent < 0) {
+    throw new ProviderFetchError("Fireworks returned unreadable monthly spending usage.");
+  }
+  const configured = currencyNumber(quota.value) ?? currencyNumber(quota.maxValue);
+  const limit = configured !== null && configured >= 0 ? configured
+    : fallbackBudget !== null && fallbackBudget > 0 ? fallbackBudget : null;
+  const period = utcMonthPeriod(now);
+  return {
+    title: limit === null ? "API spend this month" : "Monthly API budget",
+    currency_code: "USD",
+    spent: rawSpent,
+    limit,
+    remaining: limit === null ? null : Math.max(0, limit - rawSpent),
+    period_start: period.start,
+    period_end: period.end,
+    access_expires_at: null,
+    is_unlimited: limit === null,
+    kind: "budget",
+  };
+}
+
+async function fetchDeepSeek(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const value = await getJSON("https://api.deepseek.com/user/balance", {
+    authorization: `Bearer ${credentials.access_token}`,
+    accept: "application/json",
+    "user-agent": USER_AGENT,
+  });
+  const result = snapshot(account.provider_id, account.plan, now, [], 0, []);
+  result.api_balance = deepSeekAPIBalance(value);
+  return { credentials, snapshot: result };
+}
+
+function deepSeekAPIBalance(value: unknown): ProviderAPIBalance {
+  const root = requiredRecord(value, "DeepSeek returned unreadable balance data.");
+  const balances = asRecords(root.balance_infos);
+  if (!balances?.length) throw new ProviderFetchError("DeepSeek returned no API balance.");
+  const selected = balances.find((item) => text(item.currency)?.toUpperCase() === "USD")
+    ?? balances.find((item) => text(item.currency)?.toUpperCase() === "CNY")
+    ?? balances[0];
+  const remaining = currencyNumber(selected.total_balance);
+  const currency = text(selected.currency)?.toUpperCase();
+  if (remaining === null || remaining < 0 || !currency || !/^[A-Z]{3}$/.test(currency)) {
+    throw new ProviderFetchError("DeepSeek returned unreadable balance data.");
+  }
+  return {
+    title: "API wallet balance",
+    currency_code: currency,
+    spent: 0,
+    limit: null,
+    remaining,
+    period_start: null,
+    period_end: null,
+    access_expires_at: null,
+    is_unlimited: false,
+    kind: "wallet",
+  };
+}
+
+async function fetchPoe(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const value = await getJSON("https://api.poe.com/usage/current_balance", {
+    authorization: `Bearer ${credentials.access_token}`,
+    accept: "application/json",
+    "user-agent": USER_AGENT,
+  });
+  const result = snapshot(account.provider_id, account.plan, now, [], 0, []);
+  result.api_balance = poeAPIBalance(value);
+  return { credentials, snapshot: result };
+}
+
+function poeAPIBalance(value: unknown): ProviderAPIBalance {
+  const root = requiredRecord(value, "Poe returned unreadable point balance data.");
+  const remaining = number(root.current_point_balance);
+  if (remaining === null || remaining < 0) {
+    throw new ProviderFetchError("Poe returned unreadable point balance data.");
+  }
+  return {
+    title: "API point balance",
+    currency_code: "POINTS",
+    spent: 0,
+    limit: null,
+    remaining,
+    period_start: null,
+    period_end: null,
+    access_expires_at: null,
+    is_unlimited: false,
+    kind: "wallet",
+    unit_label: "points",
+  };
+}
+
 type BillingPeriod = { start: number; end: number };
 
 function utcMonthPeriod(now: number): BillingPeriod {
@@ -327,6 +562,22 @@ function utcMonthPeriod(now: number): BillingPeriod {
   const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1) / 1_000;
   const end = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1) / 1_000;
   return { start, end };
+}
+
+function apiKeyResetPeriod(reset: string | null, now: number): BillingPeriod | null {
+  const date = new Date(now * 1_000);
+  if (reset === "daily") {
+    const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) / 1_000;
+    return { start, end: start + 86_400 };
+  }
+  if (reset === "weekly") {
+    const daysSinceMonday = (date.getUTCDay() + 6) % 7;
+    const start = Date.UTC(
+      date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - daysSinceMonday,
+    ) / 1_000;
+    return { start, end: start + 7 * 86_400 };
+  }
+  return reset === "monthly" ? utcMonthPeriod(now) : null;
 }
 
 function openAIAPIBalance(
@@ -393,6 +644,7 @@ function apiBalance(
     period_end: period.end,
     access_expires_at: null,
     is_unlimited: false,
+    kind: "budget",
   };
 }
 
@@ -1188,7 +1440,9 @@ async function requestJSON(url: string, init: RequestInit): Promise<unknown> {
     // The Workers runtime supports manual redirect handling, but intentionally rejects
     // `redirect: "error"` before issuing the request. Never follow redirects here because an
     // Authorization header must not be forwarded to an unexpected origin.
-    response = await fetch(url, { ...init, redirect: "manual" });
+    const timeout = AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MILLISECONDS);
+    const signal = init.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+    response = await fetch(url, { ...init, signal, redirect: "manual" });
   } catch {
     throw new ProviderFetchError("Provider request failed.", 0, true);
   }
@@ -1415,6 +1669,7 @@ export const providerTesting = {
   anthropicAPIBalance,
   chatGPTWindow,
   fallbackResetCreditID,
+  fireworksAPIBalance,
   grokBilling,
   grokTierPlan,
   jwtExpiration,
@@ -1423,7 +1678,10 @@ export const providerTesting = {
   quotaFromUnknown,
   requestJSON,
   miniMaxWindow,
+  openRouterAPIBalance,
   openAIAPIBalance,
+  deepSeekAPIBalance,
+  poeAPIBalance,
   syntheticWindows,
   warpWindow,
   zaiWindow,

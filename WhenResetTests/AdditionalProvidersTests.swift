@@ -300,6 +300,184 @@ final class AdditionalProvidersTests: XCTestCase {
         XCTAssertThrowsError(try NewAPIProvider.normalizedBaseURL("https://key@api.example.com"))
     }
 
+    func testOpenRouterParsesResettingAPIKeyLimit() throws {
+        let data = Data(#"""
+        {
+          "data": {
+            "creator_user_id": "user_stable",
+            "is_free_tier": false,
+            "label": "sk-or-v1-example",
+            "limit": 100,
+            "limit_remaining": 74.5,
+            "limit_reset": "monthly",
+            "usage": 25.5,
+            "usage_monthly": 25.5,
+            "expires_at": "2030-12-31T23:59:59Z"
+          }
+        }
+        """#.utf8)
+        let account = makeAccount(.openRouter, name: "OpenRouter account")
+
+        let snapshot = try OpenRouterProvider.parseUsage(account: account, data: data, now: now)
+
+        XCTAssertEqual(snapshot.apiBalance?.title, "Monthly API key limit")
+        XCTAssertEqual(snapshot.apiBalance?.spent, 25.5)
+        XCTAssertEqual(snapshot.apiBalance?.remaining, 74.5)
+        XCTAssertEqual(snapshot.apiBalance?.limit, 100)
+        XCTAssertEqual(snapshot.apiBalance?.kind, .budget)
+        XCTAssertNotNil(snapshot.apiBalance?.periodEnd)
+        XCTAssertNotNil(snapshot.apiBalance?.accessExpiresAt)
+        XCTAssertTrue(snapshot.usageWindows.isEmpty)
+    }
+
+    func testOpenRouterStableIdentityUsesCreatorUserID() throws {
+        let data = Data(#"""
+        {"data":{"creator_user_id":"user_stable","usage":1,"limit":10}}
+        """#.utf8)
+        let credentials = AccountCredentials(
+            accessToken: "sk-or-v1-example-value",
+            refreshToken: "",
+            idToken: ""
+        )
+
+        let identity = try OpenRouterProvider.linkedIdentity(
+            data: data,
+            credentials: credentials
+        )
+
+        XCTAssertEqual(identity.workspaceID, "openrouter-user-360ebab8c18fb2b3")
+        XCTAssertFalse(identity.workspaceID.contains("user_stable"))
+        XCTAssertEqual(identity.credentials, credentials)
+    }
+
+    func testOpenRouterRepresentsKeyWithoutSpendingLimitAsUnlimited() throws {
+        let data = Data(#"""
+        {"data":{"creator_user_id":"user_stable","usage":12.5,"limit":null,"limit_remaining":null}}
+        """#.utf8)
+        let snapshot = try OpenRouterProvider.parseUsage(
+            account: makeAccount(.openRouter, name: "OpenRouter account"),
+            data: data,
+            now: now
+        )
+
+        XCTAssertTrue(snapshot.apiBalance?.isUnlimited == true)
+        XCTAssertNil(snapshot.apiBalance?.limit)
+        XCTAssertNil(snapshot.apiBalance?.remaining)
+        XCTAssertEqual(snapshot.apiBalance?.spent, 12.5)
+    }
+
+    func testFireworksDiscoversOfficialAccountIdentity() throws {
+        let data = Data(#"""
+        {
+          "accounts": [{
+            "name": "accounts/team-alpha",
+            "displayName": "Production AI",
+            "email": "owner@example.com"
+          }],
+          "totalSize": 1
+        }
+        """#.utf8)
+        let profile = try FireworksAIProvider.parseSingleAccount(data)
+        let credentials = AccountCredentials(
+            accessToken: "fireworks-example-key",
+            refreshToken: "",
+            idToken: "",
+            projectID: profile.resourceName
+        )
+        let identity = FireworksAIProvider.linkedIdentity(
+            profile: profile,
+            credentials: credentials
+        )
+
+        XCTAssertEqual(profile.resourceName, "accounts/team-alpha")
+        XCTAssertEqual(profile.displayName, "Production AI")
+        XCTAssertEqual(identity.workspaceID, "accounts/team-alpha")
+        XCTAssertEqual(identity.email, "owner@example.com")
+    }
+
+    func testFireworksRequiresAccountIDWhenKeyExposesMultipleAccounts() throws {
+        let data = Data(#"""
+        {"accounts":[{"name":"accounts/one"},{"name":"accounts/two"}]}
+        """#.utf8)
+
+        XCTAssertThrowsError(try FireworksAIProvider.parseSingleAccount(data)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("multiple Fireworks accounts"))
+        }
+        XCTAssertEqual(try FireworksAIProvider.normalizedAccountID("accounts/team-alpha"),
+                       "team-alpha")
+        XCTAssertThrowsError(try FireworksAIProvider.normalizedAccountID("../team-alpha"))
+        XCTAssertThrowsError(try FireworksAIProvider.normalizedAccountID(".."))
+        XCTAssertThrowsError(try FireworksAIProvider.normalizedAccountID(".team-alpha"))
+        XCTAssertThrowsError(try FireworksAIProvider.normalizedAccountID("-team-alpha"))
+    }
+
+    func testFireworksParsesMonthlySpendingQuota() throws {
+        let data = Data(#"""
+        {
+          "quotas": [{
+            "name": "monthly-spend-usd",
+            "value": "200",
+            "maxValue": "5000",
+            "usage": 72.25,
+            "updateTime": "2030-01-01T00:00:00Z"
+          }]
+        }
+        """#.utf8)
+        let snapshot = try FireworksAIProvider.parseUsage(
+            account: makeAccount(.fireworksAI, name: "Fireworks AI account"),
+            data: data,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.apiBalance?.title, "Monthly API budget")
+        XCTAssertEqual(snapshot.apiBalance?.spent, 72.25)
+        XCTAssertEqual(snapshot.apiBalance?.limit, 200)
+        XCTAssertEqual(snapshot.apiBalance?.remaining, 127.75)
+        XCTAssertEqual(snapshot.apiBalance?.kind, .budget)
+    }
+
+    func testDeepSeekParsesWalletBalanceWithoutInventingReset() throws {
+        let data = Data(#"""
+        {
+          "is_available": true,
+          "balance_infos": [
+            {"currency":"CNY","total_balance":"110.00"},
+            {"currency":"USD","total_balance":"42.75","granted_balance":"2.75"}
+          ]
+        }
+        """#.utf8)
+        let snapshot = try DeepSeekProvider.parseUsage(
+            account: makeAccount(.deepSeek, name: "DeepSeek API account"),
+            data: data,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.apiBalance?.title, "API wallet balance")
+        XCTAssertEqual(snapshot.apiBalance?.remaining, 42.75)
+        XCTAssertEqual(snapshot.apiBalance?.currencyCode, "USD")
+        XCTAssertEqual(snapshot.apiBalance?.kind, .wallet)
+        XCTAssertNil(snapshot.apiBalance?.limit)
+        XCTAssertNil(snapshot.apiBalance?.periodEnd)
+        XCTAssertTrue(snapshot.usageWindows.isEmpty)
+    }
+
+    func testPoeParsesPointWalletWithoutCurrencyOrReset() throws {
+        let data = Data(#"{"current_point_balance":295932027}"#.utf8)
+        let snapshot = try PoeProvider.parseUsage(
+            account: makeAccount(.poe, name: "Poe API account"),
+            data: data,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.apiBalance?.title, "API point balance")
+        XCTAssertEqual(snapshot.apiBalance?.remaining, 295_932_027)
+        XCTAssertEqual(snapshot.apiBalance?.kind, .wallet)
+        XCTAssertEqual(snapshot.apiBalance?.unitLabel, "points")
+        XCTAssertNil(snapshot.apiBalance?.limit)
+        XCTAssertNil(snapshot.apiBalance?.periodEnd)
+        XCTAssertTrue(snapshot.usageWindows.isEmpty)
+    }
+
     func testGrokParsesCurrentWeeklyCreditPeriod() throws {
         let data = Data(#"""
         {
@@ -430,6 +608,10 @@ final class AdditionalProvidersTests: XCTestCase {
         XCTAssertTrue(ProviderID.openAIAPI.supportsOffDeviceMonitoring)
         XCTAssertTrue(ProviderID.anthropicAPI.supportsOffDeviceMonitoring)
         XCTAssertFalse(ProviderID.newAPI.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.openRouter.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.fireworksAI.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.deepSeek.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.poe.supportsOffDeviceMonitoring)
     }
 
     func testOlderCredentialPayloadStillDecodes() throws {
@@ -443,6 +625,16 @@ final class AdditionalProvidersTests: XCTestCase {
         XCTAssertNil(credentials.oauthClientSecret)
         XCTAssertNil(credentials.monthlyBudget)
         XCTAssertNil(credentials.currencyCode)
+    }
+
+    func testOlderBalancePayloadStillDecodesWithoutSemanticKind() throws {
+        let data = Data(#"""
+        {"title":"API spend","currencyCode":"USD","spent":3,"isUnlimited":false}
+        """#.utf8)
+        let balance = try JSONDecoder().decode(APIBalance.self, from: data)
+
+        XCTAssertNil(balance.kind)
+        XCTAssertNil(balance.unitLabel)
     }
 
     private func makeAccount(_ provider: ProviderID, name: String) -> MonitoredAccount {

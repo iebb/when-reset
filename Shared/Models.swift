@@ -16,6 +16,10 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     case openAIAPI = "openai_api"
     case anthropicAPI = "anthropic_api"
     case newAPI = "new_api"
+    case openRouter = "openrouter"
+    case fireworksAI = "fireworks"
+    case deepSeek = "deepseek"
+    case poe = "poe"
 
     var displayName: String {
         switch self {
@@ -34,6 +38,10 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .openAIAPI: "OpenAI API"
         case .anthropicAPI: "Anthropic API"
         case .newAPI: "New API-compatible"
+        case .openRouter: "OpenRouter"
+        case .fireworksAI: "Fireworks AI"
+        case .deepSeek: "DeepSeek API"
+        case .poe: "Poe API"
         }
     }
 
@@ -90,6 +98,10 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .openAIAPI: "Organization API spend and budget balance"
         case .anthropicAPI: "Organization API spend and budget balance"
         case .newAPI: "API-key balance from a compatible gateway"
+        case .openRouter: "API-key spending limit and reset"
+        case .fireworksAI: "Monthly API spend limit"
+        case .deepSeek: "Available API wallet balance"
+        case .poe: "Available API point balance"
         }
     }
 
@@ -104,7 +116,8 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .miniMax: "MiniMaxLogo"
         case .openAIAPI: "ChatGPTLogo"
         case .anthropicAPI: "ClaudeLogo"
-        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI, .newAPI: nil
+        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI, .newAPI,
+             .openRouter, .fireworksAI, .deepSeek, .poe: nil
         }
     }
 
@@ -124,6 +137,10 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .openAIAPI: "dollarsign.gauge.chart.lefthalf.righthalf"
         case .anthropicAPI: "dollarsign.gauge.chart.lefthalf.righthalf"
         case .newAPI: "creditcard.fill"
+        case .openRouter: "arrow.triangle.branch"
+        case .fireworksAI: "fireworks"
+        case .deepSeek: "water.waves"
+        case .poe: "bubble.left.and.bubble.right.fill"
         }
     }
 }
@@ -777,6 +794,11 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
     )
 }
 
+enum APIBalanceKind: String, Codable, Hashable, Sendable {
+    case budget
+    case wallet
+}
+
 struct APIBalance: Codable, Hashable, Sendable {
     var title: String
     var currencyCode: String
@@ -787,6 +809,8 @@ struct APIBalance: Codable, Hashable, Sendable {
     var periodEnd: Date? = nil
     var accessExpiresAt: Date? = nil
     var isUnlimited = false
+    var kind: APIBalanceKind? = nil
+    var unitLabel: String? = nil
 
     var fractionRemaining: Double? {
         guard !isUnlimited, let limit, limit > 0, let remaining else { return nil }

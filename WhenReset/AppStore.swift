@@ -367,6 +367,10 @@ final class AppStore {
     private let openAIAPIProvider = OpenAIAPIProvider()
     private let anthropicAPIProvider = AnthropicAPIProvider()
     private let newAPIProvider = NewAPIProvider()
+    private let openRouterProvider = OpenRouterProvider()
+    private let fireworksAIProvider = FireworksAIProvider()
+    private let deepSeekProvider = DeepSeekProvider()
+    private let poeProvider = PoeProvider()
     private var chatGPTLink: DeviceLink?
     private var grokLink: GrokDeviceLink?
     private var kimiLink: KimiDeviceLink?
@@ -818,7 +822,8 @@ final class AppStore {
                 deviceLink = .init(providerID: .githubCopilot, verificationURL: link.verificationURL,
                                    userCode: link.userCode, expiresAt: link.expiresAt)
             case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
-                 .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI:
+                 .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI,
+                 .openRouter, .fireworksAI, .deepSeek, .poe:
                 throw ProviderError.server(400, "This provider does not use device linking.")
             }
         } catch {
@@ -849,7 +854,8 @@ final class AppStore {
                 guard let copilotLink else { throw ProviderError.invalidResponse }
                 identity = try await copilotProvider.finishLink(copilotLink)
             case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
-                 .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI:
+                 .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI,
+                 .openRouter, .fireworksAI, .deepSeek, .poe:
                 throw ProviderError.invalidResponse
             }
             if let relinkingAccount, relinkingAccount.isRemoteOnly {
@@ -865,8 +871,7 @@ final class AppStore {
                                                 replacing: relinkingAccount)
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             clearPendingLinks(); isLinking = false
-            await refresh(account, source: .accountLink)
-            return true
+            return await finishAccountLinkRefresh(account)
         } catch is CancellationError {
             // Preserve the still-valid device code so the UI can resume polling or explicitly
             // start over. Closing the linking view calls cancelLink(), which clears it.
@@ -889,7 +894,9 @@ final class AppStore {
             throw ProviderError.server(400, "The remote Worker account is no longer available.")
         }
         var verifiedAccount = account
-        verifiedAccount.workspaceID = identity.workspaceID
+        // Keep the Worker's existing account scope. Stable-identity providers verify the new
+        // credential against the prior opaque account reference; providers without a stable
+        // identity can rotate keys without turning a key fingerprint into a workspace change.
         verifiedAccount.displayName = identity.displayName
         verifiedAccount.mergeProviderDetails(identity.accountDetails)
         let result = try await PushServerClient.uploadAccount(
@@ -921,11 +928,19 @@ final class AppStore {
         isLinking = true; errorMessage = nil
         do {
             let identity = try await claudeProvider.finishLink(claudeLink, pastedCode: code)
+            if let relinkingAccount, relinkingAccount.isRemoteOnly {
+                try await replaceRemoteWorkerCredential(
+                    for: relinkingAccount,
+                    identity: identity,
+                    providerID: .claude
+                )
+                self.claudeLink = nil; isLinking = false
+                return true
+            }
             let account = try saveLinkedAccount(identity, providerID: .claude, replacing: relinkingAccount)
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             self.claudeLink = nil; isLinking = false
-            await refresh(account, source: .accountLink)
-            return true
+            return await finishAccountLinkRefresh(account)
         } catch {
             errorMessage = error.localizedDescription; isLinking = false
             return false
@@ -937,11 +952,19 @@ final class AppStore {
         isLinking = true; errorMessage = nil
         do {
             let identity = try await zaiProvider.link(apiKey: apiKey)
+            if let relinkingAccount, relinkingAccount.isRemoteOnly {
+                try await replaceRemoteWorkerCredential(
+                    for: relinkingAccount,
+                    identity: identity,
+                    providerID: .zai
+                )
+                isLinking = false
+                return true
+            }
             let account = try saveLinkedAccount(identity, providerID: .zai, replacing: relinkingAccount)
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             isLinking = false
-            await refresh(account, source: .accountLink)
-            return true
+            return await finishAccountLinkRefresh(account)
         } catch {
             errorMessage = error.localizedDescription
             isLinking = false
@@ -954,11 +977,19 @@ final class AppStore {
         isLinking = true; errorMessage = nil
         do {
             let identity = try await miniMaxProvider.link(apiKey: apiKey)
+            if let relinkingAccount, relinkingAccount.isRemoteOnly {
+                try await replaceRemoteWorkerCredential(
+                    for: relinkingAccount,
+                    identity: identity,
+                    providerID: .miniMax
+                )
+                isLinking = false
+                return true
+            }
             let account = try saveLinkedAccount(identity, providerID: .miniMax, replacing: relinkingAccount)
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             isLinking = false
-            await refresh(account, source: .accountLink)
-            return true
+            return await finishAccountLinkRefresh(account)
         } catch {
             errorMessage = error.localizedDescription
             isLinking = false
@@ -1023,8 +1054,7 @@ final class AppStore {
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             self.antigravityLink = nil
             isLinking = false
-            await refresh(account, source: .accountLink)
-            return true
+            return await finishAccountLinkRefresh(account)
         } catch {
             errorMessage = error.localizedDescription
             isLinking = false
@@ -1092,6 +1122,47 @@ final class AppStore {
         }
     }
 
+    @discardableResult
+    func addOpenRouterAccount(
+        apiKey: String,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .openRouter, replacing: relinkingAccount) {
+            try await self.openRouterProvider.link(apiKey: apiKey)
+        }
+    }
+
+    @discardableResult
+    func addFireworksAIAccount(
+        apiKey: String,
+        accountID: String?,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .fireworksAI, replacing: relinkingAccount) {
+            try await self.fireworksAIProvider.link(apiKey: apiKey, accountID: accountID)
+        }
+    }
+
+    @discardableResult
+    func addDeepSeekAccount(
+        apiKey: String,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .deepSeek, replacing: relinkingAccount) {
+            try await self.deepSeekProvider.link(apiKey: apiKey)
+        }
+    }
+
+    @discardableResult
+    func addPoeAccount(
+        apiKey: String,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .poe, replacing: relinkingAccount) {
+            try await self.poeProvider.link(apiKey: apiKey)
+        }
+    }
+
     private func addLinkedIdentity(
         providerID: ProviderID,
         replacing relinkingAccount: MonitoredAccount?,
@@ -1101,6 +1172,15 @@ final class AppStore {
         errorMessage = nil
         do {
             let identity = try await link()
+            if let relinkingAccount, relinkingAccount.isRemoteOnly {
+                try await replaceRemoteWorkerCredential(
+                    for: relinkingAccount,
+                    identity: identity,
+                    providerID: providerID
+                )
+                isLinking = false
+                return true
+            }
             let account = try saveLinkedAccount(
                 identity,
                 providerID: providerID,
@@ -1108,13 +1188,18 @@ final class AppStore {
             )
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             isLinking = false
-            await refresh(account, source: .accountLink)
-            return true
+            return await finishAccountLinkRefresh(account)
         } catch {
             errorMessage = error.localizedDescription
             isLinking = false
             return false
         }
+    }
+
+    private func finishAccountLinkRefresh(_ account: MonitoredAccount) async -> Bool {
+        let requiresWorkerReplacement = isServerMonitoringEnabled(for: account)
+        let refreshed = await refresh(account, source: .accountLink)
+        return requiresWorkerReplacement ? refreshed : true
     }
 
     func cancelLink() {
@@ -1308,6 +1393,26 @@ final class AppStore {
                     account: effectiveAccount,
                     credentials: credentials
                 )
+            case .openRouter:
+                snapshot = try await openRouterProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
+            case .fireworksAI:
+                snapshot = try await fireworksAIProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
+            case .deepSeek:
+                snapshot = try await deepSeekProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
+            case .poe:
+                snapshot = try await poeProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
             }
             guard accounts.contains(where: { $0.id == account.id }) else { return false }
             mergeLatestPlan(snapshot.plan, for: account.id)
@@ -1354,7 +1459,24 @@ final class AppStore {
             }
             var account = accounts[index]
             try KeychainStore.save(identity.credentials, for: account.id)
-            account.workspaceID = identity.workspaceID
+            // A Worker-monitored account keeps its existing logical scope while a replacement
+            // credential is verified. This is essential for rotated keys whose providers expose
+            // no stable account identifier.
+            if !isServerMonitoringEnabled(for: account) {
+                account.workspaceID = identity.workspaceID
+            }
+            account.mergeProviderDetails(identity.accountDetails)
+            accounts[index] = account
+            refreshFailures.removeValue(forKey: account.id)
+            persistAccounts()
+            return account
+        }
+
+        if let index = accounts.firstIndex(where: {
+            $0.providerID == providerID && $0.workspaceID == identity.workspaceID
+        }) {
+            var account = accounts[index]
+            try KeychainStore.save(identity.credentials, for: account.id)
             account.mergeProviderDetails(identity.accountDetails)
             accounts[index] = account
             refreshFailures.removeValue(forKey: account.id)

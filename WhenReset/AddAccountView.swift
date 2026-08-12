@@ -28,6 +28,8 @@ struct AddAccountView: View {
     @State private var newAPIName = ""
     @State private var newAPIBaseURL = ""
     @State private var newAPIKey = ""
+    @State private var mainstreamAPIKey = ""
+    @State private var fireworksAccountID = ""
     @State private var isAddingDemo = false
     @State private var showingRemoteWorkerAccounts = false
     @State private var remoteWorkerAccountsMissingLocally: [RemoteWorkerAccountCandidate] = []
@@ -49,6 +51,14 @@ struct AddAccountView: View {
             _newAPIName = State(initialValue: savedCredentials?.accountLabel
                                 ?? relinkingAccount?.displayName ?? "")
             _newAPIBaseURL = State(initialValue: savedCredentials?.endpointURL ?? "")
+        }
+        if relinkingAccount?.providerID == .fireworksAI {
+            let remoteResource = relinkingAccount?.workspaceID.hasPrefix("accounts/") == true
+                ? relinkingAccount?.workspaceID : nil
+            let resource = savedCredentials?.projectID ?? remoteResource ?? ""
+            _fireworksAccountID = State(initialValue: resource.replacingOccurrences(
+                of: "accounts/", with: ""
+            ))
         }
     }
 
@@ -298,6 +308,8 @@ struct AddAccountView: View {
             anthropicAPILinker
         case .newAPI:
             newAPILinker
+        case .openRouter, .fireworksAI, .deepSeek, .poe:
+            mainstreamAPILinker(provider)
         }
     }
 
@@ -333,7 +345,8 @@ struct AddAccountView: View {
         case .githubCopilot:
             "Uses GitHub device authorization. Exact Copilot quotas come from an undocumented endpoint and may change."
         case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
-             .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI:
+             .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI,
+             .openRouter, .fireworksAI, .deepSeek, .poe:
             ""
         }
     }
@@ -706,6 +719,85 @@ struct AddAccountView: View {
             if store.isLinking { ProgressView("Checking API balance…") }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func mainstreamAPILinker(_ provider: ProviderID) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(mainstreamAPIHelp(provider))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            providerSecretField("\(provider.displayName) API key", text: $mainstreamAPIKey)
+            if provider == .fireworksAI {
+                TextField("Fireworks account ID (optional)", text: $fireworksAccountID)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(.body, design: .monospaced))
+                    .padding(14)
+                    .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+                Text("Leave the account ID empty when the API key can access exactly one account.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(relinkingAccount?.isRemoteOnly == true
+                 ? "The key is sent directly to your authenticated Worker to replace its encrypted copy. It is not stored on this device or returned by the Worker."
+                 : "The key is stored in iCloud Keychain. Server monitoring uploads it only after you separately confirm that account setting.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button {
+                completionTask = Task {
+                    let success = await addMainstreamAPIAccount(provider)
+                    if success { dismiss() }
+                }
+            } label: {
+                Label("Connect \(provider.displayName)", systemImage: provider.systemImageName)
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(mainstreamAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || store.isLinking)
+            if store.isLinking { ProgressView("Checking \(provider.displayName)…") }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func mainstreamAPIHelp(_ provider: ProviderID) -> String {
+        switch provider {
+        case .openRouter:
+            "When Reset reads this API key’s enforced spending limit, remaining amount, reset cadence, and expiry from OpenRouter."
+        case .fireworksAI:
+            "When Reset reads the account’s monthly API spending limit and usage from Fireworks AI."
+        case .deepSeek:
+            "When Reset reads the available DeepSeek API wallet balance. This is prepaid credit, not a resettable quota."
+        case .poe:
+            "When Reset reads the available Poe API point balance. Poe does not report a reset time for these points."
+        default:
+            ""
+        }
+    }
+
+    private func addMainstreamAPIAccount(_ provider: ProviderID) async -> Bool {
+        switch provider {
+        case .openRouter:
+            await store.addOpenRouterAccount(apiKey: mainstreamAPIKey,
+                                             replacing: relinkingAccount)
+        case .fireworksAI:
+            await store.addFireworksAIAccount(
+                apiKey: mainstreamAPIKey,
+                accountID: fireworksAccountID,
+                replacing: relinkingAccount
+            )
+        case .deepSeek:
+            await store.addDeepSeekAccount(apiKey: mainstreamAPIKey,
+                                           replacing: relinkingAccount)
+        case .poe:
+            await store.addPoeAccount(apiKey: mainstreamAPIKey,
+                                      replacing: relinkingAccount)
+        default:
+            false
+        }
     }
 
     private func parsedBudget(_ value: String) -> Double? {

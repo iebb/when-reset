@@ -452,14 +452,14 @@ struct AccountSettingsView: View {
                 )
                 if let balance = store.snapshots[account.id]?.apiBalance {
                     AccountInformationRow(
-                        title: balance.isUnlimited || balance.remaining != nil
-                            ? "API balance" : "API spend this month",
+                        title: balance.kind == .wallet
+                            ? balance.title
+                            : (balance.isUnlimited || balance.remaining != nil
+                               ? "API balance" : "API spend this month"),
                         value: balance.isUnlimited
                             ? "Unlimited"
-                            : APIBalanceRow.formatted(
-                                balance.remaining ?? balance.spent,
-                                currencyCode: balance.currencyCode
-                            )
+                            : APIBalanceRow.formattedValue(balance.remaining ?? balance.spent,
+                                                           balance: balance)
                     )
                     if let accessExpiresAt = balance.accessExpiresAt {
                         AccountInformationRow(
@@ -746,7 +746,8 @@ struct AccountSettingsView: View {
         switch currentAccount.providerID {
         case .chatGPT, .claude, .grok, .kimi:
             "this account’s access token, refresh token, and ID token when available"
-        case .zai, .miniMax, .synthetic, .warp:
+        case .zai, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
+             .deepSeek, .poe:
             "this account’s API key"
         case .openAIAPI, .anthropicAPI:
             "this account’s organization Admin API key and optional monthly budget"
@@ -1762,7 +1763,8 @@ private struct WorkerLinkReviewView: View {
         switch providerID {
         case .chatGPT, .claude, .grok, .kimi:
             "Access token, refresh token, and ID token when available"
-        case .zai, .miniMax, .synthetic, .warp:
+        case .zai, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
+             .deepSeek, .poe:
             "API key"
         case .openAIAPI, .anthropicAPI:
             "Organization Admin API key"
@@ -2141,10 +2143,12 @@ struct APIBalanceRow: View {
             }
 
             HStack(spacing: 8) {
-                Text("Spent \(Self.formatted(balance.spent, currencyCode: balance.currencyCode))")
-                if let limit = balance.limit, !balance.isUnlimited {
+                if balance.kind != .wallet {
+                    Text("Spent \(Self.formattedValue(balance.spent, balance: balance))")
+                }
+                if let limit = balance.limit, !balance.isUnlimited, balance.kind != .wallet {
                     Spacer()
-                    Text("Budget \(Self.formatted(limit, currencyCode: balance.currencyCode))")
+                    Text("Budget \(Self.formattedValue(limit, balance: balance))")
                 }
             }
             .font(.caption.monospacedDigit())
@@ -2165,7 +2169,7 @@ struct APIBalanceRow: View {
 
     private var primaryValue: String {
         if balance.isUnlimited { return "Unlimited" }
-        return Self.formatted(balance.remaining ?? balance.spent, currencyCode: balance.currencyCode)
+        return Self.formattedValue(balance.remaining ?? balance.spent, balance: balance)
     }
 
     private var primaryLabel: String {
@@ -2178,6 +2182,13 @@ struct APIBalanceRow: View {
             .currency(code: currencyCode.uppercased())
                 .precision(.fractionLength(2))
         )
+    }
+
+    static func formattedValue(_ amount: Double, balance: APIBalance) -> String {
+        if let unit = balance.unitLabel {
+            return "\(amount.formatted(.number.grouping(.automatic).precision(.fractionLength(0)))) \(unit)"
+        }
+        return formatted(amount, currencyCode: balance.currencyCode)
     }
 }
 

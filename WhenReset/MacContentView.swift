@@ -290,7 +290,7 @@ private struct MacAccountDetailView: View {
         let visibleWindows = MacUsagePresentation.visibleWindows(in: snapshot, settings: settings)
         let availableResetCount = MacUsagePresentation.availableResetCount(in: snapshot)
         let showsBankedResets = settings.showBankedResets && availableResetCount > 0
-        if visibleWindows.isEmpty && !showsBankedResets {
+        if visibleWindows.isEmpty && !showsBankedResets && snapshot.apiBalance == nil {
             ContentUnavailableView(
                 "No resettable limits reported",
                 systemImage: "checkmark.circle",
@@ -299,6 +299,9 @@ private struct MacAccountDetailView: View {
             .frame(maxWidth: .infinity, minHeight: 220)
         } else {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 260), spacing: 14)], spacing: 14) {
+                if let balance = snapshot.apiBalance {
+                    MacAPIBalanceCard(balance: balance)
+                }
                 ForEach(visibleWindows, id: \.metricID) { window in
                     MacUsageWindowCard(window: window)
                 }
@@ -369,6 +372,47 @@ private struct MacAccountDetailView: View {
             defer { isRefreshingAccount = false }
             _ = await store.refresh(account)
         }
+    }
+}
+
+private struct MacAPIBalanceCard: View {
+    let balance: APIBalance
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(balance.title).font(.headline)
+            Text(primaryValue)
+                .font(.title2.bold().monospacedDigit())
+            if let fraction = balance.fractionRemaining {
+                ProgressView(value: fraction, total: 1)
+                    .tint(fraction <= 0.1 ? .red : .green)
+            }
+            if balance.kind != .wallet {
+                HStack {
+                    Text("Spent \(formatted(balance.spent))")
+                    if let limit = balance.limit, !balance.isUnlimited {
+                        Spacer()
+                        Text("Limit \(formatted(limit))")
+                    }
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(.quaternary.opacity(0.45), in: .rect(cornerRadius: 14))
+        .accessibilityElement(children: .combine)
+    }
+
+    private var primaryValue: String {
+        balance.isUnlimited ? "Unlimited" : formatted(balance.remaining ?? balance.spent)
+    }
+
+    private func formatted(_ value: Double) -> String {
+        if let unit = balance.unitLabel {
+            return "\(value.formatted(.number.grouping(.automatic).precision(.fractionLength(0)))) \(unit)"
+        }
+        return value.formatted(.currency(code: balance.currencyCode.uppercased()))
     }
 }
 
@@ -1823,6 +1867,15 @@ private struct MacAddAccountView: View {
     init(relinkingAccount: MonitoredAccount? = nil) {
         self.relinkingAccount = relinkingAccount
         _selectedProvider = State(initialValue: relinkingAccount?.providerID)
+        if relinkingAccount?.providerID == .fireworksAI {
+            let credentials = relinkingAccount.flatMap { try? KeychainStore.load(for: $0.id) }
+            let remoteResource = relinkingAccount?.workspaceID.hasPrefix("accounts/") == true
+                ? relinkingAccount?.workspaceID : nil
+            let resource = credentials?.projectID ?? remoteResource ?? ""
+            _providerName = State(initialValue: resource.replacingOccurrences(
+                of: "accounts/", with: ""
+            ))
+        }
     }
 
     private var providers: [ProviderID] {
@@ -1922,7 +1975,8 @@ private struct MacAddAccountView: View {
             antigravityLinker
         case "compatible_api":
             compatibleLinker
-        case "zai", "minimax", "synthetic", "ollama_cloud", "warp":
+        case "zai", "minimax", "synthetic", "ollama_cloud", "warp", "openrouter",
+             "fireworks", "deepseek", "poe":
             apiKeyLinker(provider)
         default:
             ContentUnavailableView(
@@ -2074,8 +2128,12 @@ private struct MacAddAccountView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text(provider.rawValue == "ollama_cloud"
                  ? "Paste the Ollama Cloud browser session cookie. It is stored securely in iCloud Keychain."
-                 : "Paste the provider API key. It is stored securely in iCloud Keychain and is never shown again.")
+                 : apiKeyHelp(provider))
                 .foregroundStyle(.secondary)
+            if provider == .fireworksAI {
+                TextField("Fireworks account ID (optional)", text: $providerName)
+                    .textFieldStyle(.roundedBorder)
+            }
             SecureField(provider.rawValue == "ollama_cloud" ? "Session cookie" : "API key", text: $secret)
                 .textFieldStyle(.roundedBorder)
             Button("Connect \(provider.displayName)") {
@@ -2092,6 +2150,20 @@ private struct MacAddAccountView: View {
                                                                                       replacing: relinkingAccount)
                     case "warp": success = await store.addWarpAccount(apiKey: secret,
                                                                        replacing: relinkingAccount)
+                    case "openrouter": success = await store.addOpenRouterAccount(
+                        apiKey: secret, replacing: relinkingAccount
+                    )
+                    case "fireworks": success = await store.addFireworksAIAccount(
+                        apiKey: secret,
+                        accountID: providerName,
+                        replacing: relinkingAccount
+                    )
+                    case "deepseek": success = await store.addDeepSeekAccount(
+                        apiKey: secret, replacing: relinkingAccount
+                    )
+                    case "poe": success = await store.addPoeAccount(
+                        apiKey: secret, replacing: relinkingAccount
+                    )
                     default: success = false
                     }
                     if success { dismiss() }
@@ -2101,6 +2173,20 @@ private struct MacAddAccountView: View {
             .disabled(secret.isEmpty || store.isLinking)
             if store.isLinking { ProgressView("Checking account…") }
         }
+    }
+
+    private func apiKeyHelp(_ provider: ProviderID) -> String {
+        let purpose = switch provider {
+        case .openRouter: "read this key’s spending limit, usage, and reset cadence"
+        case .fireworksAI: "read the account’s monthly spending limit and usage"
+        case .deepSeek: "read the available API wallet balance"
+        case .poe: "read the available API point balance"
+        default: "read quota data"
+        }
+        if relinkingAccount?.isRemoteOnly == true {
+            return "Paste the provider API key. When Reset uses it only to \(purpose), then sends it directly to your authenticated Worker to replace its encrypted copy. It is not stored on this Mac or returned by the Worker."
+        }
+        return "Paste the provider API key. When Reset uses it only to \(purpose). It is stored securely in iCloud Keychain and is never shown again."
     }
 
     private func cancelLink() {
