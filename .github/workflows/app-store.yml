@@ -1,6 +1,9 @@
 name: App Store Release
 
 on:
+  push:
+    tags:
+      - testflight-*
   workflow_dispatch:
     inputs:
       platform:
@@ -31,7 +34,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        platform: ${{ fromJSON(inputs.platform == 'both' && '["ios", "macos"]' || format('["{0}"]', inputs.platform)) }}
+        platform: ${{ fromJSON(inputs.platform == 'both' && '["ios", "macos"]' || inputs.platform == 'macos' && '["macos"]' || '["ios"]') }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -113,7 +116,7 @@ jobs:
           plutil -insert destination -string upload "$export_options"
           plutil -insert signingStyle -string automatic "$export_options"
           plutil -insert teamID -string 7P8CLHDH5G "$export_options"
-          plutil -insert manageAppVersionAndBuildNumber -bool YES "$export_options"
+          plutil -insert manageAppVersionAndBuildNumber -bool NO "$export_options"
           plutil -insert uploadSymbols -bool YES "$export_options"
 
           PATH=/usr/bin:/bin:/usr/sbin:/sbin xcodebuild -exportArchive \
@@ -126,6 +129,24 @@ jobs:
             -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 
           echo "Uploaded ${{ matrix.platform }} archive to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Read archived iOS version
+        if: matrix.platform == 'ios'
+        run: |
+          marketing_version=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$archive_path/Info.plist")
+          build_number=$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' "$archive_path/Info.plist")
+          echo "MARKETING_VERSION=$marketing_version" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
+
+      - name: Add iOS build to Internal Testers
+        if: matrix.platform == 'ios'
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_BUNDLE_ID: ad.neko.when
+          TESTFLIGHT_GROUP_NAME: Internal Testers
+        run: ruby .github/scripts/assign-testflight-group.rb
 
       - name: Remove temporary credential
         if: always()

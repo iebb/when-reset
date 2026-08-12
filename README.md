@@ -53,7 +53,7 @@ The release workflow reads these encrypted GitHub Actions repository secrets:
 - `APP_STORE_CONNECT_ISSUER_ID`
 - `APP_STORE_CONNECT_PRIVATE_KEY`
 
-The private key exists only in the runner’s temporary directory for the duration of the job. Trigger `App Store Release` from the Actions tab and select `both`, `ios`, or `macos`.
+The private key exists only in the runner’s temporary directory for the duration of the job. Trigger `App Store Release` from the Actions tab and select `both`, `ios`, or `macos`. Pushing a `testflight-*` tag uploads iOS only. After Apple finishes processing the iOS build, the workflow adds it to the `Internal Testers` group.
 
 ## Provider notes
 

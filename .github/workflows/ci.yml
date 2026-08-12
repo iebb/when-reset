@@ -31,13 +31,29 @@ jobs:
 
       - name: Run iOS unit tests
         run: |
-          xcodebuild test \
-            -project WhenReset.xcodeproj \
-            -scheme WhenReset \
-            -configuration Debug \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest' \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData-iOS-Tests" \
-            -resultBundlePath "$RUNNER_TEMP/WhenResetTests.xcresult"
+          run_tests() {
+            local attempt="$1"
+            xcodebuild test \
+              -project WhenReset.xcodeproj \
+              -scheme WhenReset \
+              -configuration Debug \
+              -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest' \
+              -derivedDataPath "$RUNNER_TEMP/DerivedData-iOS-Tests" \
+              -resultBundlePath "$RUNNER_TEMP/WhenResetTests-${attempt}.xcresult"
+          }
+
+          set +e
+          run_tests 1
+          status=$?
+          set -e
+
+          if [[ "$status" -eq 70 ]]; then
+            echo "Xcode reported simulator infrastructure failure (exit 70); retrying once."
+            xcrun simctl shutdown all || true
+            run_tests 2
+          elif [[ "$status" -ne 0 ]]; then
+            exit "$status"
+          fi
 
       - name: Build iOS release configuration
         run: |
