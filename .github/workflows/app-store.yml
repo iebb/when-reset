@@ -177,6 +177,45 @@ jobs:
             CURRENT_PROJECT_VERSION='${{ needs.prepare.outputs.build_number }}' \
             "${platform_settings[@]}"
 
+          if [[ "$RELEASE_PLATFORM" == "macos" ]]; then
+            app_path="$archive_path/Products/Applications/WhenReset.app"
+            widget_path="$app_path/Contents/PlugIns/WhenResetWidgets.appex"
+            app_entitlements="$RUNNER_TEMP/WhenResetMac.xcent"
+            widget_entitlements="$RUNNER_TEMP/WhenResetWidgetsMac.xcent"
+            team_id=7P8CLHDH5G
+            app_bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app_path/Contents/Info.plist")
+            widget_bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$widget_path/Contents/Info.plist")
+
+            cp WhenReset/WhenResetMac.entitlements "$app_entitlements"
+            cp WhenResetWidgets/WhenResetWidgetsMac.entitlements "$widget_entitlements"
+
+            /usr/libexec/PlistBuddy -c 'Set :com.apple.developer.aps-environment production' "$app_entitlements"
+            /usr/libexec/PlistBuddy -c "Set :keychain-access-groups:0 ${team_id}.ad.neko.when.shared" "$app_entitlements"
+            /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string ${team_id}.${app_bundle_id}" "$app_entitlements"
+            /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $team_id" "$app_entitlements"
+            /usr/libexec/PlistBuddy -c "Add :com.apple.application-identifier string ${team_id}.${widget_bundle_id}" "$widget_entitlements"
+            /usr/libexec/PlistBuddy -c "Add :com.apple.developer.team-identifier string $team_id" "$widget_entitlements"
+
+            codesign --force --sign - --entitlements "$widget_entitlements" --generate-entitlement-der "$widget_path"
+            codesign --force --sign - --entitlements "$app_entitlements" --generate-entitlement-der "$app_path"
+            codesign --verify --deep --strict "$app_path"
+
+            for bundle in "$app_path" "$widget_path"; do
+              signed_entitlements="$RUNNER_TEMP/$(basename "$bundle").signed.xcent"
+              codesign -d --entitlements :- "$bundle" > "$signed_entitlements" 2>/dev/null
+              [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.app-sandbox' "$signed_entitlements")" == "true" ]]
+              [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.application-groups:0' "$signed_entitlements")" == "group.ad.neko.when" ]]
+              bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle/Contents/Info.plist")
+              [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.application-identifier' "$signed_entitlements")" == "${team_id}.${bundle_id}" ]]
+              [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.team-identifier' "$signed_entitlements")" == "$team_id" ]]
+            done
+
+            app_signed_entitlements="$RUNNER_TEMP/WhenReset.app.signed.xcent"
+            [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.security.network.client' "$app_signed_entitlements")" == "true" ]]
+            [[ "$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.aps-environment' "$app_signed_entitlements")" == "production" ]]
+            [[ "$(/usr/libexec/PlistBuddy -c 'Print :keychain-access-groups:0' "$app_signed_entitlements")" == "${team_id}.ad.neko.when.shared" ]]
+          fi
+
           echo "archive_path=$archive_path" >> "$GITHUB_ENV"
 
       - name: Upload to App Store Connect
