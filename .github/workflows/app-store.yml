@@ -1,6 +1,8 @@
 name: App Store Release
 
 on:
+  schedule:
+    - cron: "0 0 * * *"
   push:
     tags:
       - testflight-*
@@ -17,14 +19,89 @@ on:
           - macos
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: app-store-release
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.release_guard.outputs.should_release }}
+      marketing_version: ${{ steps.version.outputs.marketing_version }}
+      build_number: ${{ steps.next_build.outputs.build_number }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Release only new commits on the daily schedule
+        id: release_guard
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" != "schedule" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          elif git tag --points-at HEAD --list 'testflight-*' | grep -q . \
+            || git tag --points-at HEAD --list 'daily-release-*' | grep -q .; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "No commits have landed since the last TestFlight release." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Read marketing version
+        if: steps.release_guard.outputs.should_release == 'true'
+        id: version
+        run: |
+          marketing_version=$(awk '/MARKETING_VERSION = / { gsub(";", "", $3); print $3; exit }' WhenReset.xcodeproj/project.pbxproj)
+          if [[ -z "$marketing_version" ]]; then
+            echo "Could not read MARKETING_VERSION." >&2
+            exit 1
+          fi
+          echo "marketing_version=$marketing_version" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare App Store Connect credential
+        if: steps.release_guard.outputs.should_release == 'true'
+        id: credential
+        env:
+          PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          if [[ -z "$PRIVATE_KEY" || -z "$KEY_ID" || -z "$ISSUER_ID" ]]; then
+            echo "Required App Store Connect secrets are missing." >&2
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          umask 077
+          printf '%s' "$PRIVATE_KEY" > "$key_path"
+          echo "path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Select next App Store build number
+        if: steps.release_guard.outputs.should_release == 'true'
+        id: next_build
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_BUNDLE_ID: ad.neko.when
+          MARKETING_VERSION: ${{ steps.version.outputs.marketing_version }}
+        run: ruby .github/scripts/next-app-store-build.rb
+
+      - name: Remove temporary credential
+        if: always() && steps.credential.outputs.path != ''
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+        run: rm -f "$ASC_KEY_PATH"
+
   upload:
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     name: Upload ${{ matrix.platform }}
     runs-on: macos-26
     timeout-minutes: 90
@@ -34,7 +111,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        platform: ${{ fromJSON(inputs.platform == 'both' && '["ios", "macos"]' || inputs.platform == 'macos' && '["macos"]' || '["ios"]') }}
+        platform: ${{ fromJSON(github.event_name == 'schedule' && '["ios"]' || inputs.platform == 'both' && '["ios", "macos"]' || inputs.platform == 'macos' && '["macos"]' || '["ios"]') }}
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -98,6 +175,8 @@ jobs:
             CODE_SIGN_STYLE=Automatic \
             CODE_SIGN_IDENTITY='Apple Development' \
             PROVISIONING_PROFILE_SPECIFIER= \
+            MARKETING_VERSION='${{ needs.prepare.outputs.marketing_version }}' \
+            CURRENT_PROJECT_VERSION='${{ needs.prepare.outputs.build_number }}' \
             "${platform_settings[@]}"
 
           echo "archive_path=$archive_path" >> "$GITHUB_ENV"
@@ -147,6 +226,16 @@ jobs:
           APP_BUNDLE_ID: ad.neko.when
           TESTFLIGHT_GROUP_NAME: Internal Testers
         run: ruby .github/scripts/assign-testflight-group.rb
+
+      - name: Mark successful automatic release
+        if: matrix.platform == 'ios' && github.event_name != 'push'
+        env:
+          MARKETING_VERSION: ${{ env.MARKETING_VERSION }}
+          BUILD_NUMBER: ${{ env.BUILD_NUMBER }}
+        run: |
+          tag="daily-release-${MARKETING_VERSION}-${BUILD_NUMBER}"
+          git tag "$tag" "$GITHUB_SHA"
+          git push origin "refs/tags/$tag"
 
       - name: Remove temporary credential
         if: always()

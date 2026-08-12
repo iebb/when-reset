@@ -6,7 +6,7 @@ This isolated Cloudflare Worker template can:
 
 - send hourly silent APNs refresh hints to your own devices;
 - optionally monitor selected linked accounts every 5 minutes or longer; and
-- retain 35 days of per-quota history for higher-resolution 24-hour, 7-day, and 30-day charts.
+- retain a user-selected history window from 7 days through 2 years for higher-resolution charts.
 
 When Reset does not operate an official server. Server monitoring is off for every account by default. When you enable it for an account, the app uploads that account’s Keychain credentials only to the self-hosted Worker URL you configured.
 
@@ -29,7 +29,7 @@ Bundled key SHA-256: `9512a4e0063a0aa9ca5974d458c0d4fff6abd936c0d97e97d1814cd919
 
 ## Deploy
 
-Click the button above, sign in to Cloudflare, and choose names for the Worker, D1 database, and Queue. Cloudflare provisions and binds those resources from `wrangler.jsonc`; the deploy script initializes the new D1 database directly from `schema.sql` before deploying the Worker. This first release has no upgrade or migration path because there are no existing deployments to preserve.
+Click the button above, sign in to Cloudflare, and choose names for the Worker, D1 database, and Queue. Cloudflare provisions and binds those resources from `wrangler.jsonc`; the deploy script initializes a new D1 database from `schema.sql`, applies tracked D1 migrations, and then deploys the Worker. Existing deployments keep their data while migrations add new cloud-sync fields.
 
 The deployment form asks for two independent secrets:
 
@@ -45,13 +45,17 @@ After deployment:
 
 The QR contains only the Worker HTTPS origin and a random, five-minute, one-use token. It never contains either deployment secret or any provider credential. Scanning only loads authenticated Worker metadata. When Reset does not register the device, save the Worker configuration, or upload any selected account credentials until the user confirms. The confirmation explains that the Worker operator is inside the credential trust boundary and identifies every account that will be uploaded.
 
-After the device registers, enable **Monitor on Self-hosted Server** in each account that you want the Worker to fetch. The global **Server monitoring** picker controls the selected accounts’ cadence, starting at 5 minutes. Per-quota “Show as 100%” choices are sent as minimal metric descriptors so server-side chart samples preserve that behavior when a provider omits a quota. The Worker cron runs every 5 minutes and writes each successful per-quota sample to D1; When Reset merges downloaded server samples into the same 24-hour, 7-day, and 30-day charts as on-device refreshes. Silent device refresh hints remain hourly. APNs background delivery is best-effort: iOS may coalesce, delay, or suppress it, so a server sample can reach the on-device chart later than it was recorded.
+After the device registers, enable **Monitor on Self-hosted Server** in each account that you want the Worker to fetch. The global **Server monitoring** picker controls the selected accounts’ cadence, starting at 5 minutes, and **Cloud history retention** controls how long each account’s Worker history is kept. Per-quota “Show as 100%” choices are sent as minimal metric descriptors so server-side chart samples preserve that behavior when a provider omits a quota. The Worker cron runs every 5 minutes and writes each successful per-quota sample to D1; When Reset merges downloaded server samples into the same charts as on-device refreshes. Silent device refresh hints remain hourly. APNs background delivery is best-effort: iOS may coalesce, delay, or suppress it, so a server sample can reach the on-device chart later than it was recorded.
+
+**Upload Local History** backfills eligible on-device samples into D1. Every history row carries a deterministic tag derived from the account, metric, and recorded second; D1 enforces uniqueness by both that tag and the natural account/metric/timestamp key, so retries and samples already created by the Worker do not duplicate history. Uploaded rows are accepted only inside the selected retention window and never contain credentials.
 
 A registered device can also choose **Add from self-hosted Worker**. The account list contains only opaque keyed references, provider, display name, plan, last-success time, and a coarse session status. For ChatGPT, each successful Worker refresh checks the signed-in profile and immediately converts its stable user ID into a deployment-specific HMAC; the raw profile ID is neither stored in D1 nor returned. JWT identity claims are used only as a fallback when the profile response has no stable ID. This lets differently named copies such as an account alias and its profile name collapse into one logical account. The app attaches the subscription and retained history to the matching local account instead of keeping a duplicate; otherwise it creates a remote-only account.
 
 Importing never copies or returns the provider credential envelope, fingerprint, workspace identifier, source device identifier, raw source account identifier, or raw provider profile ID. A remote-only account has no provider credentials in its Keychain and cannot fall back to a local provider request. Manual, launch, background, and silent-push refreshes only download the Worker snapshot and history for any attached subscription. Imports are idempotent, and an existing local subscription can repair a missing Worker mapping from its opaque remote reference without receiving credentials. Multiple subscribed devices still share the same persisted cron run and single provider fetch. Removing an imported account deletes only that device’s subscription and cached local data, not the Worker’s source account.
 
-The account screen can re-check the last Worker refresh and identifies authentication failures as an expired session. For an expired remote-only ChatGPT account, **Update Worker sign-in** performs a new device authorization and sends the resulting credential directly to the already authenticated Worker route. The Worker calls the provider to prove that the replacement belongs to the same provider account before atomically replacing the encrypted credential and repairing other stored copies of that logical account. The replacement credential is not saved to that device’s account Keychain, and no Worker API provides any credential download operation.
+The account screen can re-check the last Worker refresh and identifies authentication failures as an expired session. **Update Worker sign-in** performs a new provider authorization and sends the resulting credential directly to the authenticated Worker route. The Worker calls the provider to prove that the replacement belongs to the same provider account before atomically replacing the encrypted credential, clearing expired state from other direct devices and remote subscriptions, and sending them a silent refresh hint. This recovery applies to every provider supported by off-device monitoring.
+
+After a successful upload, **Remove Synced Credentials** can make the Worker the account’s credential authority. The app then deletes that account’s synchronizable Keychain credential, including its iCloud-synced copies, while retaining only account metadata locally. Provider tokens remain write-only: signing in again can replace the Worker copy, but no Worker route downloads credentials. Refresh cadence and history retention can still be changed after local credentials have been removed.
 
 ### Manual deployment
 
@@ -63,7 +67,7 @@ npx wrangler d1 create when-reset-push
 npx wrangler queues create when-reset-push
 ```
 
-Put the returned D1 ID in `wrangler.jsonc`, set both secrets, then deploy. The deploy command initializes the new database directly from `schema.sql`:
+Put the returned D1 ID in `wrangler.jsonc`, set both secrets, then deploy. The deploy command initializes missing base tables and applies pending migrations:
 
 ```sh
 npx wrangler secret put REGISTRATION_ACCESS_KEY
@@ -85,7 +89,7 @@ Provider credentials are write-only through the Worker API: the app can upload o
 
 For scheduled monitoring, the Worker derives a keyed HMAC fingerprint over the exact authentication credential set and its provider, workspace, and plan scope. Display-only settings such as an API monthly budget are excluded, then reapplied separately for each target during fan-out. The fingerprint cannot be reversed without the deployment secret and is never sent to a client or placed in a Queue message. Accounts from multiple app installations with the same scope are grouped into one persisted cron run. Its Queue message contains only an opaque run ID; an atomic D1 claim permits at most one provider fetch for that credential scope and cron occurrence even when Cloudflare delivers duplicate messages. Scheduling reserves each target, and a newer occurrence prevents an older result from overwriting it. The encrypted refreshed credential result is persisted only long enough to fan the snapshot and history out to every still-consenting target, then erased. Queue-send and fan-out gaps are re-enqueued by cron, and a retry resumes from a persisted result without calling the provider again. If execution stops after the run is claimed but before the result is saved, that occurrence fails closed and a later cron occurrence tries again instead of risking a duplicate fetch. Removing the last target erases any transient result but retains a credential-free idempotency tombstone until normal pruning.
 
-Disabling monitoring for a source account deletes its server credentials, latest snapshot, and history. Removing a remote-only import deletes only its subscription. Removing the device registration deletes that device’s monitored accounts and subscriptions. History older than 35 days is pruned by cron.
+Disabling monitoring for a source account deletes its server credentials, latest snapshot, and history. Removing a remote-only import deletes only its subscription. Removing the device registration deletes that device’s monitored accounts and subscriptions. History older than each account’s configured retention is pruned by cron.
 
 ### Monitoring consent revisions
 
@@ -116,6 +120,8 @@ Cron enqueues push-enabled devices seen within the last 45 days. Provider-monito
 - `POST /v1/devices/:id/remote-accounts` — create a read-only local subscription; no provider credential is copied or returned
 - `PUT /v1/devices/:id/accounts/:account` — opt in or update encrypted provider credentials; JSON includes `consent_revision`
 - `PUT /v1/devices/:id/accounts/:account` with `X-When-Reset-Credential-Update: replace-remote` — validate and replace an expired remote subscription’s credential without returning it
+- `PATCH /v1/devices/:id/accounts/:account/settings` — update monitoring cadence and history retention without resending provider credentials
+- `POST /v1/devices/:id/accounts/:account/history` — backfill tagged local history with idempotent deduplication
 - `DELETE /v1/devices/:id/accounts/:account?consent_revision=N` — persist a consent tombstone and remove the server-side account and history
 - `GET /v1/devices/:id/accounts/:account/sync` — return account metadata, the latest quota, status, and paginated history; credentials are never returned
 
@@ -123,4 +129,4 @@ All account routes require the device secret. Sync responses use `Cache-Control:
 
 ## Cloudflare usage
 
-Cloudflare Queues counts a normally delivered message as three operations: write, read, and delete. Both scheduled account refreshes and hourly device hints consume Queue operations. D1 retains one row per reported quota per successful refresh for 35 days. A personal deployment is normally small, but check [Cloudflare Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/) and [D1 limits](https://developers.cloudflare.com/d1/platform/limits/) before monitoring many accounts at short intervals.
+Cloudflare Queues counts a normally delivered message as three operations: write, read, and delete. Both scheduled account refreshes and device hints consume Queue operations. D1 retains one row per reported quota per successful refresh for the configured 7-day to 2-year window. A personal deployment is normally small, but check [Cloudflare Queues pricing](https://developers.cloudflare.com/queues/platform/pricing/) and [D1 limits](https://developers.cloudflare.com/d1/platform/limits/) before selecting long retention or monitoring many accounts at short intervals.

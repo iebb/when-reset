@@ -576,6 +576,7 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(settings.mode, .disabled)
         XCTAssertEqual(settings.customServerURL, "")
         XCTAssertEqual(settings.serverMonitoringInterval, .tenMinutes)
+        XCTAssertEqual(settings.historyRetention, .thirtyFiveDays)
         XCTAssertNil(try settings.resolvedServerURL())
     }
 
@@ -1601,7 +1602,7 @@ final class UsageHistoryTests: XCTestCase {
         let upgraded = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: Data(contentsOf: fileURL)) as? [String: Any]
         )
-        XCTAssertEqual((upgraded["schemaVersion"] as? NSNumber)?.intValue, 2)
+        XCTAssertEqual((upgraded["schemaVersion"] as? NSNumber)?.intValue, 3)
     }
 
     func testStaleDetectorObservationBecomesANewBaseline() async throws {
@@ -2074,6 +2075,45 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertTrue(points.allSatisfy { $0.source == .server && $0.plan == "Max" })
     }
 
+    func testHistoryTagsAreStableAndExtendedCloudRetentionAcceptsOlderRows() async throws {
+        let store = try makeStore()
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            providerID: .chatGPT,
+            displayName: "Work",
+            workspaceID: "workspace",
+            plan: "Plus",
+            addedAt: now
+        )
+        let recordedAt = now.addingTimeInterval(-60 * 24 * 60 * 60)
+        let expectedTag = "h1.00000000-0000-4000-8000-000000000001.d2Vla2x5.1994816000"
+        var point = UsageHistoryPoint(
+            accountID: account.id,
+            providerID: .chatGPT,
+            metricID: "weekly",
+            metricTitle: "Weekly limit",
+            kind: .weekly,
+            windowMinutes: 10_080,
+            remainingPercent: 50,
+            recordedAt: recordedAt,
+            resetsAt: recordedAt.addingTimeInterval(7 * 24 * 60 * 60),
+            secondsUntilReset: 7 * 24 * 60 * 60,
+            source: .server,
+            plan: "Plus"
+        )
+        XCTAssertEqual(point.resolvedRowTag, expectedTag)
+
+        try await store.setRetentionInterval(90 * 24 * 60 * 60, now: now)
+        let firstMerge = try await store.mergeServerHistory([point], account: account, now: now)
+        XCTAssertEqual(firstMerge.map(\.resolvedRowTag), [expectedTag])
+
+        point.remainingPercent = 42
+        let repeatedMerge = try await store.mergeServerHistory([point], account: account, now: now)
+        XCTAssertEqual(repeatedMerge.count, 1)
+        XCTAssertEqual(repeatedMerge.first?.remainingPercent, 42)
+    }
+
     func testMacStatusTargetsDeduplicateMetricsAndResolveBankedCreditCount() throws {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let account = MonitoredAccount(
@@ -2296,21 +2336,24 @@ final class MacUsageHistoryPresentationTests: XCTestCase {
         XCTAssertEqual(
             WorkerHistoryFetchScope.incremental.startDate(
                 now: now,
-                latestServerPoint: latest
+                latestServerPoint: latest,
+                retentionInterval: UsageHistoryStore.retentionInterval
             ),
             latest.addingTimeInterval(-60)
         )
         XCTAssertEqual(
             WorkerHistoryFetchScope.retainedHistory.startDate(
                 now: now,
-                latestServerPoint: latest
+                latestServerPoint: latest,
+                retentionInterval: UsageHistoryStore.retentionInterval
             ),
             retainedStart
         )
         XCTAssertEqual(
             WorkerHistoryFetchScope.incremental.startDate(
                 now: now,
-                latestServerPoint: nil
+                latestServerPoint: nil,
+                retentionInterval: UsageHistoryStore.retentionInterval
             ),
             retainedStart
         )

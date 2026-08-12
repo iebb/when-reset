@@ -71,6 +71,7 @@ beforeEach(async () => {
       credential_revision INTEGER NOT NULL CHECK(credential_revision > 0),
       scheduled_monitor_at INTEGER,
       refresh_interval_seconds INTEGER NOT NULL,
+      history_retention_days INTEGER NOT NULL DEFAULT 35,
       next_refresh_at INTEGER NOT NULL,
       last_refresh_at INTEGER,
       last_success_at INTEGER,
@@ -141,6 +142,8 @@ beforeEach(async () => {
     env.DB.prepare(`CREATE TABLE usage_history (
       device_id TEXT NOT NULL,
       account_id TEXT NOT NULL,
+      row_tag TEXT,
+      history_source TEXT NOT NULL DEFAULT 'worker',
       provider_id TEXT NOT NULL,
       metric_id TEXT NOT NULL,
       metric_title TEXT NOT NULL,
@@ -155,6 +158,8 @@ beforeEach(async () => {
       FOREIGN KEY (device_id, account_id)
         REFERENCES monitored_accounts(device_id, account_id) ON DELETE CASCADE
     )`),
+    env.DB.prepare(`CREATE UNIQUE INDEX usage_history_account_row_tag
+      ON usage_history(device_id, account_id, row_tag)`),
   ]);
 });
 
@@ -203,6 +208,7 @@ function accountRequestBody(providerID = "chatgpt", consentRevision?: number) {
       trial_expires_at: 1_999_000_000,
     },
     refresh_interval_seconds: FIVE_MINUTES_SECONDS,
+    history_retention_days: 35,
     ...(consentRevision === undefined ? {} : { consent_revision: consentRevision }),
     missing_quotas: [{
       metric_id: "weekly",
@@ -1014,6 +1020,156 @@ describe("self-hosted account monitoring API", () => {
     expect(row?.encrypted_credentials).not.toContain("access-secret");
     expect(row?.encrypted_credentials).not.toContain("refresh-secret");
     expect(JSON.parse(row!.encrypted_credentials)).toMatchObject({ v: 1 });
+  });
+
+  it("updates cloud policy without requiring provider credentials", async () => {
+    await registerDevice();
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(accountRequestBody()),
+    })).status).toBe(201);
+
+    const response = await SELF.fetch(`${accountURL}/settings`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify({
+        refresh_interval_seconds: 1_800,
+        history_retention_days: 365,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ history_retention_days: 365 });
+    expect(await env.DB.prepare(
+      `SELECT refresh_interval_seconds, history_retention_days
+       FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first()).toEqual({
+      refresh_interval_seconds: 1_800,
+      history_retention_days: 365,
+    });
+  });
+
+  it("tags and deduplicates local history uploaded to the cloud", async () => {
+    await registerDevice();
+    const body = accountRequestBody();
+    body.history_retention_days = 90;
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(body),
+    })).status).toBe(201);
+
+    const recordedAt = Math.floor(Date.now() / 1_000) - 600;
+    const point = {
+      row_tag: `h1.${accountID}.d2Vla2x5.${recordedAt}`,
+      provider_id: "chatgpt",
+      metric_id: "weekly",
+      metric_title: "Weekly limit",
+      kind: "weekly",
+      window_minutes: 10_080,
+      remaining_percent: 64,
+      recorded_at: recordedAt,
+      resets_at: recordedAt + 86_400,
+      seconds_until_reset: 86_400,
+      plan: "Plus",
+    };
+    const upload = () => SELF.fetch(`${accountURL}/history`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify({ history: [point] }),
+    });
+
+    const first = await upload();
+    expect(first.status).toBe(200);
+    expect(await first.json()).toEqual({ accepted: 1, deduplicated: 0 });
+    const repeated = await upload();
+    expect(repeated.status).toBe(200);
+    expect(await repeated.json()).toEqual({ accepted: 0, deduplicated: 1 });
+    expect(await env.DB.prepare(
+      `SELECT row_tag, history_source, COUNT(*) AS count
+       FROM usage_history WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first()).toEqual({
+      row_tag: point.row_tag,
+      history_source: "device",
+      count: 1,
+    });
+
+    const sync = await SELF.fetch(`${accountURL}/sync?since=0`, {
+      headers: { authorization: `Bearer ${deviceSecret}` },
+    });
+    expect(await sync.json()).toMatchObject({
+      history_retention_days: 90,
+      history: [{ row_tag: point.row_tag, history_source: "device" }],
+    });
+  });
+
+  it("clears another direct device's expired state after non-ChatGPT reauthentication", async () => {
+    const secondDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab99";
+    const secondDeviceSecret = "B".repeat(43);
+    await registerDevice();
+    await registerDevice(secondDeviceID, secondDeviceSecret, "b".repeat(64));
+    for (const [id, secret] of [
+      [deviceID, deviceSecret],
+      [secondDeviceID, secondDeviceSecret],
+    ] as const) {
+      expect((await SELF.fetch(
+        `https://push.example/v1/devices/${id}/accounts/${accountID}`,
+        {
+          method: "PUT",
+          headers: { authorization: `Bearer ${secret}` },
+          body: JSON.stringify(accountRequestBody("claude", 1)),
+        },
+      )).status).toBe(201);
+    }
+    await env.DB.prepare(
+      `UPDATE monitored_accounts SET last_error = 'Provider returned HTTP 401.'
+       WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).run();
+
+    const replacementBody = accountRequestBody("claude", 1);
+    replacementBody.credentials.access_token = "fresh-claude-access";
+    replacementBody.credentials.refresh_token = "fresh-claude-refresh";
+    const parsed = await testing.parseAccountUpload(new Request(
+      "https://push.example/credential-replacement-test",
+      { method: "PUT", body: JSON.stringify(replacementBody) },
+    ));
+    const replacement = await testing.upsertMonitoredAccount(
+      env,
+      secondDeviceID,
+      accountID,
+      parsed!,
+      true,
+      async (providerAccount, credentials, checkedAt) => ({
+        credentials,
+        account_identity: "claude-user:shared",
+        snapshot: {
+          provider_id: providerAccount.provider_id,
+          plan: "Max",
+          fetched_at: checkedAt ?? Math.floor(Date.now() / 1_000),
+          windows: [],
+          available_reset_count: 0,
+          reset_credits: [],
+        },
+      }),
+    );
+    expect(replacement.status).toBe(200);
+
+    const rows = await env.DB.prepare(
+      `SELECT device_id, credential_fingerprint, last_error, latest_snapshot
+       FROM monitored_accounts WHERE account_id = ? ORDER BY device_id`
+    ).bind(accountID).all<{
+      device_id: string;
+      credential_fingerprint: string;
+      last_error: string | null;
+      latest_snapshot: string;
+    }>();
+    expect(rows.results).toHaveLength(2);
+    expect(new Set(rows.results.map((row) => row.credential_fingerprint)).size).toBe(1);
+    expect(rows.results.every((row) => row.last_error === null)).toBe(true);
+    expect(rows.results.every((row) =>
+      /^[A-Za-z0-9_-]{43}$/.test(JSON.parse(row.latest_snapshot).account_reference)
+    )).toBe(true);
   });
 
   it("accepts legacy uploads without identity metadata and rejects malformed metadata", async () => {

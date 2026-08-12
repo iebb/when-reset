@@ -488,6 +488,8 @@ struct AccountSettingsView: View {
     @State private var showingRelink = false
     @State private var confirmingRemoval = false
     @State private var confirmingServerMonitoring = false
+    @State private var confirmingWorkerCredentialAuthority = false
+    @State private var isUploadingLocalHistory = false
     @State private var selectedPage = AccountSettingsPage.account
     @State private var historyRange = UsageHistoryRange.day
 
@@ -628,6 +630,27 @@ struct AccountSettingsView: View {
                             .disabled(!currentAccount.providerID.supportsOffDeviceMonitoring
                                       || (!store.isServerMonitoringEnabled(for: currentAccount)
                                           && store.pushServerStatus != .registered))
+                        if store.isServerMonitoringEnabled(for: currentAccount) {
+                            Button {
+                                uploadLocalHistory()
+                            } label: {
+                                if isUploadingLocalHistory {
+                                    Label("Uploading Local History…", systemImage: "icloud.and.arrow.up")
+                                } else {
+                                    Label("Upload Local History", systemImage: "icloud.and.arrow.up")
+                                }
+                            }
+                            .disabled(isUploadingLocalHistory)
+                            if currentAccount.usesWorkerAsCredentialAuthority {
+                                Label("Worker is the credential authority",
+                                      systemImage: "checkmark.icloud.fill")
+                                    .foregroundStyle(.secondary)
+                            } else if store.hasLocalCredentials(for: currentAccount) {
+                                Button("Remove Synced Credentials", systemImage: "key.slash") {
+                                    confirmingWorkerCredentialAuthority = true
+                                }
+                            }
+                        }
                     }
                 } header: {
                     Text("Self-hosted monitoring")
@@ -639,7 +662,7 @@ struct AccountSettingsView: View {
                     } else if store.pushServerSettings.mode == .disabled {
                         Text("Configure a self-hosted server in Settings first.")
                     } else {
-                        Text("Enabling this uploads the account credentials to your Worker after you confirm.")
+                        Text("Enabling this uploads credentials and local history. You can then remove the synchronized Keychain copy and keep the Worker authoritative.")
                     }
                 }
             }
@@ -787,6 +810,18 @@ struct AccountSettingsView: View {
             Text("This sends \(credentialDisclosure) to \(pushServerHost). The Worker encrypts stored credentials, but whoever controls it can use them. Continue only if you control this Worker.")
         }
         .confirmationDialog(
+            "Keep credentials only on \(pushServerHost)?",
+            isPresented: $confirmingWorkerCredentialAuthority,
+            titleVisibility: .visible
+        ) {
+            Button("Remove Synced Credentials", role: .destructive) {
+                store.setWorkerAsCredentialAuthority(true, for: currentAccount)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This deletes the provider credential from iCloud Keychain on synced devices. The encrypted Worker copy remains authoritative. Signing in again replaces the Worker copy and is removed from Keychain after the verified upload.")
+        }
+        .confirmationDialog(
             account.isDemo ? "Remove demo?" : "Remove account?",
             isPresented: $confirmingRemoval,
             titleVisibility: .visible
@@ -854,6 +889,15 @@ struct AccountSettingsView: View {
               let serverURL = try? store.pushServerSettings.resolvedServerURL() else { return }
         settings.monitorOnSelfHostedServer = true
         settings.selfHostedServerConsentURL = serverURL.absoluteString
+    }
+
+    private func uploadLocalHistory() {
+        guard !isUploadingLocalHistory else { return }
+        isUploadingLocalHistory = true
+        Task {
+            _ = await store.uploadLocalHistoryToWorker(for: currentAccount)
+            isUploadingLocalHistory = false
+        }
     }
 
     private func metricBinding(_ window: UsageWindow) -> Binding<Bool> {
@@ -1411,6 +1455,12 @@ struct SettingsView: View {
                                 Text(interval.title).tag(interval)
                             }
                         }
+                        Picker("Cloud history",
+                               selection: $pushServerSettings.historyRetention) {
+                            ForEach(CloudHistoryRetention.allCases, id: \.self) { retention in
+                                Text(retention.title).tag(retention)
+                            }
+                        }
                     }
                     Button(pushServerActionTitle, action: applyPushServerAction)
                     .disabled(!canApplyPushServerSettings)
@@ -1524,6 +1574,8 @@ struct SettingsView: View {
         if proposedURL == currentURL, enteredKey.isEmpty {
             return pushServerSettings.serverMonitoringInterval
                 != store.pushServerSettings.serverMonitoringInterval
+                || pushServerSettings.historyRetention
+                    != store.pushServerSettings.historyRetention
         }
         return enteredKey.count >= 32
     }
@@ -1535,7 +1587,8 @@ struct SettingsView: View {
             pushServerSettings.customServerURL
         )
         let currentURL = try? store.pushServerSettings.resolvedServerURL()
-        return proposedURL == currentURL && enteredKey.isEmpty ? "Apply Interval" : "Review & Link"
+        return proposedURL == currentURL && enteredKey.isEmpty
+            ? "Apply Cloud Settings" : "Review & Link"
     }
 
     private func applyPushServerAction() {
@@ -1551,8 +1604,9 @@ struct SettingsView: View {
             let accessKey = pushServerAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
             let currentURL = try? store.pushServerSettings.resolvedServerURL()
             if serverURL == currentURL, accessKey.isEmpty {
-                store.updatePushServerMonitoringInterval(
-                    pushServerSettings.serverMonitoringInterval
+                store.updatePushServerPolicy(
+                    interval: pushServerSettings.serverMonitoringInterval,
+                    historyRetention: pushServerSettings.historyRetention
                 )
             } else {
                 guard accessKey.count >= 32 else { throw PushServerError.missingServerAccessKey }
@@ -1638,6 +1692,7 @@ private struct WorkerLinkReviewView: View {
     @State private var validationError: String?
     @State private var selectedAccountIDs: Set<UUID> = []
     @State private var interval = RefreshInterval.fiveMinutes
+    @State private var historyRetention = CloudHistoryRetention.thirtyFiveDays
     @State private var trustsWorker = false
     @State private var isValidating = true
     @State private var isCommitting = false
@@ -1701,6 +1756,11 @@ private struct WorkerLinkReviewView: View {
                                 Text(option.title).tag(option)
                             }
                         }
+                        Picker("Cloud history", selection: $historyRetention) {
+                            ForEach(CloudHistoryRetention.allCases, id: \.self) { option in
+                                Text(option.title).tag(option)
+                            }
+                        }
                     }
 
                     Section("Data sent after confirmation") {
@@ -1708,7 +1768,7 @@ private struct WorkerLinkReviewView: View {
                               systemImage: "bell.badge")
                         Label("Provider and workspace identifiers, plan, and quota descriptors for selected accounts",
                               systemImage: "list.bullet.rectangle")
-                        Label("Selected quota history is retained by the Worker for 35 days",
+                        Label("Selected quota history is retained by the Worker for \(historyRetention.title)",
                               systemImage: "clock.arrow.circlepath")
                     }
 
@@ -1766,6 +1826,7 @@ private struct WorkerLinkReviewView: View {
             }
             .task {
                 interval = store.pushServerSettings.serverMonitoringInterval
+                historyRetention = store.pushServerSettings.historyRetention
                 await validateWorker()
             }
             .confirmationDialog(
@@ -1859,6 +1920,7 @@ private struct WorkerLinkReviewView: View {
                 draft,
                 monitoringAccountIDs: selectedAccountIDs,
                 interval: interval,
+                historyRetention: historyRetention,
                 userConfirmedCredentialUpload: true
             )
             dismiss()

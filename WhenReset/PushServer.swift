@@ -19,16 +19,41 @@ enum PushServerMode: String, Codable, CaseIterable, Hashable, Sendable {
     }
 }
 
+enum CloudHistoryRetention: Int, Codable, CaseIterable, Hashable, Sendable {
+    case sevenDays = 7
+    case thirtyFiveDays = 35
+    case ninetyDays = 90
+    case oneHundredEightyDays = 180
+    case oneYear = 365
+    case twoYears = 730
+
+    var title: String {
+        switch self {
+        case .sevenDays: "7 days"
+        case .thirtyFiveDays: "35 days"
+        case .ninetyDays: "90 days"
+        case .oneHundredEightyDays: "180 days"
+        case .oneYear: "1 year"
+        case .twoYears: "2 years"
+        }
+    }
+
+    var timeInterval: TimeInterval { TimeInterval(rawValue) * 24 * 60 * 60 }
+}
+
 struct PushServerSettings: Codable, Hashable, Sendable {
     var mode: PushServerMode = .disabled
     var customServerURL = ""
     var serverMonitoringInterval: RefreshInterval = .tenMinutes
+    var historyRetention: CloudHistoryRetention = .thirtyFiveDays
 
     init(mode: PushServerMode = .disabled, customServerURL: String = "",
-         serverMonitoringInterval: RefreshInterval = .tenMinutes) {
+         serverMonitoringInterval: RefreshInterval = .tenMinutes,
+         historyRetention: CloudHistoryRetention = .thirtyFiveDays) {
         self.mode = mode
         self.customServerURL = customServerURL
         self.serverMonitoringInterval = serverMonitoringInterval
+        self.historyRetention = historyRetention
     }
 
     init(from decoder: Decoder) throws {
@@ -39,6 +64,10 @@ struct PushServerSettings: Codable, Hashable, Sendable {
             RefreshInterval.self,
             forKey: .serverMonitoringInterval
         ) ?? .tenMinutes
+        historyRetention = try values.decodeIfPresent(
+            CloudHistoryRetention.self,
+            forKey: .historyRetention
+        ) ?? .thirtyFiveDays
     }
 
     func resolvedServerURL() throws -> URL? {
@@ -274,6 +303,7 @@ struct ServerAccountSyncResult: Sendable {
     var lastError: String?
     var sessionStatus: WorkerSessionStatus? = nil
     var sessionCheckedAt: Date? = nil
+    var historyRetentionDays: Int? = nil
 }
 
 enum WorkerSessionStatus: String, Decodable, Hashable, Sendable {
@@ -542,6 +572,7 @@ enum PushServerClient {
         var metadata: WorkerAccountMetadata
         var refreshIntervalSeconds: Int
         var consentRevision: Int64
+        var historyRetentionDays: Int
         var credentials: CredentialPayload
         var missingQuotas: [MissingQuotaPayload]
 
@@ -553,9 +584,71 @@ enum PushServerClient {
             case metadata
             case refreshIntervalSeconds = "refresh_interval_seconds"
             case consentRevision = "consent_revision"
+            case historyRetentionDays = "history_retention_days"
             case credentials
             case missingQuotas = "missing_quotas"
         }
+    }
+
+    private struct HistoryUploadRequest: Encodable {
+        var history: [HistoryUploadPoint]
+    }
+
+    private struct AccountPolicyUpdateRequest: Encodable {
+        var refreshIntervalSeconds: Int
+        var historyRetentionDays: Int
+
+        enum CodingKeys: String, CodingKey {
+            case refreshIntervalSeconds = "refresh_interval_seconds"
+            case historyRetentionDays = "history_retention_days"
+        }
+    }
+
+    private struct HistoryUploadPoint: Encodable {
+        var rowTag: String
+        var providerID: ProviderID
+        var metricID: String
+        var metricTitle: String
+        var kind: UsageWindowKind?
+        var windowMinutes: Int?
+        var remainingPercent: Double
+        var recordedAt: TimeInterval
+        var resetsAt: TimeInterval
+        var secondsUntilReset: TimeInterval
+        var plan: String?
+
+        enum CodingKeys: String, CodingKey {
+            case rowTag = "row_tag"
+            case providerID = "provider_id"
+            case metricID = "metric_id"
+            case metricTitle = "metric_title"
+            case kind
+            case windowMinutes = "window_minutes"
+            case remainingPercent = "remaining_percent"
+            case recordedAt = "recorded_at"
+            case resetsAt = "resets_at"
+            case secondsUntilReset = "seconds_until_reset"
+            case plan
+        }
+
+        init(_ point: UsageHistoryPoint) {
+            rowTag = point.resolvedRowTag
+            providerID = point.providerID
+            metricID = point.metricID
+            metricTitle = point.metricTitle
+            kind = point.kind
+            windowMinutes = point.windowMinutes
+            remainingPercent = point.remainingPercent
+            recordedAt = point.recordedAt.timeIntervalSince1970
+            resetsAt = point.resetsAt.timeIntervalSince1970
+            secondsUntilReset = point.secondsUntilReset
+            plan = point.plan
+        }
+    }
+
+    private struct HistoryUploadResponse: Decodable {
+        var accepted: Int
+        var deduplicated: Int
     }
 
     private struct MissingQuotaPayload: Encodable {
@@ -710,6 +803,7 @@ enum PushServerClient {
     }
 
     private struct RemoteHistoryPoint: Decodable {
+        var rowTag: String?
         var providerID: ProviderID
         var metricID: String
         var metricTitle: String
@@ -720,8 +814,10 @@ enum PushServerClient {
         var resetsAt: TimeInterval
         var secondsUntilReset: TimeInterval
         var plan: String?
+        var historySource: String?
 
         enum CodingKeys: String, CodingKey {
+            case rowTag = "row_tag"
             case providerID = "provider_id"
             case metricID = "metric_id"
             case metricTitle = "metric_title"
@@ -732,6 +828,7 @@ enum PushServerClient {
             case resetsAt = "resets_at"
             case secondsUntilReset = "seconds_until_reset"
             case plan
+            case historySource = "history_source"
         }
 
         func historyPoint(accountID: UUID) -> UsageHistoryPoint {
@@ -747,7 +844,8 @@ enum PushServerClient {
                 resetsAt: Date(timeIntervalSince1970: resetsAt),
                 secondsUntilReset: secondsUntilReset,
                 source: .server,
-                plan: plan
+                plan: plan,
+                rowTag: rowTag
             )
         }
     }
@@ -763,6 +861,7 @@ enum PushServerClient {
         var lastError: String?
         var sessionStatus: WorkerSessionStatus?
         var sessionCheckedAt: TimeInterval?
+        var historyRetentionDays: Int?
 
         enum CodingKeys: String, CodingKey {
             case snapshot, metadata, history
@@ -773,6 +872,7 @@ enum PushServerClient {
             case lastError = "last_error"
             case sessionStatus = "session_status"
             case sessionCheckedAt = "session_checked_at"
+            case historyRetentionDays = "history_retention_days"
         }
     }
 
@@ -1202,8 +1302,83 @@ enum PushServerClient {
             ),
             refreshIntervalSeconds: Int(interval),
             consentRevision: consentRevision,
+            historyRetentionDays: settings.historyRetention.rawValue,
             credentials: CredentialPayload(credentials),
             missingQuotas: missingQuotas.map(MissingQuotaPayload.init)
+        ))
+        let (data, _) = try await send(request)
+        return try decodeAccountResponse(data, account: account)
+    }
+
+    static func uploadHistory(
+        settings: PushServerSettings,
+        account: MonitoredAccount,
+        points: [UsageHistoryPoint]
+    ) async throws -> Int {
+        guard !points.isEmpty else { return 0 }
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        var uploaded = 0
+        for offset in stride(from: 0, to: points.count, by: 250) {
+            let end = min(offset + 250, points.count)
+            var request = URLRequest(
+                url: accountURL(
+                    serverURL: serverURL,
+                    registration: registration,
+                    accountID: account.id
+                ).appending(path: "history")
+            )
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+            request.setValue(
+                "Bearer \(registration.deviceSecret)",
+                forHTTPHeaderField: "Authorization"
+            )
+            request.httpBody = try JSONEncoder().encode(HistoryUploadRequest(
+                history: points[offset..<end].map(HistoryUploadPoint.init)
+            ))
+            let (data, _) = try await send(
+                request,
+                maximumResponseBytes: smallResponseLimit,
+                acceptedStatusCodes: [200]
+            )
+            let response = try JSONDecoder().decode(HistoryUploadResponse.self, from: data)
+            guard response.accepted >= 0,
+                  response.deduplicated >= 0,
+                  response.accepted + response.deduplicated == end - offset else {
+                throw PushServerError.invalidResponse
+            }
+            uploaded += response.accepted
+        }
+        return uploaded
+    }
+
+    static func updateAccountPolicy(
+        settings: PushServerSettings,
+        account: MonitoredAccount
+    ) async throws -> ServerAccountSyncResult {
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        let interval = settings.serverMonitoringInterval.timeInterval
+            ?? RefreshInterval.tenMinutes.timeInterval!
+        var request = URLRequest(
+            url: accountURL(
+                serverURL: serverURL,
+                registration: registration,
+                accountID: account.id
+            ).appending(path: "settings")
+        )
+        request.httpMethod = "PATCH"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue(
+            "Bearer \(registration.deviceSecret)",
+            forHTTPHeaderField: "Authorization"
+        )
+        request.httpBody = try JSONEncoder().encode(AccountPolicyUpdateRequest(
+            refreshIntervalSeconds: Int(interval),
+            historyRetentionDays: settings.historyRetention.rawValue
         ))
         let (data, _) = try await send(request)
         return try decodeAccountResponse(data, account: account)
@@ -1345,7 +1520,8 @@ enum PushServerClient {
             lastSuccessAt: page.lastSuccessAt.map(Date.init(timeIntervalSince1970:)),
             lastError: page.lastError,
             sessionStatus: page.sessionStatus,
-            sessionCheckedAt: page.sessionCheckedAt.map(Date.init(timeIntervalSince1970:))
+            sessionCheckedAt: page.sessionCheckedAt.map(Date.init(timeIntervalSince1970:)),
+            historyRetentionDays: page.historyRetentionDays
         )
     }
 

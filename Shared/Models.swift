@@ -437,11 +437,13 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
     var trialExpiresAt: Date? = nil
     var remoteWorkerAccountID: String? = nil
     var remoteWorkerServerURL: String? = nil
+    var storesCredentialsOnWorkerOnly: Bool? = nil
 
     var isDemo: Bool { workspaceID == Self.demoWorkspaceID }
     var isRemoteOnly: Bool {
         remoteWorkerAccountID != nil && remoteWorkerServerURL != nil
     }
+    var usesWorkerAsCredentialAuthority: Bool { storesCredentialsOnWorkerOnly == true }
 
     var providerDisplayName: String {
         isDemo ? "Your AI Provider" : providerID.displayName

@@ -14,11 +14,16 @@ import { renderLinkPage, renderLinkQRCode } from "./link-page";
 const MAX_REGISTRATION_BODY_BYTES = 2_048;
 const MAX_DEVICE_TOKEN_BODY_BYTES = 1_024;
 const MAX_ACCOUNT_BODY_BYTES = 64 * 1_024;
+const MAX_ACCOUNT_POLICY_BODY_BYTES = 2_048;
+const MAX_HISTORY_UPLOAD_BODY_BYTES = 512 * 1_024;
+const MAX_HISTORY_UPLOAD_ROWS = 250;
 const MAX_REMOTE_ACCOUNT_IMPORT_BODY_BYTES = 16 * 1_024;
 const MAX_REMOTE_ACCOUNT_IMPORTS = 50;
 const LINK_SESSION_TTL_SECONDS = 5 * 60;
 const ACTIVE_DEVICE_DAYS = 45;
-const HISTORY_RETENTION_DAYS = 35;
+const DEFAULT_HISTORY_RETENTION_DAYS = 35;
+const MIN_HISTORY_RETENTION_DAYS = 1;
+const MAX_HISTORY_RETENTION_DAYS = 3_650;
 const DEVICE_DELETION_TOMBSTONE_RETENTION_DAYS = 90;
 const MONITOR_RUN_RETENTION_DAYS = 7;
 const MONITOR_RUN_STALE_SECONDS = 10 * 60;
@@ -95,9 +100,15 @@ type AccountUpload = {
   plan_expires_at: number | null;
   trial_expires_at: number | null;
   refresh_interval_seconds: number;
+  history_retention_days: number;
   consent_revision: number;
   credentials: ProviderCredentials;
   missing_quotas: MissingQuotaDescriptor[];
+};
+
+type AccountPolicyUpdate = {
+  refresh_interval_seconds: number;
+  history_retention_days: number;
 };
 
 type MissingQuotaDescriptor = {
@@ -114,6 +125,7 @@ type MonitoredAccountRow = ProviderAccount & {
   display_name: string | null;
   encrypted_credentials: string;
   refresh_interval_seconds: number;
+  history_retention_days: number;
   next_refresh_at: number;
   last_refresh_at: number | null;
   last_success_at: number | null;
@@ -140,6 +152,7 @@ type AccountSyncRow = {
   last_success_at: number | null;
   last_error: string | null;
   consent_revision: number;
+  history_retention_days: number;
 };
 
 type AccountSyncSourceRow = AccountSyncRow & {
@@ -184,6 +197,7 @@ type CredentialTargetRow = ProviderAccount & {
   refresh_interval_seconds: number;
   credential_revision: number;
   latest_snapshot: string | null;
+  history_retention_days: number;
 };
 
 type MonitorRunRow = {
@@ -211,6 +225,26 @@ type EncryptedEnvelope = {
 };
 
 type HistoryRow = {
+  row_tag: string | null;
+  history_source: "worker" | "device";
+  provider_id: ProviderID;
+  metric_id: string;
+  metric_title: string;
+  kind: string | null;
+  window_minutes: number | null;
+  remaining_percent: number;
+  recorded_at: number;
+  resets_at: number;
+  seconds_until_reset: number;
+  plan: string | null;
+};
+
+type HistoryUpload = {
+  history: HistoryUploadRow[];
+};
+
+type HistoryUploadRow = {
+  row_tag: string;
   provider_id: ProviderID;
   metric_id: string;
   metric_title: string;
@@ -323,7 +357,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json({ error: "method_not_allowed" }, 405, { Allow: "GET, POST" });
   }
 
-  const accountMatch = /^\/v1\/devices\/([0-9a-f-]{36})\/accounts\/([0-9a-f-]{36})(?:\/(sync))?$/.exec(
+  const accountMatch = /^\/v1\/devices\/([0-9a-f-]{36})\/accounts\/([0-9a-f-]{36})(?:\/(sync|history|settings))?$/.exec(
     url.pathname
   );
   if (accountMatch) {
@@ -353,6 +387,12 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
     if (request.method === "GET" && accountMatch[3] === "sync") {
       return syncMonitoredAccount(env, deviceID, accountID, url);
+    }
+    if (request.method === "POST" && accountMatch[3] === "history") {
+      return uploadMonitoredAccountHistory(request, env, deviceID, accountID);
+    }
+    if (request.method === "PATCH" && accountMatch[3] === "settings") {
+      return updateMonitoredAccountPolicy(request, env, deviceID, accountID);
     }
     return json({ error: "method_not_allowed" }, 405);
   }
@@ -1118,12 +1158,16 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
   const metadata = parseAccountMetadata(value.metadata);
   const interval = value.refresh_interval_seconds;
   const consentRevision = parseUploadConsentRevision(value.consent_revision);
+  const historyRetentionDays = value.history_retention_days ?? DEFAULT_HISTORY_RETENTION_DAYS;
   const rawCredentials = value.credentials;
   const missingQuotas = parseMissingQuotas(value.missing_quotas);
   if (workspaceID === null || displayName === undefined || plan === undefined
       || metadata === null
       || typeof interval !== "number" || !Number.isInteger(interval)
       || interval < MIN_MONITOR_INTERVAL_SECONDS || interval > MAX_MONITOR_INTERVAL_SECONDS
+      || typeof historyRetentionDays !== "number" || !Number.isInteger(historyRetentionDays)
+      || historyRetentionDays < MIN_HISTORY_RETENTION_DAYS
+      || historyRetentionDays > MAX_HISTORY_RETENTION_DAYS
       || consentRevision === null || !isRecord(rawCredentials) || missingQuotas === null) return null;
   const accessToken = requiredBoundedString(rawCredentials.access_token, 32_768, true);
   const refreshToken = requiredBoundedString(rawCredentials.refresh_token, 32_768, true);
@@ -1146,6 +1190,7 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
     trial_expires_at: metadata.trial_expires_at,
     refresh_interval_seconds: interval,
     consent_revision: consentRevision,
+    history_retention_days: historyRetentionDays,
     missing_quotas: missingQuotas,
     credentials: {
       access_token: accessToken,
@@ -1156,6 +1201,74 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
       currency_code: currencyCode?.toUpperCase() ?? null,
     },
   };
+}
+
+async function parseAccountPolicyUpdate(request: Request): Promise<AccountPolicyUpdate | null> {
+  const value = await boundedRequestJSON(request, MAX_ACCOUNT_POLICY_BODY_BYTES);
+  if (!isRecord(value)) return null;
+  const interval = value.refresh_interval_seconds;
+  const historyRetentionDays = value.history_retention_days;
+  if (typeof interval !== "number" || !Number.isInteger(interval)
+      || interval < MIN_MONITOR_INTERVAL_SECONDS || interval > MAX_MONITOR_INTERVAL_SECONDS
+      || typeof historyRetentionDays !== "number" || !Number.isInteger(historyRetentionDays)
+      || historyRetentionDays < MIN_HISTORY_RETENTION_DAYS
+      || historyRetentionDays > MAX_HISTORY_RETENTION_DAYS) return null;
+  return {
+    refresh_interval_seconds: interval,
+    history_retention_days: historyRetentionDays,
+  };
+}
+
+async function parseHistoryUpload(
+  request: Request,
+  accountID: string,
+  providerID: ProviderID,
+): Promise<HistoryUpload | null> {
+  const value = await boundedRequestJSON(request, MAX_HISTORY_UPLOAD_BODY_BYTES);
+  if (!isRecord(value) || !Array.isArray(value.history)
+      || value.history.length === 0 || value.history.length > MAX_HISTORY_UPLOAD_ROWS) return null;
+  const history: HistoryUploadRow[] = [];
+  for (const raw of value.history) {
+    if (!isRecord(raw) || raw.provider_id !== providerID) return null;
+    const metricID = requiredBoundedString(raw.metric_id, 512, false);
+    const metricTitle = requiredBoundedString(raw.metric_title, 256, false);
+    const rowTag = requiredBoundedString(raw.row_tag, 1_024, false);
+    const kind = raw.kind === null || raw.kind === undefined ? null : raw.kind;
+    const windowMinutes = raw.window_minutes === null || raw.window_minutes === undefined
+      ? null : raw.window_minutes;
+    const remainingPercent = raw.remaining_percent;
+    const recordedAt = numericUnixSeconds(raw.recorded_at);
+    const resetsAt = numericUnixSeconds(raw.resets_at);
+    const secondsUntilReset = raw.seconds_until_reset;
+    const plan = optionalBoundedString(raw.plan, 200);
+    if (metricID === null || metricTitle === null || rowTag === null
+        || (kind !== null && kind !== "fiveHour" && kind !== "weekly" && kind !== "additional")
+        || (windowMinutes !== null && (typeof windowMinutes !== "number"
+          || !Number.isInteger(windowMinutes) || windowMinutes <= 0))
+        || typeof remainingPercent !== "number" || !Number.isFinite(remainingPercent)
+        || remainingPercent < 0 || remainingPercent > 100
+        || recordedAt === null || resetsAt === null
+        || resetsAt < recordedAt - 5 * 60
+        || typeof secondsUntilReset !== "number" || !Number.isFinite(secondsUntilReset)
+        || secondsUntilReset < 0 || plan === undefined
+        || rowTag !== historyRowTag(accountID, metricID, recordedAt)) return null;
+    history.push({
+      row_tag: rowTag,
+      provider_id: providerID,
+      metric_id: metricID,
+      metric_title: metricTitle,
+      kind,
+      window_minutes: windowMinutes,
+      remaining_percent: remainingPercent,
+      recorded_at: recordedAt,
+      resets_at: resetsAt,
+      seconds_until_reset: secondsUntilReset,
+      plan,
+    });
+  }
+  const uniqueTags = new Set(history.map((point) => point.row_tag));
+  if (uniqueTags.size !== history.length) return null;
+  return { history };
 }
 
 async function upsertMonitoredAccount(
@@ -1170,7 +1283,8 @@ async function upsertMonitoredAccount(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
-            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot
+            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot,
+            monitored_accounts.history_retention_days
      FROM remote_account_subscriptions
      INNER JOIN monitored_accounts
        ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
@@ -1184,7 +1298,7 @@ async function upsertMonitoredAccount(
   ).bind(deviceID, accountID).first<CredentialTargetRow>();
   if (remoteSubscription) {
     if (replaceRemoteCredential) {
-      return replaceRemoteAccountCredential(
+      return replaceAccountCredential(
         env,
         deviceID,
         accountID,
@@ -1196,6 +1310,19 @@ async function upsertMonitoredAccount(
     return json({ error: "remote_account_is_read_only" }, 409, {
       "cache-control": "no-store",
     });
+  }
+  if (replaceRemoteCredential) {
+    const directTarget = await loadCredentialTarget(env, deviceID, accountID);
+    if (directTarget) {
+      return replaceAccountCredential(
+        env,
+        deviceID,
+        accountID,
+        directTarget,
+        upload,
+        fetchUsage,
+      );
+    }
   }
   const now = Math.floor(Date.now() / 1_000);
   const encrypted = await encryptCredentials(
@@ -1225,9 +1352,10 @@ async function upsertMonitoredAccount(
          device_id, account_id, provider_id, workspace_id, display_name, profile_name, email,
          plan, plan_expires_at, trial_expires_at, missing_quotas,
          encrypted_credentials, credential_fingerprint, credential_revision,
-         refresh_interval_seconds, next_refresh_at, created_at, updated_at
+         refresh_interval_seconds, history_retention_days,
+         next_refresh_at, created_at, updated_at
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM account_monitoring_consent
          WHERE device_id = ? AND account_id = ? AND consent_revision = ? AND enabled = 1
@@ -1257,6 +1385,7 @@ async function upsertMonitoredAccount(
            excluded.credential_revision
          ),
          refresh_interval_seconds = excluded.refresh_interval_seconds,
+         history_retention_days = excluded.history_retention_days,
          next_refresh_at = CASE
            WHEN excluded.credential_revision > monitored_accounts.credential_revision
              THEN MIN(monitored_accounts.next_refresh_at, excluded.next_refresh_at)
@@ -1275,7 +1404,7 @@ async function upsertMonitoredAccount(
       upload.trial_expires_at,
       JSON.stringify(upload.missing_quotas),
       encrypted, fingerprint, upload.consent_revision,
-      upload.refresh_interval_seconds, now, now, now,
+      upload.refresh_interval_seconds, upload.history_retention_days, now, now, now,
       deviceID, accountID, upload.consent_revision,
     ),
   ]);
@@ -1293,7 +1422,7 @@ async function upsertMonitoredAccount(
   return accountSyncResponse(env, row, [], existing ? 200 : 201, null);
 }
 
-async function replaceRemoteAccountCredential(
+async function replaceAccountCredential(
   env: Env,
   subscriberDeviceID: string,
   localAccountID: string,
@@ -1332,28 +1461,25 @@ async function replaceRemoteAccountCredential(
   }
   await env.DB.prepare(
     `UPDATE monitored_accounts SET display_name = ?, profile_name = ?, email = ?,
-       plan_expires_at = ?, trial_expires_at = ?, missing_quotas = ?, updated_at = ?
+       plan_expires_at = ?, trial_expires_at = ?, missing_quotas = ?,
+       refresh_interval_seconds = ?, history_retention_days = ?, updated_at = ?
      WHERE device_id = ? AND account_id = ?`
   ).bind(
     upload.display_name, upload.profile_name, upload.email,
-    upload.plan_expires_at, upload.trial_expires_at, JSON.stringify(upload.missing_quotas), now,
+    upload.plan_expires_at, upload.trial_expires_at, JSON.stringify(upload.missing_quotas),
+    upload.refresh_interval_seconds, upload.history_retention_days, now,
     source.device_id, source.account_id,
   ).run();
   await applyVerifiedCredentialResult(env, source, result);
-  const duplicates = await loadSameAccountCredentialTargets(
-    env, source.provider_id, source.workspace_id, source.device_id, source.account_id
+  const mergedAccounts = 1 + await propagateVerifiedCredentialToSameAccount(
+    env,
+    source,
+    result,
   );
-  let mergedAccounts = 1;
-  for (const target of duplicates) {
-    const knownReference = explicitSnapshotAccountReference(target.latest_snapshot);
-    if (knownReference && knownReference !== result.snapshot.account_reference) continue;
-    await applyVerifiedCredentialResult(env, target, result);
-    mergedAccounts += 1;
-  }
   const row = await loadAccountSyncSourceRow(env, subscriberDeviceID, localAccountID);
   if (!row) return json({ error: "remote_account_not_found" }, 404);
   console.log(JSON.stringify({
-    event: "remote_account_credential_replaced",
+    event: "account_credential_replaced",
     provider: source.provider_id,
     merged_accounts: mergedAccounts,
   }));
@@ -1389,7 +1515,8 @@ async function loadCredentialTarget(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
-            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot
+            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot,
+            monitored_accounts.history_retention_days
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
@@ -1410,7 +1537,8 @@ async function loadSameAccountCredentialTargets(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
-            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot
+            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot,
+            monitored_accounts.history_retention_days
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
@@ -1460,16 +1588,21 @@ async function applyVerifiedCredentialResult(
     ),
     ...snapshot.windows.map((window) => env.DB.prepare(
       `INSERT INTO usage_history (
-         device_id, account_id, provider_id, metric_id, metric_title, kind, window_minutes,
+         device_id, account_id, row_tag, history_source,
+         provider_id, metric_id, metric_title, kind, window_minutes,
          remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(device_id, account_id, metric_id, recorded_at) DO UPDATE SET
+         row_tag = excluded.row_tag,
+         history_source = 'worker',
          remaining_percent = excluded.remaining_percent,
          resets_at = excluded.resets_at,
          seconds_until_reset = excluded.seconds_until_reset,
          plan = excluded.plan`
     ).bind(
-      target.device_id, target.account_id, snapshot.provider_id, window.metric_id,
+      target.device_id, target.account_id,
+      historyRowTag(target.account_id, window.metric_id, snapshot.fetched_at),
+      snapshot.provider_id, window.metric_id,
       window.title, window.kind, window.window_minutes, window.remaining_percent,
       snapshot.fetched_at, window.resets_at,
       Math.max(0, window.resets_at - snapshot.fetched_at), effectivePlan,
@@ -1529,6 +1662,149 @@ async function disableMonitoredAccount(
   return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
 }
 
+async function uploadMonitoredAccountHistory(
+  request: Request,
+  env: Env,
+  deviceID: string,
+  accountID: string,
+): Promise<Response> {
+  const source = await loadCredentialTarget(env, deviceID, accountID);
+  if (!source) {
+    const subscription = await loadAccountSyncSourceRow(env, deviceID, accountID);
+    return json(
+      { error: subscription ? "remote_account_is_read_only" : "account_not_found" },
+      subscription ? 409 : 404,
+      { "cache-control": "no-store" },
+    );
+  }
+  const upload = await parseHistoryUpload(request, accountID, source.provider_id);
+  if (!upload) return json({ error: "invalid_history" }, 400, { "cache-control": "no-store" });
+
+  const now = Math.floor(Date.now() / 1_000);
+  const sourceCutoff = now - source.history_retention_days * 86_400;
+  if (upload.history.some((point) => point.recorded_at < sourceCutoff
+      || point.recorded_at > now + 5 * 60)) {
+    return json({ error: "history_outside_retention" }, 400, {
+      "cache-control": "no-store",
+    });
+  }
+
+  const sourceReference = explicitSnapshotAccountReference(source.latest_snapshot);
+  const duplicates = sourceReference
+    ? (await loadSameAccountCredentialTargets(
+        env,
+        source.provider_id,
+        source.workspace_id,
+        source.device_id,
+        source.account_id,
+      )).filter((target) => {
+        if (target.account_id !== source.account_id) return false;
+        const targetReference = explicitSnapshotAccountReference(target.latest_snapshot);
+        return targetReference === null || targetReference === sourceReference;
+      })
+    : [];
+  const targets = [source, ...duplicates];
+  let accepted = 0;
+  for (const target of targets) {
+    const cutoff = now - target.history_retention_days * 86_400;
+    const rows = upload.history.filter((point) => point.recorded_at >= cutoff);
+    const inserted = await insertHistoryRows(env, target, rows);
+    if (target.device_id === source.device_id && target.account_id === source.account_id) {
+      accepted = inserted;
+    }
+  }
+  console.log(JSON.stringify({
+    event: "device_history_uploaded",
+    rows: upload.history.length,
+    accounts: targets.length,
+  }));
+  return json({
+    accepted,
+    deduplicated: upload.history.length - accepted,
+  }, 200, { "cache-control": "no-store" });
+}
+
+async function updateMonitoredAccountPolicy(
+  request: Request,
+  env: Env,
+  deviceID: string,
+  accountID: string,
+): Promise<Response> {
+  const policy = await parseAccountPolicyUpdate(request);
+  if (!policy) {
+    return json({ error: "invalid_account_settings" }, 400, { "cache-control": "no-store" });
+  }
+  if (!await loadCredentialTarget(env, deviceID, accountID)) {
+    const subscription = await loadAccountSyncSourceRow(env, deviceID, accountID);
+    return json(
+      { error: subscription ? "remote_account_is_read_only" : "account_not_found" },
+      subscription ? 409 : 404,
+      { "cache-control": "no-store" },
+    );
+  }
+  const now = Math.floor(Date.now() / 1_000);
+  const update = await env.DB.prepare(
+    `UPDATE monitored_accounts SET
+       refresh_interval_seconds = ?,
+       history_retention_days = ?,
+       next_refresh_at = CASE
+         WHEN ? < refresh_interval_seconds THEN MIN(next_refresh_at, ? + ?)
+         ELSE next_refresh_at
+       END,
+       updated_at = ?
+     WHERE device_id = ? AND account_id = ?
+       AND EXISTS (
+         SELECT 1 FROM account_monitoring_consent
+         WHERE device_id = ? AND account_id = ? AND enabled = 1
+       )`
+  ).bind(
+    policy.refresh_interval_seconds,
+    policy.history_retention_days,
+    policy.refresh_interval_seconds,
+    now,
+    policy.refresh_interval_seconds,
+    now,
+    deviceID,
+    accountID,
+    deviceID,
+    accountID,
+  ).run();
+  if ((update.meta.changes ?? 0) !== 1) {
+    return json({ error: "account_not_found" }, 404, { "cache-control": "no-store" });
+  }
+  const row = await loadAccountSyncRow(env, deviceID, accountID);
+  if (!row) throw new Error("Could not update monitored account settings");
+  console.log(JSON.stringify({ event: "account_monitor_settings_updated" }));
+  return accountSyncResponse(env, row, [], 200, null);
+}
+
+async function insertHistoryRows(
+  env: Env,
+  target: CredentialTargetRow,
+  rows: HistoryUploadRow[],
+): Promise<number> {
+  let inserted = 0;
+  for (let offset = 0; offset < rows.length; offset += 40) {
+    const results = await env.DB.batch(rows.slice(offset, offset + 40).map((point) =>
+      env.DB.prepare(
+        `INSERT INTO usage_history (
+           device_id, account_id, row_tag, history_source,
+           provider_id, metric_id, metric_title, kind, window_minutes,
+           remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
+         ) VALUES (?, ?, ?, 'device', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`
+      ).bind(
+        target.device_id, target.account_id, point.row_tag,
+        point.provider_id, point.metric_id, point.metric_title, point.kind,
+        point.window_minutes, point.remaining_percent, point.recorded_at,
+        point.resets_at, point.seconds_until_reset, point.plan,
+      )
+    ));
+    inserted += results.reduce((sum, result) => sum + (result.meta.changes ?? 0), 0);
+  }
+  return inserted;
+}
+
 async function syncMonitoredAccount(
   env: Env,
   deviceID: string,
@@ -1541,18 +1817,23 @@ async function syncMonitoredAccount(
   const parsedSince = parseUnixSeconds(sinceValue);
   if (sinceValue !== null && parsedSince === null) return json({ error: "invalid_since" }, 400);
   const since = parsedSince
-    ?? Math.floor(Date.now() / 1_000) - HISTORY_RETENTION_DAYS * 86_400;
+    ?? Math.floor(Date.now() / 1_000) - row.history_retention_days * 86_400;
   const cursor = decodeHistoryCursor(url.searchParams.get("cursor"));
   if (url.searchParams.has("cursor") && cursor === null) return json({ error: "invalid_cursor" }, 400);
-  const effectiveSince = Math.max(since, Math.floor(Date.now() / 1_000) - HISTORY_RETENTION_DAYS * 86_400);
+  const effectiveSince = Math.max(
+    since,
+    Math.floor(Date.now() / 1_000) - row.history_retention_days * 86_400,
+  );
   const query = cursor
-    ? `SELECT provider_id, metric_id, metric_title, kind, window_minutes, remaining_percent,
+    ? `SELECT row_tag, history_source, provider_id, metric_id, metric_title,
+              kind, window_minutes, remaining_percent,
               recorded_at, resets_at, seconds_until_reset, plan
        FROM usage_history
        WHERE device_id = ? AND account_id = ? AND recorded_at >= ?
          AND (recorded_at > ? OR (recorded_at = ? AND metric_id > ?))
        ORDER BY recorded_at, metric_id LIMIT ?`
-    : `SELECT provider_id, metric_id, metric_title, kind, window_minutes, remaining_percent,
+    : `SELECT row_tag, history_source, provider_id, metric_id, metric_title,
+              kind, window_minutes, remaining_percent,
               recorded_at, resets_at, seconds_until_reset, plan
        FROM usage_history
        WHERE device_id = ? AND account_id = ? AND recorded_at >= ?
@@ -1597,6 +1878,7 @@ async function accountSyncResponse(
     last_error: row.last_error,
     session_status: session.status,
     session_checked_at: session.checkedAt,
+    history_retention_days: row.history_retention_days,
   }, status, { "cache-control": "no-store" });
 }
 
@@ -1612,7 +1894,8 @@ async function loadAccountSyncRow(
             monitored_accounts.trial_expires_at,
             monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
             monitored_accounts.last_error,
-            monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision
+            monitored_accounts.latest_snapshot, monitored_accounts.history_retention_days,
+            account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
@@ -1636,7 +1919,8 @@ async function loadAccountSyncSourceRow(
             monitored_accounts.trial_expires_at,
             monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
             monitored_accounts.last_error,
-            monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision
+            monitored_accounts.latest_snapshot, monitored_accounts.history_retention_days,
+            account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
@@ -1654,7 +1938,8 @@ async function loadAccountSyncSourceRow(
             monitored_accounts.trial_expires_at,
             monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
             monitored_accounts.last_error,
-            monitored_accounts.latest_snapshot, 1 AS consent_revision
+            monitored_accounts.latest_snapshot, monitored_accounts.history_retention_days,
+            1 AS consent_revision
      FROM remote_account_subscriptions
      INNER JOIN monitored_accounts
        ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
@@ -1701,7 +1986,8 @@ async function enqueueDueAccounts(env: Env, now: number): Promise<void> {
               monitored_accounts.credential_fingerprint,
               monitored_accounts.credential_revision, monitored_accounts.consecutive_failures,
               monitored_accounts.scheduled_monitor_at,
-              monitored_accounts.refresh_interval_seconds, monitored_accounts.next_refresh_at,
+              monitored_accounts.refresh_interval_seconds,
+              monitored_accounts.history_retention_days, monitored_accounts.next_refresh_at,
               monitored_accounts.last_success_at, monitored_accounts.last_error,
               monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision
        FROM monitored_accounts
@@ -2139,7 +2425,8 @@ async function loadPendingMonitorRunTargets(
             monitored_accounts.credential_fingerprint,
             monitored_accounts.credential_revision, monitored_accounts.consecutive_failures,
             monitored_accounts.scheduled_monitor_at,
-            monitored_accounts.refresh_interval_seconds, monitored_accounts.next_refresh_at,
+            monitored_accounts.refresh_interval_seconds,
+            monitored_accounts.history_retention_days, monitored_accounts.next_refresh_at,
             monitored_accounts.last_success_at, monitored_accounts.last_error,
             monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision,
             monitor_run_targets.consent_revision AS target_consent_revision,
@@ -2258,10 +2545,11 @@ async function applyMonitorResultToTarget(
     ),
     ...historyWindows.map((window) => env.DB.prepare(
       `INSERT INTO usage_history (
-         device_id, account_id, provider_id, metric_id, metric_title, kind, window_minutes,
+         device_id, account_id, row_tag, history_source,
+         provider_id, metric_id, metric_title, kind, window_minutes,
          remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
        )
-       SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       SELECT ?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
        WHERE EXISTS (
          SELECT 1 FROM monitored_accounts
          INNER JOIN account_monitoring_consent
@@ -2274,12 +2562,16 @@ async function applyMonitorResultToTarget(
            AND account_monitoring_consent.enabled = 1
        )
        ON CONFLICT(device_id, account_id, metric_id, recorded_at) DO UPDATE SET
+         row_tag = excluded.row_tag,
+         history_source = 'worker',
          remaining_percent = excluded.remaining_percent,
          resets_at = excluded.resets_at,
          seconds_until_reset = excluded.seconds_until_reset,
          plan = excluded.plan`
     ).bind(
-      row.device_id, row.account_id, snapshot.provider_id, window.metric_id, window.title,
+      row.device_id, row.account_id,
+      historyRowTag(row.account_id, window.metric_id, snapshot.fetched_at),
+      snapshot.provider_id, window.metric_id, window.title,
       window.kind, window.window_minutes, window.remaining_percent, snapshot.fetched_at,
       window.resets_at, Math.max(0, window.resets_at - snapshot.fetched_at),
       effectivePlan, row.device_id, row.account_id, nextFingerprint, run.occurrence_at,
@@ -2308,12 +2600,10 @@ async function applyMonitorResultToTarget(
   const results = await env.DB.batch(statements);
   if ((results[0]?.meta.changes ?? 0) === 1) {
     await enqueueRemoteAccountRefreshHints(env, row.device_id, row.account_id);
-    if (row.provider_id === "chatgpt") {
-      await propagateVerifiedCredentialToSameAccount(env, row, {
-        credentials: targetCredentials,
-        snapshot: effectiveSnapshot,
-      });
-    }
+    await propagateVerifiedCredentialToSameAccount(env, row, {
+      credentials: targetCredentials,
+      snapshot: effectiveSnapshot,
+    });
   }
 }
 
@@ -2321,9 +2611,9 @@ async function propagateVerifiedCredentialToSameAccount(
   env: Env,
   source: CredentialTargetRow,
   result: ProviderFetchResult,
-): Promise<void> {
+): Promise<number> {
   const reference = result.snapshot.account_reference;
-  if (!reference) return;
+  if (!reference) return 0;
   const targets = await loadSameAccountCredentialTargets(
     env,
     source.provider_id,
@@ -2332,18 +2622,44 @@ async function propagateVerifiedCredentialToSameAccount(
     source.account_id,
   );
   let updated = 0;
+  const updatedDeviceIDs = new Set<string>();
   for (const target of targets) {
     const knownReference = explicitSnapshotAccountReference(target.latest_snapshot);
     if (knownReference && knownReference !== reference) continue;
     await applyVerifiedCredentialResult(env, target, result);
     updated += 1;
+    updatedDeviceIDs.add(target.device_id);
   }
+  await enqueueDeviceRefreshHints(env, updatedDeviceIDs);
   if (updated > 0) {
     console.log(JSON.stringify({
       event: "same_provider_account_credentials_merged",
       provider: source.provider_id,
       accounts: updated + 1,
     }));
+  }
+  return updated;
+}
+
+async function enqueueDeviceRefreshHints(env: Env, deviceIDs: Set<string>): Promise<void> {
+  if (deviceIDs.size === 0) return;
+  const ids = [...deviceIDs];
+  const targets: Array<Omit<PushTarget, "kind">> = [];
+  for (let offset = 0; offset < ids.length; offset += 40) {
+    const slice = ids.slice(offset, offset + 40);
+    const placeholders = slice.map(() => "?").join(", ");
+    const result = await env.DB.prepare(
+      `SELECT device_id, apns_token, apns_environment FROM devices
+       WHERE push_disabled_at IS NULL AND device_id IN (${placeholders})`
+    ).bind(...slice).all<Omit<PushTarget, "kind">>();
+    targets.push(...result.results);
+  }
+  for (let offset = 0; offset < targets.length; offset += QUEUE_BATCH_SIZE) {
+    await env.PUSH_QUEUE.sendBatch(
+      targets.slice(offset, offset + QUEUE_BATCH_SIZE).map((row) => ({
+        body: { kind: "push" as const, ...row },
+      }))
+    );
   }
 }
 
@@ -2500,8 +2816,16 @@ async function finishMonitorRun(
 }
 
 async function pruneHistory(env: Env, now: number): Promise<void> {
-  await env.DB.prepare("DELETE FROM usage_history WHERE recorded_at < ?")
-    .bind(now - HISTORY_RETENTION_DAYS * 86_400).run();
+  await env.DB.prepare(
+    `DELETE FROM usage_history
+     WHERE EXISTS (
+       SELECT 1 FROM monitored_accounts
+       WHERE monitored_accounts.device_id = usage_history.device_id
+         AND monitored_accounts.account_id = usage_history.account_id
+         AND usage_history.recorded_at
+           < ? - monitored_accounts.history_retention_days * 86400
+     )`
+  ).bind(now).run();
 }
 
 async function pruneLinkSessions(env: Env, now: number): Promise<void> {
@@ -3002,6 +3326,11 @@ function nullablePositiveNumber(value: unknown): number | null | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+function numericUnixSeconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value) : null;
+}
+
 function parseUploadConsentRevision(value: unknown): number | null {
   if (value === undefined) return 1;
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -3023,6 +3352,10 @@ function parseUnixSeconds(value: string | null): number | null {
 
 function encodeHistoryCursor(recordedAt: number, metricID: string): string {
   return base64URL(JSON.stringify({ recorded_at: recordedAt, metric_id: metricID }));
+}
+
+function historyRowTag(accountID: string, metricID: string, recordedAt: number): string {
+  return `h1.${accountID.toLowerCase()}.${base64URL(metricID)}.${Math.floor(recordedAt)}`;
 }
 
 function decodeHistoryCursor(value: string | null): { recordedAt: number; metricID: string } | null {

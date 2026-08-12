@@ -1515,6 +1515,7 @@ private struct MacWorkerLinkReviewView: View {
 
     @State private var metadata: WorkerLinkMetadata?
     @State private var interval = RefreshInterval.tenMinutes
+    @State private var historyRetention = CloudHistoryRetention.thirtyFiveDays
     @State private var trustsWorker = false
     @State private var isValidating = true
     @State private var isCommitting = false
@@ -1559,6 +1560,11 @@ private struct MacWorkerLinkReviewView: View {
                                 Text(option.title).tag(option)
                             }
                         }
+                        Picker("Cloud history", selection: $historyRetention) {
+                            ForEach(CloudHistoryRetention.allCases, id: \.self) { option in
+                                Text(option.title).tag(option)
+                            }
+                        }
                     }
 
                     Section("What this Mac sends") {
@@ -1589,6 +1595,7 @@ private struct MacWorkerLinkReviewView: View {
             }
             .task {
                 interval = store.pushServerSettings.serverMonitoringInterval
+                historyRetention = store.pushServerSettings.historyRetention
                 await validateWorker()
             }
             .confirmationDialog(
@@ -1626,6 +1633,7 @@ private struct MacWorkerLinkReviewView: View {
                 draft,
                 monitoringAccountIDs: [],
                 interval: interval,
+                historyRetention: historyRetention,
                 userConfirmedCredentialUpload: true
             )
             dismiss()

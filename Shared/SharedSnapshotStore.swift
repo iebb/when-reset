@@ -57,11 +57,33 @@ struct UsageHistoryPoint: Codable, Hashable, Identifiable, Sendable {
     var source: UsageRefreshSource
     var plan: String? = nil
     var isSyntheticMissingQuota: Bool? = nil
+    var rowTag: String? = nil
 
     var representsSyntheticMissingQuota: Bool { isSyntheticMissingQuota == true }
 
     var id: String {
-        "\(accountID.uuidString):\(metricID):\(Int64(recordedAt.timeIntervalSince1970 * 1_000))"
+        resolvedRowTag
+    }
+
+    var resolvedRowTag: String {
+        rowTag ?? Self.makeRowTag(
+            accountID: accountID,
+            metricID: metricID,
+            recordedAt: recordedAt
+        )
+    }
+
+    var deduplicationKey: String {
+        "\(accountID.uuidString.lowercased()):\(metricID):\(Int64(recordedAt.timeIntervalSince1970.rounded(.down)))"
+    }
+
+    static func makeRowTag(accountID: UUID, metricID: String, recordedAt: Date) -> String {
+        let encodedMetric = Data(metricID.utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let seconds = Int64(recordedAt.timeIntervalSince1970.rounded(.down))
+        return "h1.\(accountID.uuidString.lowercased()).\(encodedMetric).\(seconds)"
     }
 }
 
@@ -256,7 +278,7 @@ private struct UsageAlertDetectorState: Codable, Hashable, Sendable {
 }
 
 private struct UsageHistoryArchive: Codable, Hashable, Sendable {
-    static let currentSchemaVersion = 2
+    static let currentSchemaVersion = 3
 
     var schemaVersion = currentSchemaVersion
     var points: [UsageHistoryPoint] = []
@@ -284,9 +306,21 @@ actor UsageHistoryStore {
 
     private let fileURL: URL
     private var cachedArchive: UsageHistoryArchive?
+    private var activeRetentionInterval = UsageHistoryStore.retentionInterval
 
     init(fileURL: URL = UsageHistoryStore.defaultFileURL()) {
         self.fileURL = fileURL
+    }
+
+    func setRetentionInterval(_ interval: TimeInterval, now: Date = .now) throws {
+        activeRetentionInterval = max(Self.retentionInterval, interval)
+        guard cachedArchive != nil || FileManager.default.fileExists(atPath: fileURL.path) else {
+            return
+        }
+        var archive = try loadedArchive()
+        prune(&archive, now: now)
+        try persist(archive)
+        cachedArchive = archive
     }
 
     func load(now: Date = .now) throws -> UsageHistoryLoadResult {
@@ -306,7 +340,7 @@ actor UsageHistoryStore {
         let observationSource: UsageRefreshSource = account.isDemo ? .demo : source
         let recordedPlan = normalizedPlan(snapshot.plan) ?? normalizedPlan(account.plan)
         let mappedPoints = snapshot.usageWindows.map { window in
-            UsageHistoryPoint(
+            var point = UsageHistoryPoint(
                 accountID: account.id,
                 providerID: account.providerID,
                 metricID: window.metricID,
@@ -320,6 +354,8 @@ actor UsageHistoryStore {
                 source: observationSource,
                 plan: recordedPlan
             )
+            point.rowTag = point.resolvedRowTag
+            return point
         }
         let actualPoints = Dictionary(
             mappedPoints.map { ($0.metricID, $0) },
@@ -338,7 +374,7 @@ actor UsageHistoryStore {
             guard !actualMetricIDs.contains(previous.metricID),
                   accountSettings.missingQuotaHistoryBehavior(for: previous.metricID) == .recordAsFull
             else { return nil }
-            return UsageHistoryPoint(
+            var point = UsageHistoryPoint(
                 accountID: account.id,
                 providerID: account.providerID,
                 metricID: previous.metricID,
@@ -353,6 +389,8 @@ actor UsageHistoryStore {
                 plan: recordedPlan,
                 isSyntheticMissingQuota: true
             )
+            point.rowTag = point.resolvedRowTag
+            return point
         }
         let newPoints = (actualPoints + missingPoints).sorted { $0.metricID < $1.metricID }
 
@@ -424,10 +462,15 @@ actor UsageHistoryStore {
             guard point.accountID == sourceID else { return point }
             var merged = point
             merged.accountID = targetID
+            merged.rowTag = UsageHistoryPoint.makeRowTag(
+                accountID: targetID,
+                metricID: merged.metricID,
+                recordedAt: merged.recordedAt
+            )
             return merged
         }
         archive.points = Array(Dictionary(
-            archive.points.map { ($0.id, $0) },
+            archive.points.map { ($0.deduplicationKey, $0) },
             uniquingKeysWith: { existing, candidate in
                 candidate.source == .server ? candidate : existing
             }
@@ -452,7 +495,7 @@ actor UsageHistoryStore {
                             now: Date = .now) throws -> [UsageHistoryPoint] {
         var archive = try loadedArchive()
         prune(&archive, now: now)
-        let earliest = now.addingTimeInterval(-Self.retentionInterval)
+        let earliest = now.addingTimeInterval(-activeRetentionInterval)
         let accepted = incomingPoints.filter { point in
             point.accountID == account.id
                 && point.providerID == account.providerID
@@ -464,11 +507,12 @@ actor UsageHistoryStore {
             var normalized = point
             normalized.remainingPercent = max(0, min(100, point.remainingPercent))
             normalized.source = .server
+            normalized.rowTag = normalized.resolvedRowTag
             return normalized
         }
 
-        let acceptedIDs = Set(accepted.map(\.id))
-        archive.points.removeAll { acceptedIDs.contains($0.id) }
+        let acceptedKeys = Set(accepted.map(\.deduplicationKey))
+        archive.points.removeAll { acceptedKeys.contains($0.deduplicationKey) }
         archive.points.append(contentsOf: accepted)
         archive.points.sort {
             if $0.recordedAt != $1.recordedAt { return $0.recordedAt < $1.recordedAt }
@@ -798,7 +842,15 @@ actor UsageHistoryStore {
             guard decoded.schemaVersion <= UsageHistoryArchive.currentSchemaVersion else {
                 throw UsageHistoryStoreError.unsupportedSchema(decoded.schemaVersion)
             }
-            if decoded.schemaVersion < UsageHistoryArchive.currentSchemaVersion {
+            var upgraded = decoded.schemaVersion < UsageHistoryArchive.currentSchemaVersion
+            decoded.points = decoded.points.map { point in
+                guard point.rowTag == nil else { return point }
+                var tagged = point
+                tagged.rowTag = tagged.resolvedRowTag
+                upgraded = true
+                return tagged
+            }
+            if upgraded {
                 decoded.schemaVersion = UsageHistoryArchive.currentSchemaVersion
                 try persist(decoded)
             }
@@ -833,7 +885,7 @@ actor UsageHistoryStore {
     }
 
     private func prune(_ archive: inout UsageHistoryArchive, now: Date) {
-        let historyCutoff = now.addingTimeInterval(-Self.retentionInterval)
+        let historyCutoff = now.addingTimeInterval(-activeRetentionInterval)
         let pendingCutoff = now.addingTimeInterval(-Self.pendingNotificationLifetime)
         archive.points.removeAll { $0.recordedAt < historyCutoff }
         archive.pendingNotifications.removeAll { $0.createdAt < pendingCutoff }

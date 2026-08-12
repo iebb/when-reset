@@ -318,8 +318,8 @@ enum WorkerHistoryFetchScope: Sendable {
     case incremental
     case retainedHistory
 
-    func startDate(now: Date, latestServerPoint: Date?) -> Date {
-        let earliestRetainedDate = now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
+    func startDate(now: Date, latestServerPoint: Date?, retentionInterval: TimeInterval) -> Date {
+        let earliestRetainedDate = now.addingTimeInterval(-retentionInterval)
         switch self {
         case .retainedHistory:
             return earliestRetainedDate
@@ -489,6 +489,9 @@ final class AppStore {
         }
         var pendingNotifications: [UsageNotificationEvent] = []
         do {
+            try await historyStore.setRetentionInterval(
+                pushServerSettings.historyRetention.timeInterval
+            )
             let loaded = try await historyStore.load()
             usageHistory = loaded.points
             pendingNotifications = loaded.pendingNotifications
@@ -1173,7 +1176,8 @@ final class AppStore {
                 // provider from this device.
                 return await uploadServerAccount(
                     account,
-                    presentErrors: source.presentsFetchFailureAlerts
+                    presentErrors: source.presentsFetchFailureAlerts,
+                    replacingRemoteCredential: true
                 )
             }
             return await syncServerAccount(
@@ -1339,15 +1343,6 @@ final class AppStore {
             account.workspaceID = identity.workspaceID
             account.mergeProviderDetails(identity.accountDetails)
             accounts[index] = account
-            if isServerMonitoringEnabled(for: account) {
-                var accountSettings = settings(for: account)
-                accountSettings.selfHostedServerConsentRevision = nextServerConsentRevision(
-                    for: account.id,
-                    after: accountSettings.selfHostedServerConsentRevision
-                )
-                monitorSettings[account.id] = accountSettings
-                persistMonitorSettings()
-            }
             refreshFailures.removeValue(forKey: account.id)
             persistAccounts()
             return account
@@ -1519,6 +1514,31 @@ final class AppStore {
             presentErrors: true,
             historyFetchScope: .retainedHistory
         )
+    }
+
+    func hasLocalCredentials(for account: MonitoredAccount) -> Bool {
+        (try? KeychainStore.load(for: account.id)) != nil
+    }
+
+    func setWorkerAsCredentialAuthority(_ enabled: Bool, for account: MonitoredAccount) {
+        guard !account.isDemo,
+              !account.isRemoteOnly,
+              let index = accounts.firstIndex(where: { $0.id == account.id }) else { return }
+        if enabled {
+            guard isServerMonitoringEnabled(for: accounts[index]) else { return }
+            accounts[index].storesCredentialsOnWorkerOnly = true
+            persistAccounts()
+            KeychainStore.delete(for: account.id)
+        } else {
+            accounts[index].storesCredentialsOnWorkerOnly = false
+            persistAccounts()
+        }
+    }
+
+    @discardableResult
+    func uploadLocalHistoryToWorker(for account: MonitoredAccount) async -> Bool {
+        errorMessage = nil
+        return await uploadLocalHistoryToServer(for: account, presentErrors: true)
     }
 
     private func serverMonitoringEnabled(_ settings: AccountMonitorSettings,
@@ -1726,6 +1746,7 @@ final class AppStore {
         _ draft: WorkerLinkDraft,
         monitoringAccountIDs: Set<UUID>,
         interval: RefreshInterval,
+        historyRetention: CloudHistoryRetention,
         userConfirmedCredentialUpload: Bool
     ) throws {
         guard userConfirmedCredentialUpload else {
@@ -1829,7 +1850,8 @@ final class AppStore {
         let settings = PushServerSettings(
             mode: .custom,
             customServerURL: serverURL.absoluteString,
-            serverMonitoringInterval: interval
+            serverMonitoringInterval: interval,
+            historyRetention: historyRetention
         )
         pushServerSettings = settings
         UserDefaults.standard.set(
@@ -1851,22 +1873,44 @@ final class AppStore {
             ? nil : serverURL.absoluteString
         persistPendingServerCleanup()
         pushServerStatus = .waitingForDeviceToken
+        Task {
+            try? await historyStore.setRetentionInterval(historyRetention.timeInterval)
+        }
         Task { await transitionPushServer(from: previousSettings, to: settings) }
     }
 
-    func updatePushServerMonitoringInterval(_ interval: RefreshInterval) {
+    func updatePushServerPolicy(
+        interval: RefreshInterval,
+        historyRetention: CloudHistoryRetention
+    ) {
         guard pushServerSettings.mode != .disabled else { return }
         pushServerSettings.serverMonitoringInterval = interval
+        pushServerSettings.historyRetention = historyRetention
         UserDefaults.standard.set(
             try? JSONEncoder().encode(pushServerSettings),
             forKey: pushServerSettingsKey
         )
         Task {
+            try? await historyStore.setRetentionInterval(historyRetention.timeInterval)
             for account in accounts
                 where isServerMonitoringEnabled(for: account)
                     && !account.isRemoteOnly
                     && remoteWorkerAccountID(for: account, settings: settings(for: account)) == nil {
-                await uploadServerAccount(account)
+                do {
+                    let result = try await PushServerClient.updateAccountPolicy(
+                        settings: pushServerSettings,
+                        account: account
+                    )
+                    await consumeServerResult(
+                        result,
+                        for: account,
+                        consentRevision: settings(for: account).selfHostedServerConsentRevision,
+                        deliverNotifications: false,
+                        presentErrors: true
+                    )
+                } catch {
+                    errorMessage = error.localizedDescription
+                }
             }
         }
     }
@@ -2589,16 +2633,22 @@ final class AppStore {
 
     @discardableResult
     private func uploadServerAccount(_ account: MonitoredAccount,
-                                     presentErrors: Bool = true) async -> Bool {
+                                     presentErrors: Bool = true,
+                                     replacingRemoteCredential: Bool = false) async -> Bool {
         await serverAccountOperationGate.acquire(accountID: account.id)
-        let succeeded = await performServerAccountUpload(account, presentErrors: presentErrors)
+        let succeeded = await performServerAccountUpload(
+            account,
+            presentErrors: presentErrors,
+            replacingRemoteCredential: replacingRemoteCredential
+        )
         await serverAccountOperationGate.release(accountID: account.id)
         return succeeded
     }
 
     @discardableResult
     private func performServerAccountUpload(_ account: MonitoredAccount,
-                                            presentErrors: Bool) async -> Bool {
+                                            presentErrors: Bool,
+                                            replacingRemoteCredential: Bool = false) async -> Bool {
         var accountSettings = settings(for: account)
         guard !account.isDemo,
               !account.isRemoteOnly,
@@ -2623,7 +2673,8 @@ final class AppStore {
                 account: currentAccount,
                 credentials: credentials,
                 missingQuotas: serverMissingQuotaDescriptors(for: currentAccount),
-                consentRevision: consentRevision
+                consentRevision: consentRevision,
+                replacingRemoteCredential: replacingRemoteCredential
             )
             let currentServerURL = (try? activeServerSettings
                 .resolvedServerURL())?.absoluteString
@@ -2643,6 +2694,13 @@ final class AppStore {
                 deliverNotifications: false,
                 presentErrors: presentErrors
             )
+            _ = await uploadLocalHistoryToServer(
+                for: currentAccount,
+                presentErrors: false
+            )
+            if currentAccount.usesWorkerAsCredentialAuthority {
+                KeychainStore.delete(for: currentAccount.id)
+            }
             return true
         } catch {
             guard let currentAccount = accounts.first(where: { $0.id == account.id }) else { return false }
@@ -2652,6 +2710,45 @@ final class AppStore {
             if presentErrors {
                 errorMessage = error.localizedDescription
             }
+            return false
+        }
+    }
+
+    private func uploadLocalHistoryToServer(
+        for account: MonitoredAccount,
+        presentErrors: Bool
+    ) async -> Bool {
+        guard !account.isDemo,
+              !account.isRemoteOnly,
+              isServerMonitoringEnabled(for: account),
+              pushServerSettings.mode != .disabled else { return false }
+        let cutoff = Date.now.addingTimeInterval(
+            -pushServerSettings.historyRetention.timeInterval
+        )
+        let localPoints = usageHistory
+            .filter {
+                $0.accountID == account.id
+                    && $0.source != .server
+                    && $0.recordedAt >= cutoff
+            }
+            .reduce(into: [String: UsageHistoryPoint]()) { result, point in
+                result[point.deduplicationKey] = point
+            }
+            .values
+            .sorted {
+                if $0.recordedAt != $1.recordedAt { return $0.recordedAt < $1.recordedAt }
+                return $0.metricID < $1.metricID
+            }
+        guard !localPoints.isEmpty else { return true }
+        do {
+            _ = try await PushServerClient.uploadHistory(
+                settings: pushServerSettings,
+                account: account,
+                points: localPoints
+            )
+            return true
+        } catch {
+            if presentErrors { errorMessage = error.localizedDescription }
             return false
         }
     }
@@ -2691,7 +2788,8 @@ final class AppStore {
             .max()
         let since = historyFetchScope.startDate(
             now: .now,
-            latestServerPoint: latestServerPoint
+            latestServerPoint: latestServerPoint,
+            retentionInterval: pushServerSettings.historyRetention.timeInterval
         )
         do {
             let currentAccount = accounts.first(where: { $0.id == account.id }) ?? account
@@ -2707,7 +2805,7 @@ final class AppStore {
                 if WorkerMetadataPolicy.shouldUpload(
                     local: metadataSource,
                     remote: result.accountDetails
-                ) {
+                ), hasLocalCredentials(for: metadataSource) {
                     let uploaded = await performServerAccountUpload(
                         metadataSource,
                         presentErrors: false
