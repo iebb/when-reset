@@ -2,6 +2,7 @@
 import ActivityKit
 #endif
 import AppIntents
+import Charts
 import SwiftUI
 import WidgetKit
 
@@ -155,6 +156,12 @@ private enum WidgetDataCatalog {
     static func metricEntityID(accountID: UUID, metricID: String) -> String {
         "\(accountID.uuidString)|\(metricID)"
     }
+
+    static func history(accountID: UUID, metricID: String, now: Date) -> [UsageHistoryPoint] {
+        SharedSnapshotStore.loadHistoryPoints(now: now).filter {
+            $0.accountID == accountID && $0.metricID == metricID
+        }
+    }
 }
 
 private struct WidgetMetricTarget: Hashable, Sendable {
@@ -236,6 +243,7 @@ private struct UsageEntry: TimelineEntry {
     var snapshot: UsageSnapshot
     var target: WidgetMetricTarget
     var displayStyle: LockScreenDisplayStyle
+    var history: [UsageHistoryPoint]
 }
 
 private enum WidgetEntryResolver {
@@ -248,7 +256,8 @@ private enum WidgetEntryResolver {
             let target = WidgetMetricTarget.targets(for: snapshot, after: now).first
                 ?? .unavailable(at: now)
             return UsageEntry(date: now, snapshot: snapshot, target: target,
-                              displayStyle: displayStyle)
+                              displayStyle: displayStyle,
+                              history: previewHistory(snapshot: snapshot, target: target, now: now))
         }
 
         let stored = SharedSnapshotStore.load()
@@ -302,7 +311,13 @@ private enum WidgetEntryResolver {
             target = futureTargets.first
                 ?? .unavailable(at: now)
         }
-        return UsageEntry(date: now, snapshot: snapshot, target: target, displayStyle: displayStyle)
+        let history = WidgetDataCatalog.history(
+            accountID: snapshot.accountID,
+            metricID: target.metricID,
+            now: now
+        )
+        return UsageEntry(date: now, snapshot: snapshot, target: target,
+                          displayStyle: displayStyle, history: history)
     }
 
     private static func unavailableEntry(
@@ -334,11 +349,46 @@ private enum WidgetEntryResolver {
             at: now
         )
         return UsageEntry(date: now, snapshot: snapshot, target: target,
-                          displayStyle: displayStyle)
+                          displayStyle: displayStyle, history: [])
     }
 
     private static func nearestDate(in snapshot: UsageSnapshot, after date: Date) -> Date {
         WidgetMetricTarget.targets(for: snapshot, after: date).first?.expiresAt ?? .distantFuture
+    }
+
+    private static func previewHistory(
+        snapshot: UsageSnapshot,
+        target: WidgetMetricTarget,
+        now: Date
+    ) -> [UsageHistoryPoint] {
+        guard target.kind == .quota,
+              let providerID = snapshot.accountProviderID,
+              let remainingPercent = target.remainingPercent else { return [] }
+        let values = [
+            min(100, remainingPercent + 28),
+            min(100, remainingPercent + 24),
+            min(100, remainingPercent + 17),
+            min(100, remainingPercent + 13),
+            min(100, remainingPercent + 5),
+            remainingPercent
+        ]
+        return values.enumerated().map { index, value in
+            let recordedAt = now.addingTimeInterval(TimeInterval(index - values.count + 1) * 45 * 60)
+            return UsageHistoryPoint(
+                accountID: snapshot.accountID,
+                providerID: providerID,
+                metricID: target.metricID,
+                metricTitle: target.title,
+                kind: nil,
+                windowMinutes: nil,
+                remainingPercent: value,
+                recordedAt: recordedAt,
+                resetsAt: target.expiresAt,
+                secondsUntilReset: max(0, target.expiresAt.timeIntervalSince(recordedAt)),
+                source: .demo,
+                plan: snapshot.plan
+            )
+        }
     }
 }
 
@@ -411,6 +461,8 @@ private struct HomeWidgetView: View {
     var body: some View {
         if family == .systemLarge {
             LargeHomeWidgetView(entry: entry)
+        } else if family == .systemSmall {
+            SmallHomeWidgetView(entry: entry)
         } else {
             compactContent
         }
@@ -454,6 +506,141 @@ private struct HomeWidgetView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
         .accessibilityValue(entry.target.accessibilityValue)
+    }
+}
+
+private struct SmallHomeWidgetView: View {
+    let entry: UsageEntry
+
+    private var valueText: String {
+        switch entry.target.kind {
+        case .quota:
+            "\(Int((entry.target.remainingPercent ?? 0).rounded()))%"
+        case .bankedReset:
+            "\(entry.target.resetCount ?? 0)"
+        case .unavailable:
+            "—"
+        }
+    }
+
+    private var accent: Color {
+        guard entry.target.kind == .quota,
+              let remaining = entry.target.remainingPercent else { return entry.target.tint }
+        if remaining <= 20 { return .red }
+        if remaining <= 50 { return .orange }
+        return .green
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 7) {
+                SnapshotAccountIcon(snapshot: entry.snapshot)
+                    .frame(width: 18, height: 18)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(entry.snapshot.resolvedAccountName)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(entry.target.title)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 4)
+
+                if entry.target.kind == .unavailable {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .trailing, spacing: 1) {
+                        WidgetCountdown(expiry: entry.target.expiresAt)
+                            .font(.caption.bold().monospacedDigit())
+                            .foregroundStyle(accent)
+                            .minimumScaleFactor(0.65)
+                        Text(entry.target.kind == .bankedReset ? "EXPIRY" : "RESET")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Spacer(minLength: 5)
+
+            WidgetQuotaSparkline(points: entry.history, color: accent)
+                .frame(height: 38)
+
+            Spacer(minLength: 2)
+
+            HStack(alignment: .lastTextBaseline, spacing: 4) {
+                Spacer(minLength: 0)
+                Text(valueText)
+                    .font(.system(size: 42, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.6)
+                    .lineLimit(1)
+                if entry.target.kind == .bankedReset {
+                    Text(entry.target.resetCount == 1 ? "RESET" : "RESETS")
+                        .font(.caption2.bold())
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
+        .accessibilityValue(entry.target.accessibilityValue)
+    }
+}
+
+private struct WidgetQuotaSparkline: View {
+    let points: [UsageHistoryPoint]
+    let color: Color
+
+    private var visiblePoints: [UsageHistoryPoint] {
+        guard let latest = points.last else { return [] }
+        let cutoff = latest.recordedAt.addingTimeInterval(-7 * 24 * 60 * 60)
+        return Array(points.filter { $0.recordedAt >= cutoff }.suffix(80))
+    }
+
+    private var chartPoints: [UsageHistoryLineChartPoint] {
+        UsageHistoryLineSegmentation.chartPoints(
+            from: visiblePoints,
+            seriesID: "widget"
+        )
+    }
+
+    var body: some View {
+        if visiblePoints.count >= 2 {
+            Chart(chartPoints) { chartPoint in
+                let point = chartPoint.point
+                LineMark(
+                    x: .value("Recorded", point.recordedAt),
+                    y: .value("Percent remaining", point.remainingPercent),
+                    series: .value("Line segment", chartPoint.segmentID)
+                )
+                .interpolationMethod(.monotone)
+                .foregroundStyle(color)
+                .lineStyle(StrokeStyle(
+                    lineWidth: 2.25,
+                    lineCap: .round,
+                    lineJoin: .round,
+                    dash: chartPoint.isGapConnector ? [6, 4] : []
+                ))
+            }
+            .chartYScale(domain: 0...100)
+            .chartXAxis(.hidden)
+            .chartYAxis(.hidden)
+            .chartLegend(.hidden)
+            .accessibilityHidden(true)
+        } else {
+            Capsule()
+                .fill(color.opacity(points.isEmpty ? 0.18 : 0.65))
+                .frame(height: 2)
+                .padding(.horizontal, 2)
+                .accessibilityHidden(true)
+        }
     }
 }
 

@@ -59,7 +59,7 @@ final class DemoModeTests: XCTestCase {
         XCTAssertTrue(snapshots.allSatisfy { $0.providerName == DemoUsageFactory.providerName })
     }
 
-    func testChinaRegionOnlyExcludesNewChatGPTAccountAddition() {
+    func testChinaRegionExcludesNewChatGPTAndOpenAIAccountAddition() {
         let china = Locale(identifier: "zh-Hans-CN")
         let unitedStates = Locale(identifier: "en-US")
 
@@ -75,7 +75,13 @@ final class DemoModeTests: XCTestCase {
         XCTAssertTrue(
             ProviderAvailability.allowsLinkStart(.chatGPT, locale: china, isRelinking: true)
         )
+        XCTAssertFalse(ProviderAvailability.allowsAccountAddition(.openAIAPI, locale: china))
+        XCTAssertFalse(ProviderAvailability.availableProviders(locale: china).contains(.openAIAPI))
+        XCTAssertTrue(
+            ProviderAvailability.allowsLinkStart(.openAIAPI, locale: china, isRelinking: true)
+        )
         XCTAssertTrue(ProviderAvailability.allowsAccountAddition(.chatGPT, locale: unitedStates))
+        XCTAssertTrue(ProviderAvailability.allowsAccountAddition(.openAIAPI, locale: unitedStates))
         XCTAssertTrue(ProviderAvailability.availableProviders(locale: china).contains(.claude))
     }
 

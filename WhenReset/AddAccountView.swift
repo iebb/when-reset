@@ -21,6 +21,13 @@ struct AddAccountView: View {
     @State private var compatibleName = ""
     @State private var compatibleEndpoint = ""
     @State private var compatibleAPIKey = ""
+    @State private var openAIAPIKey = ""
+    @State private var openAIMonthlyBudget = ""
+    @State private var anthropicAPIKey = ""
+    @State private var anthropicMonthlyBudget = ""
+    @State private var newAPIName = ""
+    @State private var newAPIBaseURL = ""
+    @State private var newAPIKey = ""
     @State private var isAddingDemo = false
     @State private var showingRemoteWorkerAccounts = false
 
@@ -30,6 +37,18 @@ struct AddAccountView: View {
         let savedCredentials = relinkingAccount.flatMap { try? KeychainStore.load(for: $0.id) }
         _antigravityClientID = State(initialValue: savedCredentials?.oauthClientID ?? "")
         _antigravityClientSecret = State(initialValue: savedCredentials?.oauthClientSecret ?? "")
+        let savedBudget = savedCredentials?.monthlyBudget.map { String(format: "%.2f", $0) } ?? ""
+        if relinkingAccount?.providerID == .openAIAPI {
+            _openAIMonthlyBudget = State(initialValue: savedBudget)
+        }
+        if relinkingAccount?.providerID == .anthropicAPI {
+            _anthropicMonthlyBudget = State(initialValue: savedBudget)
+        }
+        if relinkingAccount?.providerID == .newAPI {
+            _newAPIName = State(initialValue: savedCredentials?.accountLabel
+                                ?? relinkingAccount?.displayName ?? "")
+            _newAPIBaseURL = State(initialValue: savedCredentials?.endpointURL ?? "")
+        }
     }
 
     var body: some View {
@@ -55,6 +74,7 @@ struct AddAccountView: View {
             }
             .onDisappear {
                 completionTask?.cancel()
+                store.cancelLink()
             }
             .sheet(isPresented: $showingRemoteWorkerAccounts) {
                 RemoteWorkerAccountsView()
@@ -69,11 +89,13 @@ struct AddAccountView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(relinkingAccount == nil ? "Connect a coding plan" : "Reconnect \(relinkingAccount?.providerDisplayName ?? "account")")
+                    Text(relinkingAccount == nil ? "Connect an account" : "Reconnect \(relinkingAccount?.providerDisplayName ?? "account")")
                         .font(.title2.bold())
                     Text(relinkingAccount == nil
-                         ? "Choose a provider to securely import its quota and reset schedule."
-                         : "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.")
+                         ? "Choose a provider to securely import its usage, balance, or reset schedule."
+                         : relinkingAccount?.isRemoteOnly == true
+                            ? "Sign in again to send a replacement credential directly to the Worker. It is not stored on this device and can never be downloaded from the Worker."
+                            : "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.")
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }
@@ -217,7 +239,7 @@ struct AddAccountView: View {
     @ViewBuilder
     private func providerLinker(_ provider: ProviderID) -> some View {
         switch provider {
-        case .chatGPT, .kimi, .githubCopilot:
+        case .chatGPT, .grok, .kimi, .githubCopilot:
             deviceLinker(provider)
         case .claude:
             claudeLinker
@@ -235,6 +257,12 @@ struct AddAccountView: View {
             antigravityLinker
         case .compatibleAPI:
             compatibleAPILinker
+        case .openAIAPI:
+            openAIAPILinker
+        case .anthropicAPI:
+            anthropicAPILinker
+        case .newAPI:
+            newAPILinker
         }
     }
 
@@ -244,13 +272,7 @@ struct AddAccountView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Button {
-                completionTask = Task {
-                    await store.beginDeviceLink(for: provider, replacing: relinkingAccount)
-                    if let link = store.deviceLink {
-                        openURL(link.verificationURL)
-                        if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
-                    }
-                }
+                startDeviceLink(provider)
             } label: {
                 Label("Continue with \(provider.displayName)", systemImage: "arrow.right")
                     .fontWeight(.semibold)
@@ -269,12 +291,14 @@ struct AddAccountView: View {
         switch provider {
         case .chatGPT:
             "Uses the same secure device-link flow as Codex. Your token is stored only in this device’s Keychain."
+        case .grok:
+            "Uses xAI’s Grok Build device authorization flow. When Reset requests only identity, offline access, and Grok CLI API access; tokens are stored in Keychain."
         case .kimi:
             "Uses Kimi Code’s device authorization flow. This integration relies on Kimi’s public first-party client and is experimental."
         case .githubCopilot:
             "Uses GitHub device authorization. Exact Copilot quotas come from an undocumented endpoint and may change."
         case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
-             .antigravity, .compatibleAPI:
+             .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI:
             ""
         }
     }
@@ -529,6 +553,137 @@ struct AddAccountView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    private var openAIAPILinker: some View {
+        apiBillingLinker(
+            providerName: "OpenAI API",
+            keyTitle: "OpenAI Admin API key",
+            key: $openAIAPIKey,
+            budget: $openAIMonthlyBudget,
+            help: "OpenAI’s organization Cost API requires an Admin API key. A standard project key cannot read billing data. Add an optional monthly budget to show remaining balance; without one, When Reset shows month-to-date spend.",
+            progress: "Checking OpenAI API spend…"
+        ) {
+            await store.addOpenAIAPIAccount(
+                apiKey: openAIAPIKey,
+                monthlyBudget: parsedBudget(openAIMonthlyBudget),
+                replacing: relinkingAccount
+            )
+        }
+    }
+
+    private var anthropicAPILinker: some View {
+        apiBillingLinker(
+            providerName: "Anthropic API",
+            keyTitle: "Anthropic Admin API key",
+            key: $anthropicAPIKey,
+            budget: $anthropicMonthlyBudget,
+            help: "Anthropic’s Usage and Cost API requires an organization Admin API key, not a standard Claude API key. Add an optional monthly budget to show remaining balance; without one, When Reset shows month-to-date spend.",
+            progress: "Checking Anthropic API spend…"
+        ) {
+            await store.addAnthropicAPIAccount(
+                apiKey: anthropicAPIKey,
+                monthlyBudget: parsedBudget(anthropicMonthlyBudget),
+                replacing: relinkingAccount
+            )
+        }
+    }
+
+    private func apiBillingLinker(
+        providerName: String,
+        keyTitle: String,
+        key: Binding<String>,
+        budget: Binding<String>,
+        help: String,
+        progress: String,
+        connect: @escaping () async -> Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(help)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            providerSecretField(keyTitle, text: key)
+            TextField("Monthly budget in USD (optional)", text: budget)
+                .keyboardType(.decimalPad)
+                .font(.system(.body, design: .monospaced))
+                .padding(14)
+                .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+            Text("The key is stored in iCloud Keychain. Server monitoring uploads it only to a self-hosted Worker after you separately confirm that account setting.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button {
+                completionTask = Task {
+                    if await connect() { dismiss() }
+                }
+            } label: {
+                Label("Connect \(providerName)", systemImage: "dollarsign.gauge.chart.lefthalf.righthalf")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(key.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || !isValidOptionalBudget(budget.wrappedValue)
+                      || store.isLinking)
+            if store.isLinking { ProgressView(progress) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var newAPILinker: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Connect a New API or One API-compatible service using its OpenAI-style billing endpoints. When Reset reads the API key’s total allowance, usage, remaining balance, and expiry. Custom endpoints stay on-device.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            TextField("Provider name", text: $newAPIName)
+                .textInputAutocapitalization(.words)
+                .autocorrectionDisabled()
+                .padding(14)
+                .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+            TextField("https://api.example.com", text: $newAPIBaseURL)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.URL)
+                .font(.system(.body, design: .monospaced))
+                .padding(14)
+                .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+            providerSecretField("API key", text: $newAPIKey)
+            Button {
+                completionTask = Task {
+                    if await store.addNewAPIAccount(
+                        baseURL: newAPIBaseURL,
+                        apiKey: newAPIKey,
+                        name: newAPIName,
+                        replacing: relinkingAccount
+                    ) { dismiss() }
+                }
+            } label: {
+                Label("Connect API balance", systemImage: "creditcard.fill")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
+            }
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(newAPIName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || newAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || newAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                      || store.isLinking)
+            if store.isLinking { ProgressView("Checking API balance…") }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func parsedBudget(_ value: String) -> Double? {
+        Double(value.replacingOccurrences(of: ",", with: "."))
+    }
+
+    private func isValidOptionalBudget(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        guard let amount = parsedBudget(trimmed) else { return false }
+        return amount.isFinite && amount > 0
+    }
+
     private func providerSecretField(_ title: String, text: Binding<String>) -> some View {
         SecureField(title, text: text)
             .textInputAutocapitalization(.never)
@@ -658,9 +813,35 @@ struct AddAccountView: View {
                 .buttonStyle(.borderedProminent)
                 .buttonBorderShape(.roundedRectangle(radius: 14))
                 .controlSize(.large)
-                ProgressView("Waiting for \(link.providerID.displayName)…")
+                if store.isLinking {
+                    ProgressView("Waiting for \(link.providerID.displayName)…")
+                } else {
+                    Label("Authorization check paused", systemImage: "pause.circle")
+                        .foregroundStyle(.secondary)
+                }
                 Text("The code expires \(link.expiresAt, style: .relative).")
                     .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Button {
+                    openURL(link.verificationURL)
+                } label: {
+                    Label("Open authorization page again", systemImage: "safari")
+                        .frame(maxWidth: .infinity, minHeight: 28)
+                }
+                .buttonStyle(.bordered)
+                .buttonBorderShape(.roundedRectangle(radius: 14))
+                HStack {
+                    Button("Check now") {
+                        resumeDeviceLink(link.providerID)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Start over") {
+                        startDeviceLink(link.providerID)
+                    }
+                    .buttonStyle(.bordered)
+                }
+                Text("If you already approved access and this view is still waiting, choose Check now. Start over creates a new one-time code.")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
             .padding(.top, 32)
@@ -673,6 +854,37 @@ struct AddAccountView: View {
         completionTask?.cancel()
         store.cancelLink()
         dismiss()
+    }
+
+    private func startDeviceLink(_ provider: ProviderID) {
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            store.cancelLink()
+            await store.beginDeviceLink(for: provider, replacing: relinkingAccount)
+            guard !Task.isCancelled,
+                  let link = store.deviceLink,
+                  link.providerID == provider else { return }
+            openURL(link.verificationURL)
+            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+        }
+    }
+
+    private func resumeDeviceLink(_ provider: ProviderID) {
+        guard store.deviceLink?.providerID == provider else {
+            startDeviceLink(provider)
+            return
+        }
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled,
+                  store.deviceLink?.providerID == provider else { return }
+            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+        }
     }
 }
 

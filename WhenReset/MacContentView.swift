@@ -1,5 +1,6 @@
 #if os(macOS)
 import AppKit
+import Charts
 import SwiftUI
 
 struct MacContentView: View {
@@ -38,20 +39,24 @@ struct MacContentView: View {
             }
             .navigationTitle("When Reset")
             .safeAreaInset(edge: .bottom) {
-                HStack {
+                HStack(spacing: 18) {
                     Button {
                         showingAddAccount = true
                     } label: {
-                        Label("Add account", systemImage: "plus")
+                        Label("Add", systemImage: "plus")
                     }
                     .buttonStyle(.plain)
+                    .fixedSize()
+                    .accessibilityLabel("Add account")
+                    .help("Add account")
                     if store.pushServerStatus == .registered {
                         Button {
                             showingRemoteWorkerAccounts = true
                         } label: {
-                            Label("Add from Worker", systemImage: "icloud.and.arrow.down")
+                            Label("Worker", systemImage: "icloud.and.arrow.down")
                         }
                         .buttonStyle(.plain)
+                        .fixedSize()
                         .accessibilityLabel("Add accounts from Cloudflare Worker")
                         .help("Add accounts from Cloudflare Worker")
                     }
@@ -63,7 +68,8 @@ struct MacContentView: View {
                     .accessibilityLabel("Settings")
                     .help("Settings")
                 }
-                .padding(12)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
                 .background(.bar)
             }
             .navigationSplitViewColumnWidth(min: 220, ideal: 250, max: 320)
@@ -190,8 +196,11 @@ private struct MacAccountDetailView: View {
                         Spacer()
                         if failure.requiresRelink,
                            !currentAccount.isDemo,
-                           !currentAccount.isRemoteOnly {
-                            Button("Reconnect") { showingRelink = true }
+                           !currentAccount.isRemoteOnly || currentAccount.providerID == .chatGPT {
+                            Button(
+                                currentAccount.isRemoteOnly
+                                    ? "Update Worker sign-in" : "Reconnect"
+                            ) { showingRelink = true }
                         }
                     }
                     .padding(12)
@@ -210,6 +219,7 @@ private struct MacAccountDetailView: View {
                     .frame(maxWidth: .infinity, minHeight: 260)
                 }
 
+                MacUsageHistorySection(account: currentAccount)
                 accountPreferences
                 accountActions
             }
@@ -315,8 +325,12 @@ private struct MacAccountDetailView: View {
 
     private var accountActions: some View {
         HStack {
-            if !currentAccount.isDemo && !currentAccount.isRemoteOnly {
-                Button("Reconnect account") { showingRelink = true }
+            if !currentAccount.isDemo
+                && (!currentAccount.isRemoteOnly || currentAccount.providerID == .chatGPT) {
+                Button(
+                    currentAccount.isRemoteOnly
+                        ? "Update Worker sign-in" : "Reconnect account"
+                ) { showingRelink = true }
             }
             Spacer()
             Button("Remove account", role: .destructive) {
@@ -429,6 +443,771 @@ private struct MacBankedResetCard: View {
             return "\(count) available"
         }
         return "\(count) available. Next expiry \(expiry.formatted(date: .abbreviated, time: .shortened))."
+    }
+}
+
+private enum MacHistoryPreset: String, CaseIterable, Identifiable {
+    case day = "24h"
+    case week = "7d"
+    case month = "30d"
+    case all = "All"
+
+    var id: Self { self }
+
+    var duration: TimeInterval? {
+        switch self {
+        case .day: 24 * 60 * 60
+        case .week: 7 * 24 * 60 * 60
+        case .month: 30 * 24 * 60 * 60
+        case .all: nil
+        }
+    }
+}
+
+private struct MacUsageHistorySection: View {
+    @Environment(AppStore.self) private var store
+    let account: MonitoredAccount
+    @State private var selectedRange: ClosedRange<Date>?
+    @State private var isFetchingWorkerHistory = false
+
+    private var accountPoints: [UsageHistoryPoint] {
+        store.usageHistory
+            .filter { $0.accountID == account.id }
+            .sorted { $0.recordedAt < $1.recordedAt }
+    }
+
+    private var availableRange: ClosedRange<Date>? {
+        MacUsageHistoryPresentation.availableRange(
+            points: accountPoints,
+            accountID: account.id
+        )
+    }
+
+    var body: some View {
+        GroupBox {
+            if let availableRange {
+                let range = effectiveRange(within: availableRange)
+                let series = MacUsageHistoryPresentation.series(
+                    points: store.usageHistory,
+                    accountID: account.id,
+                    in: range
+                )
+                VStack(alignment: .leading, spacing: 10) {
+                    MacHistoryRangeControls(
+                        selection: rangeBinding(within: availableRange),
+                        availableRange: availableRange,
+                        points: accountPoints,
+                        isFetchingRemoteHistory: isWorkerHistoryFetchInProgress,
+                        fetchRemoteHistory: workerHistoryFetchAction
+                    )
+
+                    if let error = store.historyStorageError {
+                        Label(error, systemImage: "externaldrive.badge.exclamationmark")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+
+                    if series.isEmpty {
+                        ContentUnavailableView(
+                            "No samples in this range",
+                            systemImage: "calendar.badge.exclamationmark",
+                            description: Text("Slide either range endpoint or choose a preset to include recorded samples.")
+                        )
+                        .frame(maxWidth: .infinity, minHeight: 170)
+                    } else {
+                        ForEach(series) { item in
+                            MacUsageHistorySeriesCard(series: item, range: range)
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            } else {
+                VStack(spacing: 12) {
+                    ContentUnavailableView(
+                        "No usage history yet",
+                        systemImage: "chart.xyaxis.line",
+                        description: Text("A local or Worker sample will appear after the next successful refresh.")
+                    )
+                    if canFetchWorkerHistory {
+                        MacWorkerHistoryFetchButton(
+                            isFetching: isWorkerHistoryFetchInProgress,
+                            action: fetchWorkerHistory
+                        )
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, minHeight: 210)
+            }
+        } label: {
+            Label("Usage history", systemImage: "chart.xyaxis.line")
+        }
+        .onAppear { reconcileSelection(oldRange: nil, newRange: availableRange) }
+        .onChange(of: availableRange) { oldRange, newRange in
+            reconcileSelection(oldRange: oldRange, newRange: newRange)
+        }
+    }
+
+    private func effectiveRange(within availableRange: ClosedRange<Date>) -> ClosedRange<Date> {
+        guard let selectedRange else {
+            return MacUsageHistoryPresentation.defaultRange(within: availableRange)
+        }
+        return MacUsageHistoryPresentation.normalizedRange(
+            start: selectedRange.lowerBound,
+            end: selectedRange.upperBound,
+            within: availableRange
+        )
+    }
+
+    private var canFetchWorkerHistory: Bool {
+        store.pushServerSettings.mode != .disabled
+            && store.isServerMonitoringEnabled(for: account)
+    }
+
+    private var workerHistoryFetchAction: (() -> Void)? {
+        guard canFetchWorkerHistory else { return nil }
+        return { fetchWorkerHistory() }
+    }
+
+    private var isWorkerHistoryFetchInProgress: Bool {
+        isFetchingWorkerHistory || store.isRefreshing
+    }
+
+    private func fetchWorkerHistory() {
+        guard !isFetchingWorkerHistory, !store.isRefreshing else { return }
+        isFetchingWorkerHistory = true
+        Task {
+            _ = await store.fetchRetainedWorkerHistory(for: account)
+            isFetchingWorkerHistory = false
+        }
+    }
+
+    private func rangeBinding(within availableRange: ClosedRange<Date>)
+        -> Binding<ClosedRange<Date>> {
+        Binding(
+            get: { effectiveRange(within: availableRange) },
+            set: { newValue in
+                selectedRange = MacUsageHistoryPresentation.normalizedRange(
+                    start: newValue.lowerBound,
+                    end: newValue.upperBound,
+                    within: availableRange
+                )
+            }
+        )
+    }
+
+    private func reconcileSelection(
+        oldRange: ClosedRange<Date>?,
+        newRange: ClosedRange<Date>?
+    ) {
+        guard let newRange else {
+            selectedRange = nil
+            return
+        }
+        guard let selectedRange else {
+            self.selectedRange = MacUsageHistoryPresentation.defaultRange(within: newRange)
+            return
+        }
+
+        if let oldRange,
+           abs(selectedRange.upperBound.timeIntervalSince(oldRange.upperBound)) < 1 {
+            let duration = selectedRange.upperBound.timeIntervalSince(selectedRange.lowerBound)
+            self.selectedRange = MacUsageHistoryPresentation.normalizedRange(
+                start: newRange.upperBound.addingTimeInterval(-duration),
+                end: newRange.upperBound,
+                within: newRange
+            )
+        } else {
+            self.selectedRange = MacUsageHistoryPresentation.normalizedRange(
+                start: selectedRange.lowerBound,
+                end: selectedRange.upperBound,
+                within: newRange
+            )
+        }
+    }
+}
+
+private struct MacHistoryRangeControls: View {
+    @Binding var selection: ClosedRange<Date>
+    let availableRange: ClosedRange<Date>
+    let points: [UsageHistoryPoint]
+    let isFetchingRemoteHistory: Bool
+    let fetchRemoteHistory: (() -> Void)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Menu {
+                    ForEach(MacHistoryPreset.allCases) { preset in
+                        Button {
+                            apply(preset)
+                        } label: {
+                            if matches(preset) {
+                                Label(preset.rawValue.uppercased(), systemImage: "checkmark")
+                            } else {
+                                Text(preset.rawValue.uppercased())
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 5) {
+                        Text(activePresetLabel)
+                            .font(.caption.weight(.semibold).monospacedDigit())
+                        Image(systemName: "chevron.down")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(.quaternary, in: .rect(cornerRadius: 6))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityLabel("History range preset")
+                .accessibilityValue(activePresetLabel)
+
+                Text(rangeSummary)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+
+                Spacer(minLength: 8)
+
+                if let fetchRemoteHistory {
+                    MacWorkerHistoryFetchButton(
+                        isFetching: isFetchingRemoteHistory,
+                        action: fetchRemoteHistory
+                    )
+                }
+
+                HStack(spacing: 4) {
+                    Button { slide(by: -1) } label: {
+                        Image(systemName: "chevron.left")
+                            .frame(width: 20, height: 20)
+                            .background(.quaternary, in: .rect(cornerRadius: 6))
+                    }
+                    .disabled(!canSlideBackward)
+                    .accessibilityLabel("Earlier history")
+
+                    Button { slide(by: 1) } label: {
+                        Image(systemName: "chevron.right")
+                            .frame(width: 20, height: 20)
+                            .background(.quaternary, in: .rect(cornerRadius: 6))
+                    }
+                    .disabled(!canSlideForward)
+                    .accessibilityLabel("Later history")
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+            }
+            .padding(.horizontal, 2)
+
+            MacHistoryNavigator(
+                selection: $selection,
+                availableRange: availableRange,
+                points: points
+            )
+            .padding(.horizontal, 4)
+            .padding(.vertical, 2)
+            .background(.background.opacity(0.42), in: .rect(cornerRadius: 8))
+        }
+        .padding(10)
+        .background(.quaternary.opacity(0.24), in: .rect(cornerRadius: 10))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(.secondary.opacity(0.14), lineWidth: 1)
+        }
+    }
+
+    private var rangeSummary: String {
+        let duration = selection.upperBound.timeIntervalSince(selection.lowerBound)
+        if duration <= 2 * 24 * 60 * 60 {
+            let style = Date.FormatStyle.dateTime
+                .month(.abbreviated).day().hour().minute()
+            return "\(selection.lowerBound.formatted(style))  →  \(selection.upperBound.formatted(style))"
+        }
+        let style = Date.FormatStyle.dateTime.month(.abbreviated).day().year()
+        return "\(selection.lowerBound.formatted(style))  →  \(selection.upperBound.formatted(style))"
+    }
+
+    private var activePresetLabel: String {
+        MacHistoryPreset.allCases.first(where: matches)?.rawValue.uppercased() ?? "CUSTOM"
+    }
+
+    private var canSlideBackward: Bool {
+        selection.lowerBound.timeIntervalSince(availableRange.lowerBound) > 1
+    }
+
+    private var canSlideForward: Bool {
+        availableRange.upperBound.timeIntervalSince(selection.upperBound) > 1
+    }
+
+    private func apply(_ preset: MacHistoryPreset) {
+        guard let duration = preset.duration else {
+            selection = availableRange
+            return
+        }
+        selection = MacUsageHistoryPresentation.normalizedRange(
+            start: availableRange.upperBound.addingTimeInterval(-duration),
+            end: availableRange.upperBound,
+            within: availableRange
+        )
+    }
+
+    private func matches(_ preset: MacHistoryPreset) -> Bool {
+        let tolerance: TimeInterval = 61
+        if preset == .all {
+            return abs(selection.lowerBound.timeIntervalSince(availableRange.lowerBound)) < tolerance
+                && abs(selection.upperBound.timeIntervalSince(availableRange.upperBound)) < tolerance
+        }
+        guard let duration = preset.duration else { return false }
+        let selectedDuration = selection.upperBound.timeIntervalSince(selection.lowerBound)
+        let expectedDuration = min(
+            duration,
+            availableRange.upperBound.timeIntervalSince(availableRange.lowerBound)
+        )
+        return abs(selectedDuration - expectedDuration) < tolerance
+    }
+
+    private func slide(by direction: Double) {
+        let duration = selection.upperBound.timeIntervalSince(selection.lowerBound)
+        let offset = duration * 0.8 * direction
+        var start = selection.lowerBound.addingTimeInterval(offset)
+        start = min(
+            max(start, availableRange.lowerBound),
+            availableRange.upperBound.addingTimeInterval(-duration)
+        )
+        selection = start...start.addingTimeInterval(duration)
+    }
+}
+
+private struct MacWorkerHistoryFetchButton: View {
+    let isFetching: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if isFetching {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "icloud.and.arrow.down")
+                }
+                Text(isFetching ? "Fetching" : "Fetch")
+            }
+            .frame(minWidth: 62)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(isFetching)
+        .help("Fetch the full retained history from the linked Worker")
+        .accessibilityLabel(
+            isFetching ? "Fetching history from Worker" : "Fetch history from Worker"
+        )
+    }
+}
+
+private struct MacHistoryNavigator: View {
+    @Binding var selection: ClosedRange<Date>
+    let availableRange: ClosedRange<Date>
+    let points: [UsageHistoryPoint]
+
+    private var chartPoints: [MacHistoryChartPoint] {
+        Dictionary(grouping: points, by: \.metricID).flatMap { metricID, values in
+            MacUsageHistorySeries(
+                metricID: metricID,
+                title: values.last?.metricTitle ?? "Usage limit",
+                points: values.sorted { $0.recordedAt < $1.recordedAt }
+            ).chartPoints
+        }
+    }
+
+    var body: some View {
+        Chart {
+            ForEach(chartPoints) { chartPoint in
+                let point = chartPoint.point
+                LineMark(
+                    x: .value("Recorded", point.recordedAt),
+                    y: .value("Percent remaining", point.remainingPercent),
+                    series: .value("Metric segment", chartPoint.segmentID)
+                )
+                .interpolationMethod(.monotone)
+                .foregroundStyle(by: .value("Metric", point.metricTitle))
+                .lineStyle(StrokeStyle(
+                    lineWidth: 1.25,
+                    dash: chartPoint.isGapConnector ? [6, 4] : []
+                ))
+                .opacity(0.8)
+            }
+        }
+        .chartXScale(domain: availableRange)
+        .chartYScale(domain: 0...100)
+        .chartLegend(.hidden)
+        .chartYAxis(.hidden)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                AxisGridLine().foregroundStyle(.secondary.opacity(0.18))
+                AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .chartPlotStyle { plot in
+            plot.background(.background.opacity(0.45), in: .rect(cornerRadius: 6))
+        }
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                if let plotFrame = proxy.plotFrame {
+                    let frame = geometry[plotFrame]
+                    MacHistoryNavigatorOverlay(
+                        selection: $selection,
+                        availableRange: availableRange,
+                        size: frame.size
+                    )
+                    .frame(width: frame.width, height: frame.height)
+                    .position(x: frame.midX, y: frame.midY)
+                }
+            }
+        }
+        .frame(height: 64)
+        .accessibilityLabel("History navigator")
+        .accessibilityValue(
+            "Showing \(selection.lowerBound.formatted(date: .abbreviated, time: .shortened)) through \(selection.upperBound.formatted(date: .abbreviated, time: .shortened))"
+        )
+    }
+}
+
+private struct MacHistoryNavigatorOverlay: View {
+    private enum DragTarget {
+        case lowerHandle
+        case selection
+        case upperHandle
+    }
+
+    @Binding var selection: ClosedRange<Date>
+    let availableRange: ClosedRange<Date>
+    let size: CGSize
+    @State private var lowerDragOrigin: ClosedRange<Date>?
+    @State private var selectionDragOrigin: ClosedRange<Date>?
+    @State private var upperDragOrigin: ClosedRange<Date>?
+
+    private let handleWidth: CGFloat = 12
+    private let handleHitWidth: CGFloat = 24
+
+    var body: some View {
+        let startX = xPosition(for: selection.lowerBound)
+        let endX = xPosition(for: selection.upperBound)
+        let selectionWidth = max(1, endX - startX)
+        let lowerHandleCenterX = handleCenterPosition(for: startX)
+        let upperHandleCenterX = handleCenterPosition(for: endX)
+
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .contentShape(.rect)
+
+            Rectangle()
+                .fill(.black.opacity(0.32))
+                .frame(width: max(0, startX), height: size.height)
+
+            Rectangle()
+                .fill(.black.opacity(0.32))
+                .frame(width: max(0, size.width - endX), height: size.height)
+                .offset(x: endX)
+
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.08))
+                .overlay {
+                    Rectangle()
+                        .stroke(Color.accentColor.opacity(0.9), lineWidth: 1)
+                }
+                .frame(width: selectionWidth, height: size.height)
+                .offset(x: startX)
+                .contentShape(.rect)
+                .gesture(dragGesture(for: .selection))
+
+            MacHistoryNavigatorHandle()
+                .frame(width: handleWidth, height: size.height)
+                .contentShape(.rect)
+                .frame(width: handleHitWidth, height: size.height)
+                .offset(x: lowerHandleCenterX - handleHitWidth / 2)
+                .gesture(dragGesture(for: .lowerHandle))
+                .accessibilityLabel("Range start")
+                .accessibilityValue(selection.lowerBound.formatted(date: .abbreviated, time: .shortened))
+                .accessibilityAdjustableAction { direction in
+                    adjustHandle(.lowerHandle, direction: direction)
+                }
+
+            MacHistoryNavigatorHandle()
+                .frame(width: handleWidth, height: size.height)
+                .contentShape(.rect)
+                .frame(width: handleHitWidth, height: size.height)
+                .offset(x: upperHandleCenterX - handleHitWidth / 2)
+                .gesture(dragGesture(for: .upperHandle))
+                .accessibilityLabel("Range end")
+                .accessibilityValue(selection.upperBound.formatted(date: .abbreviated, time: .shortened))
+                .accessibilityAdjustableAction { direction in
+                    adjustHandle(.upperHandle, direction: direction)
+                }
+        }
+        .clipped()
+        .contentShape(.rect)
+        .gesture(
+            SpatialTapGesture()
+                .onEnded { value in
+                    recenter(at: value.location.x)
+                },
+            including: .gesture
+        )
+    }
+
+    private var availableDuration: TimeInterval {
+        max(0, availableRange.upperBound.timeIntervalSince(availableRange.lowerBound))
+    }
+
+    private var minimumDuration: TimeInterval {
+        min(MacUsageHistoryPresentation.minimumSelectionDuration, availableDuration)
+    }
+
+    private func xPosition(for date: Date) -> CGFloat {
+        guard availableDuration > 0, size.width > 0 else { return 0 }
+        let elapsed = date.timeIntervalSince(availableRange.lowerBound)
+        return min(max(CGFloat(elapsed / availableDuration) * size.width, 0), size.width)
+    }
+
+    private func handleCenterPosition(for boundaryX: CGFloat) -> CGFloat {
+        let inset = min(handleWidth / 2, size.width / 2)
+        return min(max(boundaryX, inset), max(inset, size.width - inset))
+    }
+
+    private func dragGesture(for target: DragTarget) -> some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                updateDrag(target, translation: value.translation.width)
+            }
+            .onEnded { _ in
+                setDragOrigin(nil, for: target)
+            }
+    }
+
+    private func updateDrag(_ target: DragTarget, translation: CGFloat) {
+        guard size.width > 0, availableDuration > 0 else { return }
+        let origin = dragOrigin(for: target) ?? selection
+        if dragOrigin(for: target) == nil {
+            setDragOrigin(selection, for: target)
+        }
+        let offset = TimeInterval(translation / size.width) * availableDuration
+
+        switch target {
+        case .lowerHandle:
+            let latestStart = origin.upperBound.addingTimeInterval(-minimumDuration)
+            let start = min(
+                max(origin.lowerBound.addingTimeInterval(offset), availableRange.lowerBound),
+                latestStart
+            )
+            selection = start...origin.upperBound
+        case .upperHandle:
+            let earliestEnd = origin.lowerBound.addingTimeInterval(minimumDuration)
+            let end = max(
+                min(origin.upperBound.addingTimeInterval(offset), availableRange.upperBound),
+                earliestEnd
+            )
+            selection = origin.lowerBound...end
+        case .selection:
+            let duration = origin.upperBound.timeIntervalSince(origin.lowerBound)
+            let latestStart = availableRange.upperBound.addingTimeInterval(-duration)
+            let start = min(
+                max(origin.lowerBound.addingTimeInterval(offset), availableRange.lowerBound),
+                latestStart
+            )
+            selection = start...start.addingTimeInterval(duration)
+        }
+    }
+
+    private func recenter(at x: CGFloat) {
+        guard size.width > 0, availableDuration > 0 else { return }
+        let startX = xPosition(for: selection.lowerBound)
+        let endX = xPosition(for: selection.upperBound)
+        guard x < startX || x > endX else { return }
+
+        let fraction = min(max(x / size.width, 0), 1)
+        let center = availableRange.lowerBound.addingTimeInterval(
+            TimeInterval(fraction) * availableDuration
+        )
+        let duration = selection.upperBound.timeIntervalSince(selection.lowerBound)
+        let latestStart = availableRange.upperBound.addingTimeInterval(-duration)
+        let start = min(
+            max(center.addingTimeInterval(-duration / 2), availableRange.lowerBound),
+            latestStart
+        )
+        selection = start...start.addingTimeInterval(duration)
+    }
+
+    private func adjustHandle(_ target: DragTarget, direction: AccessibilityAdjustmentDirection) {
+        let step = max(minimumDuration, availableDuration / 100)
+        let offset: TimeInterval
+        switch direction {
+        case .increment: offset = step
+        case .decrement: offset = -step
+        @unknown default: return
+        }
+        let points = CGFloat(offset / availableDuration) * size.width
+        setDragOrigin(selection, for: target)
+        updateDrag(target, translation: points)
+        setDragOrigin(nil, for: target)
+    }
+
+    private func dragOrigin(for target: DragTarget) -> ClosedRange<Date>? {
+        switch target {
+        case .lowerHandle: lowerDragOrigin
+        case .selection: selectionDragOrigin
+        case .upperHandle: upperDragOrigin
+        }
+    }
+
+    private func setDragOrigin(_ origin: ClosedRange<Date>?, for target: DragTarget) {
+        switch target {
+        case .lowerHandle: lowerDragOrigin = origin
+        case .selection: selectionDragOrigin = origin
+        case .upperHandle: upperDragOrigin = origin
+        }
+    }
+}
+
+private struct MacHistoryNavigatorHandle: View {
+    var body: some View {
+        RoundedRectangle(cornerRadius: 3)
+            .fill(.regularMaterial)
+            .overlay {
+                RoundedRectangle(cornerRadius: 3)
+                    .stroke(.secondary.opacity(0.9), lineWidth: 1)
+            }
+            .overlay {
+                HStack(spacing: 2) {
+                    Capsule().fill(.secondary).frame(width: 1, height: 13)
+                    Capsule().fill(.secondary).frame(width: 1, height: 13)
+                }
+            }
+            .padding(.vertical, 2)
+            .shadow(color: .black.opacity(0.22), radius: 1, y: 1)
+    }
+}
+
+private struct MacUsageHistorySeriesCard: View {
+    let series: MacUsageHistorySeries
+    let range: ClosedRange<Date>
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(series.title)
+                    .font(.headline)
+                Spacer()
+                Text("\(Int(series.latest.remainingPercent.rounded()))% left")
+                    .font(.headline.monospacedDigit())
+            }
+
+            Text(series.planSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+
+            MacUsageHistoryChart(series: series, range: range)
+
+            HStack {
+                Text("Last recorded")
+                Spacer()
+                Text(series.latest.recordedAt,
+                     format: .dateTime.month(.abbreviated).day().hour().minute())
+                    .monospacedDigit()
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(.quaternary.opacity(0.35), in: .rect(cornerRadius: 14))
+    }
+}
+
+private struct MacUsageHistoryChart: View {
+    let series: MacUsageHistorySeries
+    let range: ClosedRange<Date>
+
+    private var color: Color {
+        switch series.latest.windowMinutes {
+        case 300: .blue
+        case 10_080: .purple
+        default: .indigo
+        }
+    }
+
+    private var duration: TimeInterval {
+        range.upperBound.timeIntervalSince(range.lowerBound)
+    }
+
+    var body: some View {
+        Chart {
+            ForEach(series.chartPoints) { chartPoint in
+                let point = chartPoint.point
+                LineMark(
+                    x: .value("Refresh", point.recordedAt),
+                    y: .value("Percent remaining", point.remainingPercent),
+                    series: .value("Source and plan", chartPoint.segmentID)
+                )
+                .interpolationMethod(.monotone)
+                .foregroundStyle(color)
+                .lineStyle(StrokeStyle(
+                    lineWidth: 2,
+                    dash: chartPoint.isGapConnector ? [6, 4] : []
+                ))
+            }
+
+            ForEach(series.planChangePoints) { point in
+                RuleMark(x: .value("Plan changed", point.recordedAt))
+                    .foregroundStyle(.secondary)
+                    .lineStyle(StrokeStyle(lineWidth: 1))
+            }
+        }
+        .chartXScale(domain: range)
+        .chartYScale(domain: 0...100)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: [0, 25, 50, 75, 100]) { value in
+                AxisGridLine()
+                AxisTick()
+                AxisValueLabel {
+                    if let percentage = value.as(Int.self) { Text("\(percentage)%") }
+                }
+            }
+        }
+        .chartXAxis {
+            if duration <= 2 * 24 * 60 * 60 {
+                AxisMarks(values: .stride(by: .hour, count: duration <= 12 * 60 * 60 ? 2 : 6)) {
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.hour())
+                }
+            } else if duration <= 14 * 24 * 60 * 60 {
+                AxisMarks(values: .stride(by: .day, count: 1)) {
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.weekday(.abbreviated).day())
+                }
+            } else {
+                AxisMarks(values: .stride(by: .day, count: 5)) {
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                }
+            }
+        }
+        .chartPlotStyle { plot in
+            plot.background(.background.opacity(0.35), in: .rect(cornerRadius: 8))
+        }
+        .frame(height: 210)
+        .accessibilityLabel("\(series.title) usage history")
+        .accessibilityValue(
+            "\(series.points.count) samples. Latest value \(Int(series.latest.remainingPercent.rounded())) percent remaining."
+        )
     }
 }
 
@@ -870,10 +1649,14 @@ private struct MacRemoteWorkerAccountsView: View {
         NavigationStack {
             Form {
                 Section("Remote-only accounts") {
-                    Label("Provider credentials stay encrypted on the Cloudflare Worker.",
-                          systemImage: "lock.shield.fill")
-                    Label("Usage, reset windows, and retained history sync from the Worker.",
-                          systemImage: "cloud.fill")
+                    workerInfoRow(
+                        "Provider credentials stay encrypted on the Cloudflare Worker.",
+                        systemImage: "lock.shield.fill"
+                    )
+                    workerInfoRow(
+                        "Usage, reset windows, and retained history sync from the Worker.",
+                        systemImage: "cloud.fill"
+                    )
                 }
 
                 Section("Available accounts") {
@@ -901,6 +1684,7 @@ private struct MacRemoteWorkerAccountsView: View {
                                         Text(account.providerID.sectionTitle(plan: account.plan))
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
+                                        sessionStatus(account)
                                     }
                                 }
                             }
@@ -911,6 +1695,13 @@ private struct MacRemoteWorkerAccountsView: View {
             .formStyle(.grouped)
             .navigationTitle("Add from Worker")
             .toolbar {
+                ToolbarItem {
+                    Button("Check sessions", systemImage: "arrow.clockwise") {
+                        Task { await loadAccounts() }
+                    }
+                    .disabled(isLoading || isImporting)
+                    .help("Check account sessions on the Worker")
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
@@ -932,12 +1723,46 @@ private struct MacRemoteWorkerAccountsView: View {
         .frame(minWidth: 620, minHeight: 520)
     }
 
+    private func workerInfoRow(_ text: String, systemImage: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Image(systemName: systemImage)
+                .frame(width: 24, alignment: .center)
+                .foregroundStyle(.secondary)
+            Text(text)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
     private func selectionBinding(_ id: String) -> Binding<Bool> {
         Binding {
             selectedIDs.contains(id)
         } set: { selected in
             if selected { selectedIDs.insert(id) }
             else { selectedIDs.remove(id) }
+        }
+    }
+
+    @ViewBuilder
+    private func sessionStatus(_ account: RemoteWorkerAccountCandidate) -> some View {
+        let status = account.sessionStatus ?? .unchecked
+        HStack(spacing: 5) {
+            Image(systemName: status.systemImageName)
+            Text(status.label)
+            if let checkedAt = account.sessionCheckedAt {
+                Text("· \(checkedAt, style: .relative)")
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(sessionColor(status))
+    }
+
+    private func sessionColor(_ status: WorkerSessionStatus) -> Color {
+        switch status {
+        case .active: .green
+        case .expired: .red
+        case .error: .orange
+        case .unchecked: .secondary
         }
     }
 
@@ -1040,7 +1865,10 @@ private struct MacAddAccountView: View {
             .navigationTitle(relinkingAccount == nil ? "Add account" : "Reconnect account")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { dismiss() }
+                    Button("Cancel") {
+                        cancelLink()
+                        dismiss()
+                    }
                 }
                 if selectedProvider != nil && relinkingAccount == nil {
                     ToolbarItem(placement: .navigation) {
@@ -1066,6 +1894,11 @@ private struct MacAddAccountView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(provider.displayName).font(.title2.bold())
                 Text(provider.accountDescription).foregroundStyle(.secondary)
+                if relinkingAccount?.isRemoteOnly == true {
+                    Text("The fresh credential is sent directly to the Worker, is not stored on this Mac, and can never be downloaded from the Worker.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -1095,7 +1928,9 @@ private struct MacAddAccountView: View {
 
     private func deviceLinker(_ provider: ProviderID) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("When Reset uses the provider’s device authorization page. Credentials are stored securely in iCloud Keychain.")
+            Text(relinkingAccount?.isRemoteOnly == true
+                 ? "When Reset uses the provider’s device authorization page. The replacement credential is sent directly to your Worker and is not stored on this Mac."
+                 : "When Reset uses the provider’s device authorization page. Credentials are stored securely in iCloud Keychain.")
                 .foregroundStyle(.secondary)
             if let link = store.deviceLink, link.providerID == provider {
                 GroupBox("Authorization code") {
@@ -1111,15 +1946,33 @@ private struct MacAddAccountView: View {
                     }
                     .padding(.top, 4)
                 }
-                ProgressView("Waiting for authorization…")
+                if store.isLinking {
+                    ProgressView("Waiting for authorization…")
+                } else {
+                    Label("Authorization check paused", systemImage: "pause.circle")
+                        .foregroundStyle(.secondary)
+                }
+                Text("This code expires \(link.expiresAt, style: .relative).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack {
+                    Button("Open authorization page again") {
+                        NSWorkspace.shared.open(link.verificationURL)
+                    }
+                    Button("Check now") {
+                        resumeDeviceLink(provider)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    Button("Start over") {
+                        startDeviceLink(provider)
+                    }
+                }
+                Text("If you already approved access and this view is still waiting, choose Check now. Start over creates a new one-time code.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             } else {
                 Button("Continue in browser") {
-                    completionTask = Task {
-                        await store.beginDeviceLink(for: provider, replacing: relinkingAccount)
-                        guard let link = store.deviceLink, link.providerID == provider else { return }
-                        NSWorkspace.shared.open(link.verificationURL)
-                        if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
-                    }
+                    startDeviceLink(provider)
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(store.isLinking)
@@ -1246,6 +2099,37 @@ private struct MacAddAccountView: View {
         completionTask?.cancel()
         completionTask = nil
         store.cancelLink()
+    }
+
+    private func startDeviceLink(_ provider: ProviderID) {
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            store.cancelLink()
+            await store.beginDeviceLink(for: provider, replacing: relinkingAccount)
+            guard !Task.isCancelled,
+                  let link = store.deviceLink,
+                  link.providerID == provider else { return }
+            NSWorkspace.shared.open(link.verificationURL)
+            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+        }
+    }
+
+    private func resumeDeviceLink(_ provider: ProviderID) {
+        guard store.deviceLink?.providerID == provider else {
+            startDeviceLink(provider)
+            return
+        }
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled,
+                  store.deviceLink?.providerID == provider else { return }
+            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+        }
     }
 }
 #endif

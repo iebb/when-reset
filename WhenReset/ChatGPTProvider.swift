@@ -77,16 +77,29 @@ struct ChatGPTProvider {
         let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
         guard let id = json?["device_auth_id"] as? String,
               let code = (json?["user_code"] ?? json?["usercode"]) as? String else { throw ProviderError.invalidResponse }
-        let seconds = Double(json?["interval"] as? String ?? "5") ?? 5
-        return DeviceLink(verificationURL: URL(string: "https://auth.openai.com/codex/device")!, userCode: code, deviceAuthID: id, interval: .seconds(seconds))
+        let seconds: Double
+        if let interval = json?["interval"] as? String, let parsed = Double(interval) {
+            seconds = parsed
+        } else if let interval = json?["interval"] as? NSNumber {
+            seconds = interval.doubleValue
+        } else {
+            seconds = 5
+        }
+        return DeviceLink(
+            verificationURL: URL(string: "https://auth.openai.com/codex/device")!,
+            userCode: code,
+            deviceAuthID: id,
+            interval: .seconds(max(1, seconds))
+        )
     }
 
     func finishLink(_ link: DeviceLink) async throws -> LinkedIdentity {
         let deadline = Date.now.addingTimeInterval(15 * 60)
         while Date.now < deadline {
+            try Task.checkCancellation()
             let body = try JSONSerialization.data(withJSONObject: ["device_auth_id": link.deviceAuthID, "user_code": link.userCode])
             do {
-                let data = try await request(URL(string: "https://auth.openai.com/api/accounts/deviceauth/token")!, method: "POST", body: body, pendingCodes: [403, 404])
+                let data = try await request(URL(string: "https://auth.openai.com/api/accounts/deviceauth/token")!, method: "POST", body: body)
                 let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
                 guard let code = json?["authorization_code"] as? String,
                       let verifier = json?["code_verifier"] as? String else { throw ProviderError.invalidResponse }
@@ -329,8 +342,9 @@ struct ChatGPTProvider {
         return json
     }
 
-    private func request(_ url: URL, method: String, body: Data, contentType: String = "application/json", pendingCodes: Set<Int> = []) async throws -> Data {
+    private func request(_ url: URL, method: String, body: Data, contentType: String = "application/json") async throws -> Data {
         var request = URLRequest(url: url); request.httpMethod = method; request.httpBody = body
+        request.timeoutInterval = 20
         request.setValue(contentType, forHTTPHeaderField: "Content-Type")
         let (data, response) = try await session.data(for: request)
         let code = (response as? HTTPURLResponse)?.statusCode ?? 0

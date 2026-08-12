@@ -373,6 +373,8 @@ final class ParsingTests: XCTestCase {
         XCTAssertEqual(settings.defaultLiveActivityRule.remainingHours, 4)
         XCTAssertTrue(settings.liveActivityQuotaRules.isEmpty)
         XCTAssertTrue(settings.missingQuotaHistoryBehaviors.isEmpty)
+        XCTAssertNil(settings.remoteWorkerAccountID)
+        XCTAssertNil(settings.workerAccountReference)
     }
 
     func testAccountResetNotificationSettingRoundTripsDisabled() throws {
@@ -383,6 +385,26 @@ final class ParsingTests: XCTestCase {
         )
         XCTAssertFalse(decoded.notifyAboutResets)
         XCTAssertTrue(decoded.notifyAtScheduledReset)
+    }
+
+    func testRemoteWorkerSourceReferenceRoundTripsInDeviceSettings() throws {
+        let remoteReference = String(repeating: "A", count: 43)
+        let accountReference = String(repeating: "B", count: 43)
+        let original = AccountMonitorSettings(
+            monitorOnSelfHostedServer: true,
+            selfHostedServerConsentURL: "https://worker.example",
+            selfHostedServerConsentRevision: 1,
+            remoteWorkerAccountID: remoteReference,
+            workerAccountReference: accountReference
+        )
+
+        let decoded = try JSONDecoder().decode(
+            AccountMonitorSettings.self,
+            from: JSONEncoder().encode(original)
+        )
+
+        XCTAssertEqual(decoded.remoteWorkerAccountID, remoteReference)
+        XCTAssertEqual(decoded.workerAccountReference, accountReference)
     }
 
     func testMissingQuotaHistoryBehaviorRoundTripsPerMetric() throws {
@@ -670,6 +692,9 @@ final class ParsingTests: XCTestCase {
         let response = Data(#"""
         {
           "consent_revision": 7,
+          "account_reference": "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD",
+          "session_status": "active",
+          "session_checked_at": 1999999975,
           "credentials": {
             "access_token": 123,
             "refresh_token": ["must", "not", "decode"],
@@ -689,6 +714,11 @@ final class ParsingTests: XCTestCase {
         let result = try PushServerClient.decodeAccountResponse(response, account: account)
 
         XCTAssertEqual(result.consentRevision, 7)
+        XCTAssertEqual(result.workerAccountReference,
+                       "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD")
+        XCTAssertEqual(result.sessionStatus, .active)
+        XCTAssertEqual(result.sessionCheckedAt,
+                       Date(timeIntervalSince1970: 1_999_999_975))
         XCTAssertEqual(result.accountDetails?.profileName, "Provider Person")
         XCTAssertEqual(result.accountDetails?.email, "person@example.com")
         XCTAssertEqual(result.accountDetails?.plan, "Pro 20x")
@@ -705,6 +735,8 @@ final class ParsingTests: XCTestCase {
         let response = Data(#"""
         {
           "remote_account_id": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "synced_account_reference": "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+          "account_reference": "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
           "provider_id": "claude",
           "display_name": "Work",
           "plan": "Max",
@@ -715,18 +747,83 @@ final class ParsingTests: XCTestCase {
             "plan_expires_at": 2000000000,
             "trial_expires_at": null
           },
-          "last_success_at": 1999999900
+          "last_success_at": 1999999900,
+          "session_status": "expired",
+          "session_checked_at": 1999999950
         }
         """#.utf8)
 
         let candidate = try JSONDecoder().decode(RemoteWorkerAccountCandidate.self, from: response)
 
+        XCTAssertEqual(candidate.syncedAccountReference,
+                       "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+        XCTAssertEqual(candidate.workerAccountReference,
+                       "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
         XCTAssertEqual(candidate.metadata?.name, "Provider Person")
         XCTAssertEqual(candidate.metadata?.email, "person@example.com")
         XCTAssertEqual(candidate.metadata?.plan, "Max")
         XCTAssertEqual(candidate.metadata?.accountDetails.planExpiresAt,
                        Date(timeIntervalSince1970: 2_000_000_000))
         XCTAssertNil(candidate.metadata?.accountDetails.trialExpiresAt)
+        XCTAssertEqual(candidate.sessionStatus, .expired)
+        XCTAssertEqual(candidate.sessionCheckedAt,
+                       Date(timeIntervalSince1970: 1_999_999_950))
+    }
+
+    func testRemoteWorkerCandidateMatchesItsSyncedLocalAccountWithoutExposingUUID() throws {
+        let accountID = UUID(uuidString: "019F724A-3414-4D52-AE37-0C7024A1ABA0")!
+        let account = MonitoredAccount(
+            id: accountID,
+            providerID: .claude,
+            displayName: "Work",
+            workspaceID: "workspace",
+            plan: "Max",
+            addedAt: .now
+        )
+        let candidate = RemoteWorkerAccountCandidate(
+            remoteAccountID: String(repeating: "A", count: 43),
+            syncedAccountReference: RemoteWorkerAccountMatcher.reference(for: accountID),
+            workerAccountReference: String(repeating: "B", count: 43),
+            providerID: .claude,
+            displayName: "Work",
+            plan: "Max",
+            metadata: nil,
+            lastSuccessTimestamp: nil
+        )
+
+        let matchingSettings = AccountMonitorSettings(
+            workerAccountReference: String(repeating: "B", count: 43)
+        )
+        XCTAssertTrue(RemoteWorkerAccountMatcher.matches(
+            candidate,
+            account: account,
+            settings: matchingSettings
+        ))
+        XCTAssertFalse(RemoteWorkerAccountMatcher.reference(for: accountID)
+            .contains(accountID.uuidString.lowercased()))
+
+        let legacyCandidate = RemoteWorkerAccountCandidate(
+            remoteAccountID: String(repeating: "C", count: 43),
+            syncedAccountReference: RemoteWorkerAccountMatcher.reference(for: accountID),
+            providerID: .claude,
+            displayName: "Work",
+            plan: "Max",
+            metadata: nil,
+            lastSuccessTimestamp: nil
+        )
+        XCTAssertTrue(RemoteWorkerAccountMatcher.matches(
+            legacyCandidate,
+            account: account,
+            settings: .init()
+        ))
+
+        var wrongProvider = account
+        wrongProvider.providerID = .chatGPT
+        XCTAssertFalse(RemoteWorkerAccountMatcher.matches(
+            candidate,
+            account: wrongProvider,
+            settings: matchingSettings
+        ))
     }
 
     func testLiveActivityRotatesBeforeSystemEightHourLimit() {
@@ -1407,6 +1504,62 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(result.points.count, 1)
         XCTAssertEqual(result.points.first?.remainingPercent, 60)
         XCTAssertEqual(result.points.first?.secondsUntilReset, 7_200)
+    }
+
+    func testHistoryMergeMovesRemoteAccountDataWithoutDuplicatePoints() async throws {
+        let store = try makeStore()
+        let observedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let target = MonitoredAccount(
+            id: UUID(uuidString: "019F724A-3414-4D52-AE37-0C7024A1ABA0")!,
+            providerID: .chatGPT,
+            displayName: "ieb",
+            workspaceID: "workspace",
+            plan: "Pro",
+            addedAt: observedAt
+        )
+        let remote = MonitoredAccount(
+            id: UUID(uuidString: "019F724A-3414-4D52-AE37-0C7024A1ABA1")!,
+            providerID: .chatGPT,
+            displayName: "Natu Leppanen",
+            workspaceID: MonitoredAccount.remoteWorkspacePrefix + "remote",
+            plan: "Pro",
+            addedAt: observedAt
+        )
+        let localSnapshot = makeSnapshot(
+            account: target,
+            at: observedAt,
+            weeklyRemaining: 40,
+            weeklyResetAt: observedAt.addingTimeInterval(86_400)
+        )
+        let remoteSnapshot = makeSnapshot(
+            account: remote,
+            at: observedAt,
+            weeklyRemaining: 70,
+            weeklyResetAt: observedAt.addingTimeInterval(86_400)
+        )
+        _ = try await store.record(
+            snapshot: localSnapshot,
+            account: target,
+            source: .background,
+            now: observedAt
+        )
+        _ = try await store.record(
+            snapshot: remoteSnapshot,
+            account: remote,
+            source: .server,
+            now: observedAt
+        )
+
+        let merged = try await store.mergeAccount(
+            sourceID: remote.id,
+            into: target.id,
+            now: observedAt
+        )
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged.first?.accountID, target.id)
+        XCTAssertEqual(merged.first?.remainingPercent, 70)
+        XCTAssertEqual(merged.first?.source, .server)
     }
 
     func testDuplicateBankedCreditIDsDoNotCrashOrDoubleCount() async throws {
@@ -2130,6 +2283,169 @@ final class UsageHistoryTests: XCTestCase {
             availableResetCount: credits.count,
             resetCredits: credits,
             fetchedAt: date
+        )
+    }
+}
+
+final class MacUsageHistoryPresentationTests: XCTestCase {
+    func testWorkerHistoryFetchScopesChooseIncrementalOrFullRetentionStart() {
+        let now = Date(timeIntervalSince1970: 2_000_000_000)
+        let latest = now.addingTimeInterval(-3_600)
+        let retainedStart = now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
+
+        XCTAssertEqual(
+            WorkerHistoryFetchScope.incremental.startDate(
+                now: now,
+                latestServerPoint: latest
+            ),
+            latest.addingTimeInterval(-60)
+        )
+        XCTAssertEqual(
+            WorkerHistoryFetchScope.retainedHistory.startDate(
+                now: now,
+                latestServerPoint: latest
+            ),
+            retainedStart
+        )
+        XCTAssertEqual(
+            WorkerHistoryFetchScope.incremental.startDate(
+                now: now,
+                latestServerPoint: nil
+            ),
+            retainedStart
+        )
+    }
+
+    func testSeriesCombinesLocalAndWorkerSamplesWithoutLosingTheirSource() throws {
+        let accountID = UUID()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let points = [
+            point(accountID: accountID, recordedAt: start, remaining: 90, source: .manual),
+            point(accountID: accountID, recordedAt: start.addingTimeInterval(300),
+                  remaining: 82, source: .server),
+            point(accountID: accountID, recordedAt: start.addingTimeInterval(600),
+                  remaining: 75, source: .background),
+        ]
+
+        let series = try XCTUnwrap(MacUsageHistoryPresentation.series(
+            points: points,
+            accountID: accountID,
+            in: start...start.addingTimeInterval(600)
+        ).first)
+
+        XCTAssertEqual(series.points.count, 3)
+        XCTAssertEqual(series.deviceSampleCount, 2)
+        XCTAssertEqual(series.workerSampleCount, 1)
+        XCTAssertTrue(series.includesDeviceSamples)
+        XCTAssertTrue(series.includesWorkerSamples)
+        XCTAssertEqual(Set(series.chartPoints.map(\.sampleSource)), [.device, .worker])
+        XCTAssertEqual(Set(series.chartPoints.map(\.segmentID)).count, 1)
+        XCTAssertFalse(series.chartPoints.contains(where: \.isGapConnector))
+    }
+
+    func testOnlyGapsLongerThanOneHourUseDashedConnectors() throws {
+        let accountID = UUID()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let oneHour = start.addingTimeInterval(60 * 60)
+        let afterLongGap = oneHour.addingTimeInterval(60 * 60 + 1)
+        let points = [
+            point(accountID: accountID, recordedAt: start, remaining: 90, source: .manual),
+            point(accountID: accountID, recordedAt: oneHour, remaining: 80, source: .server),
+            point(accountID: accountID, recordedAt: afterLongGap,
+                  remaining: 70, source: .background),
+        ]
+
+        let series = try XCTUnwrap(MacUsageHistoryPresentation.series(
+            points: points,
+            accountID: accountID,
+            in: start...afterLongGap
+        ).first)
+        let dashed = series.chartPoints.filter(\.isGapConnector)
+        let solid = series.chartPoints.filter { !$0.isGapConnector }
+
+        XCTAssertEqual(dashed.map(\.point.recordedAt), [oneHour, afterLongGap])
+        XCTAssertEqual(Set(dashed.map(\.segmentID)).count, 1)
+        XCTAssertEqual(solid.map(\.point.recordedAt), [start, oneHour, afterLongGap])
+        XCTAssertEqual(solid[0].segmentID, solid[1].segmentID)
+        XCTAssertNotEqual(solid[1].segmentID, solid[2].segmentID)
+    }
+
+    func testArbitraryDateRangeIsPreservedAndClampedToAvailableHistory() throws {
+        let accountID = UUID()
+        let end = Date(timeIntervalSince1970: 2_000_000_000)
+        let beginning = end.addingTimeInterval(-20 * 24 * 60 * 60)
+        let points = [
+            point(accountID: accountID, recordedAt: beginning, remaining: 95, source: .manual),
+            point(accountID: accountID, recordedAt: end, remaining: 55, source: .server),
+        ]
+        let available = try XCTUnwrap(MacUsageHistoryPresentation.availableRange(
+            points: points,
+            accountID: accountID
+        ))
+
+        let arbitraryStart = end.addingTimeInterval(-12 * 24 * 60 * 60 - 1_337)
+        let arbitraryEnd = end.addingTimeInterval(-2 * 24 * 60 * 60 - 913)
+        let arbitrary = MacUsageHistoryPresentation.normalizedRange(
+            start: arbitraryStart,
+            end: arbitraryEnd,
+            within: available
+        )
+        XCTAssertEqual(arbitrary.lowerBound, arbitraryStart)
+        XCTAssertEqual(arbitrary.upperBound, arbitraryEnd)
+
+        let clamped = MacUsageHistoryPresentation.normalizedRange(
+            start: beginning.addingTimeInterval(-86_400),
+            end: end.addingTimeInterval(86_400),
+            within: available
+        )
+        XCTAssertEqual(clamped, available)
+    }
+
+    func testDefaultRangeEndsAtLatestSampleAndSeriesHonorsSelection() throws {
+        let accountID = UUID()
+        let latest = Date(timeIntervalSince1970: 2_000_000_000)
+        let old = latest.addingTimeInterval(-10 * 24 * 60 * 60)
+        let recent = latest.addingTimeInterval(-2 * 24 * 60 * 60)
+        let points = [
+            point(accountID: accountID, recordedAt: old, remaining: 96, source: .manual),
+            point(accountID: accountID, recordedAt: recent, remaining: 68, source: .server),
+            point(accountID: accountID, recordedAt: latest, remaining: 51, source: .server),
+        ]
+        let available = try XCTUnwrap(MacUsageHistoryPresentation.availableRange(
+            points: points,
+            accountID: accountID
+        ))
+        let selected = MacUsageHistoryPresentation.defaultRange(within: available)
+        let series = try XCTUnwrap(MacUsageHistoryPresentation.series(
+            points: points,
+            accountID: accountID,
+            in: selected
+        ).first)
+
+        XCTAssertEqual(selected.upperBound, latest)
+        XCTAssertEqual(selected.lowerBound, latest.addingTimeInterval(-7 * 24 * 60 * 60))
+        XCTAssertEqual(series.points.map(\.recordedAt), [recent, latest])
+    }
+
+    private func point(
+        accountID: UUID,
+        recordedAt: Date,
+        remaining: Double,
+        source: UsageRefreshSource
+    ) -> UsageHistoryPoint {
+        UsageHistoryPoint(
+            accountID: accountID,
+            providerID: .chatGPT,
+            metricID: "weekly",
+            metricTitle: "Weekly limit",
+            kind: .weekly,
+            windowMinutes: 10_080,
+            remainingPercent: remaining,
+            recordedAt: recordedAt,
+            resetsAt: recordedAt.addingTimeInterval(7 * 24 * 60 * 60),
+            secondsUntilReset: 7 * 24 * 60 * 60,
+            source: source,
+            plan: "Pro"
         )
     }
 }

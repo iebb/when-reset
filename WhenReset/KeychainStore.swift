@@ -12,6 +12,8 @@ struct AccountCredentials: Codable, Equatable, Sendable {
     var accountLabel: String? = nil
     var oauthClientID: String? = nil
     var oauthClientSecret: String? = nil
+    var monthlyBudget: Double? = nil
+    var currencyCode: String? = nil
 }
 
 enum KeychainStore {

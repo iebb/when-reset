@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Security
 #if os(iOS)
@@ -268,8 +269,33 @@ struct ServerAccountSyncResult: Sendable {
     var accountDetails: ProviderAccountDetails?
     var snapshot: UsageSnapshot?
     var history: [UsageHistoryPoint]
+    var workerAccountReference: String? = nil
     var lastSuccessAt: Date?
     var lastError: String?
+    var sessionStatus: WorkerSessionStatus? = nil
+    var sessionCheckedAt: Date? = nil
+}
+
+enum WorkerSessionStatus: String, Decodable, Hashable, Sendable {
+    case active, expired, error, unchecked
+
+    var label: String {
+        switch self {
+        case .active: "Session active"
+        case .expired: "Sign-in expired"
+        case .error: "Session check failed"
+        case .unchecked: "Session not checked"
+        }
+    }
+
+    var systemImageName: String {
+        switch self {
+        case .active: "checkmark.shield.fill"
+        case .expired: "person.crop.circle.badge.exclamationmark"
+        case .error: "exclamationmark.triangle.fill"
+        case .unchecked: "questionmark.circle"
+        }
+    }
 }
 
 struct WorkerAccountMetadata: Codable, Equatable, Hashable, Sendable {
@@ -316,24 +342,60 @@ struct ServerMissingQuotaDescriptor: Sendable {
 
 struct RemoteWorkerAccountCandidate: Identifiable, Decodable, Hashable, Sendable {
     var remoteAccountID: String
+    var syncedAccountReference: String? = nil
+    var workerAccountReference: String? = nil
     var providerID: ProviderID
     var displayName: String
     var plan: String?
     var metadata: WorkerAccountMetadata?
     var lastSuccessTimestamp: TimeInterval?
+    var sessionStatus: WorkerSessionStatus? = nil
+    var sessionCheckedTimestamp: TimeInterval? = nil
 
     var id: String { remoteAccountID }
     var lastSuccessAt: Date? {
         lastSuccessTimestamp.map(Date.init(timeIntervalSince1970:))
     }
+    var sessionCheckedAt: Date? {
+        sessionCheckedTimestamp.map(Date.init(timeIntervalSince1970:))
+    }
 
     enum CodingKeys: String, CodingKey {
         case remoteAccountID = "remote_account_id"
+        case syncedAccountReference = "synced_account_reference"
+        case workerAccountReference = "account_reference"
         case providerID = "provider_id"
         case displayName = "display_name"
         case plan
         case metadata
         case lastSuccessTimestamp = "last_success_at"
+        case sessionStatus = "session_status"
+        case sessionCheckedTimestamp = "session_checked_at"
+    }
+}
+
+enum RemoteWorkerAccountMatcher {
+    static func reference(for accountID: UUID) -> String {
+        let canonical = "when-reset:synced-account:v1:\(accountID.uuidString.lowercased())"
+        return Data(SHA256.hash(data: Data(canonical.utf8)))
+            .base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    static func matches(_ candidate: RemoteWorkerAccountCandidate,
+                        account: MonitoredAccount,
+                        settings: AccountMonitorSettings) -> Bool {
+        guard !account.isDemo, candidate.providerID == account.providerID else {
+            return false
+        }
+        if let candidateReference = candidate.workerAccountReference,
+           let localReference = settings.workerAccountReference {
+            return candidateReference == localReference
+        }
+        guard let syncedAccountReference = candidate.syncedAccountReference else { return false }
+        return syncedAccountReference == reference(for: account.id)
     }
 }
 
@@ -414,21 +476,29 @@ enum PushServerClient {
 
     private struct ImportedRemoteAccount: Decodable {
         var remoteAccountID: String
+        var syncedAccountReference: String?
+        var workerAccountReference: String?
         var localAccountID: UUID
         var providerID: ProviderID
         var displayName: String
         var plan: String?
         var metadata: WorkerAccountMetadata?
         var lastSuccessTimestamp: TimeInterval?
+        var sessionStatus: WorkerSessionStatus?
+        var sessionCheckedTimestamp: TimeInterval?
 
         enum CodingKeys: String, CodingKey {
             case remoteAccountID = "remote_account_id"
+            case syncedAccountReference = "synced_account_reference"
+            case workerAccountReference = "account_reference"
             case localAccountID = "local_account_id"
             case providerID = "provider_id"
             case displayName = "display_name"
             case plan
             case metadata
             case lastSuccessTimestamp = "last_success_at"
+            case sessionStatus = "session_status"
+            case sessionCheckedTimestamp = "session_checked_at"
         }
     }
 
@@ -441,12 +511,16 @@ enum PushServerClient {
         var refreshToken: String
         var idToken: String
         var expiresAt: TimeInterval?
+        var monthlyBudget: Double?
+        var currencyCode: String?
 
         enum CodingKeys: String, CodingKey {
             case accessToken = "access_token"
             case refreshToken = "refresh_token"
             case idToken = "id_token"
             case expiresAt = "expires_at"
+            case monthlyBudget = "monthly_budget"
+            case currencyCode = "currency_code"
         }
 
         init(_ credentials: AccountCredentials) {
@@ -454,6 +528,8 @@ enum PushServerClient {
             refreshToken = credentials.refreshToken
             idToken = credentials.idToken
             expiresAt = credentials.expiresAt?.timeIntervalSince1970
+            monthlyBudget = credentials.monthlyBudget
+            currencyCode = credentials.currencyCode
         }
 
     }
@@ -564,6 +640,7 @@ enum PushServerClient {
         var windows: [RemoteWindow]
         var availableResetCount: Int
         var resetCredits: [RemoteResetCredit]
+        var apiBalance: RemoteAPIBalance?
 
         enum CodingKeys: String, CodingKey {
             case providerID = "provider_id"
@@ -572,6 +649,7 @@ enum PushServerClient {
             case windows
             case availableResetCount = "available_reset_count"
             case resetCredits = "reset_credits"
+            case apiBalance = "api_balance"
         }
 
         func usageSnapshot(account: MonitoredAccount) -> UsageSnapshot? {
@@ -590,7 +668,43 @@ enum PushServerClient {
                 availableResetCount: availableResetCount,
                 resetCredits: resetCredits.map(\.resetCredit),
                 fetchedAt: Date(timeIntervalSince1970: fetchedAt),
-                extraWindows: converted.count > 2 ? Array(converted.dropFirst(2)) : nil
+                extraWindows: converted.count > 2 ? Array(converted.dropFirst(2)) : nil,
+                apiBalance: apiBalance?.apiBalance
+            )
+        }
+    }
+
+    private struct RemoteAPIBalance: Decodable {
+        var title: String
+        var currencyCode: String
+        var spent: Double
+        var limit: Double?
+        var remaining: Double?
+        var periodStart: TimeInterval?
+        var periodEnd: TimeInterval?
+        var accessExpiresAt: TimeInterval?
+        var isUnlimited: Bool
+
+        enum CodingKeys: String, CodingKey {
+            case title, spent, limit, remaining
+            case currencyCode = "currency_code"
+            case periodStart = "period_start"
+            case periodEnd = "period_end"
+            case accessExpiresAt = "access_expires_at"
+            case isUnlimited = "is_unlimited"
+        }
+
+        var apiBalance: APIBalance {
+            APIBalance(
+                title: title,
+                currencyCode: currencyCode,
+                spent: spent,
+                limit: limit,
+                remaining: remaining,
+                periodStart: periodStart.map(Date.init(timeIntervalSince1970:)),
+                periodEnd: periodEnd.map(Date.init(timeIntervalSince1970:)),
+                accessExpiresAt: accessExpiresAt.map(Date.init(timeIntervalSince1970:)),
+                isUnlimited: isUnlimited
             )
         }
     }
@@ -644,15 +758,21 @@ enum PushServerClient {
         var metadata: WorkerAccountMetadata?
         var history: [RemoteHistoryPoint]
         var nextCursor: String?
+        var workerAccountReference: String?
         var lastSuccessAt: TimeInterval?
         var lastError: String?
+        var sessionStatus: WorkerSessionStatus?
+        var sessionCheckedAt: TimeInterval?
 
         enum CodingKeys: String, CodingKey {
             case snapshot, metadata, history
             case consentRevision = "consent_revision"
             case nextCursor = "next_cursor"
+            case workerAccountReference = "account_reference"
             case lastSuccessAt = "last_success_at"
             case lastError = "last_error"
+            case sessionStatus = "session_status"
+            case sessionCheckedAt = "session_checked_at"
         }
     }
 
@@ -950,6 +1070,16 @@ enum PushServerClient {
               Set(response.accounts.map(\.remoteAccountID)).count == response.accounts.count,
               response.accounts.allSatisfy({
                   $0.remoteAccountID.count == 43
+                    && ($0.syncedAccountReference == nil
+                        || $0.syncedAccountReference?.range(
+                            of: #"^[A-Za-z0-9_-]{43}$"#,
+                            options: .regularExpression
+                        ) != nil)
+                    && ($0.workerAccountReference == nil
+                        || $0.workerAccountReference?.range(
+                            of: #"^[A-Za-z0-9_-]{43}$"#,
+                            options: .regularExpression
+                        ) != nil)
                     && !$0.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
               }) else {
             throw PushServerError.invalidResponse
@@ -985,26 +1115,33 @@ enum PushServerClient {
         let imported = try JSONDecoder().decode(RemoteAccountImportResponse.self, from: data).account
         guard imported.remoteAccountID == candidate.remoteAccountID,
               imported.localAccountID == localAccountID,
-              imported.providerID == candidate.providerID else {
+              imported.providerID == candidate.providerID,
+              (candidate.syncedAccountReference == nil
+                || imported.syncedAccountReference == candidate.syncedAccountReference),
+              (candidate.workerAccountReference == nil
+                || imported.workerAccountReference == candidate.workerAccountReference) else {
             throw PushServerError.invalidResponse
         }
         return RemoteWorkerAccountCandidate(
             remoteAccountID: imported.remoteAccountID,
+            syncedAccountReference: imported.syncedAccountReference,
+            workerAccountReference: imported.workerAccountReference,
             providerID: imported.providerID,
             displayName: imported.displayName,
             plan: imported.plan,
             metadata: imported.metadata,
-            lastSuccessTimestamp: imported.lastSuccessTimestamp
+            lastSuccessTimestamp: imported.lastSuccessTimestamp,
+            sessionStatus: imported.sessionStatus,
+            sessionCheckedTimestamp: imported.sessionCheckedTimestamp
         )
     }
 
     static func restoreRemoteAccount(
         settings: PushServerSettings,
-        account: MonitoredAccount
+        account: MonitoredAccount,
+        remoteAccountID: String
     ) async throws {
-        guard account.isRemoteOnly,
-              let remoteAccountID = account.remoteWorkerAccountID,
-              remoteAccountID.count == 43 else {
+        guard remoteAccountID.count == 43 else {
             throw PushServerError.remoteAccountUnavailable
         }
         _ = try await importRemoteAccount(
@@ -1030,7 +1167,8 @@ enum PushServerClient {
     static func uploadAccount(settings: PushServerSettings, account: MonitoredAccount,
                               credentials: AccountCredentials,
                               missingQuotas: [ServerMissingQuotaDescriptor],
-                              consentRevision: Int64) async throws
+                              consentRevision: Int64,
+                              replacingRemoteCredential: Bool = false) async throws
         -> ServerAccountSyncResult {
         guard consentRevision > 0 else { throw PushServerError.accountMonitoringUnavailable }
         let (serverURL, registration) = try monitoringContext(settings: settings)
@@ -1044,6 +1182,12 @@ enum PushServerClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
         request.setValue("Bearer \(registration.deviceSecret)", forHTTPHeaderField: "Authorization")
+        if replacingRemoteCredential {
+            request.setValue(
+                "replace-remote",
+                forHTTPHeaderField: "X-When-Reset-Credential-Update"
+            )
+        }
         request.httpBody = try JSONEncoder().encode(AccountUploadRequest(
             providerID: account.providerID.rawValue,
             workspaceID: account.workspaceID,
@@ -1197,8 +1341,11 @@ enum PushServerClient {
             accountDetails: page.metadata?.accountDetails,
             snapshot: page.snapshot?.usageSnapshot(account: account),
             history: page.history.map { $0.historyPoint(accountID: account.id) },
+            workerAccountReference: page.workerAccountReference,
             lastSuccessAt: page.lastSuccessAt.map(Date.init(timeIntervalSince1970:)),
-            lastError: page.lastError
+            lastError: page.lastError,
+            sessionStatus: page.sessionStatus,
+            sessionCheckedAt: page.sessionCheckedAt.map(Date.init(timeIntervalSince1970:))
         )
     }
 

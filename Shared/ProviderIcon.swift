@@ -63,17 +63,19 @@ struct ProviderIcon: View {
 
     private var backgroundColor: Color {
         switch providerID {
-        case .chatGPT: .white
+        case .chatGPT, .openAIAPI: .white
         case .claude: .clear
+        case .grok: .black
         case .kimi, .zai, .miniMax, .synthetic, .ollamaCloud, .warp, .antigravity,
-             .compatibleAPI: .clear
+             .compatibleAPI, .anthropicAPI, .newAPI: .clear
         case .githubCopilot: .secondary.opacity(0.12)
         }
     }
 
     private var foregroundColor: Color {
         switch providerID {
-        case .chatGPT, .claude: .primary
+        case .chatGPT, .claude, .openAIAPI, .anthropicAPI: .primary
+        case .grok: .white
         case .kimi: .indigo
         case .githubCopilot: .purple
         case .zai: .primary
@@ -83,16 +85,17 @@ struct ProviderIcon: View {
         case .warp: .purple
         case .antigravity: .blue
         case .compatibleAPI: .secondary
+        case .newAPI: .green
         }
     }
 
     private var imageInsetFraction: CGFloat {
         switch providerID {
-        case .chatGPT: 0.16
+        case .chatGPT, .openAIAPI: 0.16
         case .githubCopilot: 0.18
-        case .claude, .kimi, .zai: 0
+        case .claude, .anthropicAPI, .kimi, .zai, .grok: 0
         case .miniMax: 0.13
-        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI: 0.2
+        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI, .newAPI: 0.2
         }
     }
 }

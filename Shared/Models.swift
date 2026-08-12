@@ -3,6 +3,7 @@ import Foundation
 enum ProviderID: String, Codable, CaseIterable, Sendable {
     case chatGPT = "chatgpt"
     case claude = "claude"
+    case grok = "grok"
     case kimi = "kimi"
     case githubCopilot = "github_copilot"
     case zai = "zai"
@@ -12,11 +13,15 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     case warp = "warp"
     case antigravity = "antigravity"
     case compatibleAPI = "compatible_api"
+    case openAIAPI = "openai_api"
+    case anthropicAPI = "anthropic_api"
+    case newAPI = "new_api"
 
     var displayName: String {
         switch self {
         case .chatGPT: "ChatGPT"
         case .claude: "Claude"
+        case .grok: "Grok"
         case .kimi: "Kimi Code"
         case .githubCopilot: "GitHub Copilot"
         case .zai: "Z.AI Coding Plan"
@@ -26,6 +31,9 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .warp: "Warp"
         case .antigravity: "Antigravity"
         case .compatibleAPI: "Compatible API"
+        case .openAIAPI: "OpenAI API"
+        case .anthropicAPI: "Anthropic API"
+        case .newAPI: "New API-compatible"
         }
     }
 
@@ -34,7 +42,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     /// Browser sessions, experimental OAuth credentials, and user-selected URLs remain on-device.
     var supportsOffDeviceMonitoring: Bool {
         switch self {
-        case .githubCopilot, .ollamaCloud, .antigravity, .compatibleAPI:
+        case .githubCopilot, .ollamaCloud, .antigravity, .compatibleAPI, .newAPI:
             false
         default:
             true
@@ -69,6 +77,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         switch self {
         case .chatGPT: "Usage limits and banked resets"
         case .claude: "Session and weekly reset times"
+        case .grok: "Grok Build coding-credit reset"
         case .kimi: "5-hour and weekly coding limits"
         case .githubCopilot: "Chat and premium request quotas"
         case .zai: "5-hour, weekly, and monthly limits"
@@ -78,6 +87,9 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .warp: "Monthly request credits"
         case .antigravity: "Gemini, Claude, and GPT quota pools"
         case .compatibleAPI: "Reset windows from a compatible endpoint"
+        case .openAIAPI: "Organization API spend and budget balance"
+        case .anthropicAPI: "Organization API spend and budget balance"
+        case .newAPI: "API-key balance from a compatible gateway"
         }
     }
 
@@ -85,17 +97,21 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         switch self {
         case .chatGPT: "ChatGPTLogo"
         case .claude: "ClaudeLogo"
+        case .grok: "GrokLogo"
         case .kimi: "KimiLogo"
         case .githubCopilot: "CopilotLogo"
         case .zai: "ZAILogo"
         case .miniMax: "MiniMaxLogo"
-        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI: nil
+        case .openAIAPI: "ChatGPTLogo"
+        case .anthropicAPI: "ClaudeLogo"
+        case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI, .newAPI: nil
         }
     }
 
     var systemImageName: String {
         switch self {
         case .chatGPT, .claude: "circle.fill"
+        case .grok: "sparkle"
         case .kimi: "moon.stars.fill"
         case .githubCopilot: "chevron.left.forwardslash.chevron.right"
         case .zai: "z.square.fill"
@@ -105,13 +121,16 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .warp: "terminal.fill"
         case .antigravity: "sparkles"
         case .compatibleAPI: "network"
+        case .openAIAPI: "dollarsign.gauge.chart.lefthalf.righthalf"
+        case .anthropicAPI: "dollarsign.gauge.chart.lefthalf.righthalf"
+        case .newAPI: "creditcard.fill"
         }
     }
 }
 
 enum ProviderAvailability {
     static func allowsAccountAddition(_ providerID: ProviderID, locale: Locale) -> Bool {
-        guard providerID == .chatGPT else { return true }
+        guard providerID == .chatGPT || providerID == .openAIAPI else { return true }
         guard let region = locale.region?.identifier.uppercased() else { return true }
         return region != "CN" && region != "CHN"
     }
@@ -233,6 +252,8 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     var monitorOnSelfHostedServer = false
     var selfHostedServerConsentURL: String?
     var selfHostedServerConsentRevision: Int64 = 0
+    var remoteWorkerAccountID: String?
+    var workerAccountReference: String?
 
     init(notifyAboutResets: Bool = true, notifyAtScheduledReset: Bool = true,
          showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
@@ -244,7 +265,9 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
          missingQuotaHistoryBehaviors: [String: MissingQuotaHistoryBehavior] = [:],
          monitorOnSelfHostedServer: Bool = false,
          selfHostedServerConsentURL: String? = nil,
-         selfHostedServerConsentRevision: Int64 = 0) {
+         selfHostedServerConsentRevision: Int64 = 0,
+         remoteWorkerAccountID: String? = nil,
+         workerAccountReference: String? = nil) {
         self.notifyAboutResets = notifyAboutResets
         self.notifyAtScheduledReset = notifyAtScheduledReset
         self.showBankedResets = showBankedResets
@@ -259,6 +282,8 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         self.monitorOnSelfHostedServer = monitorOnSelfHostedServer
         self.selfHostedServerConsentURL = selfHostedServerConsentURL
         self.selfHostedServerConsentRevision = selfHostedServerConsentRevision
+        self.remoteWorkerAccountID = remoteWorkerAccountID
+        self.workerAccountReference = workerAccountReference
     }
 
     init(from decoder: Decoder) throws {
@@ -296,6 +321,14 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
             Int64.self,
             forKey: .selfHostedServerConsentRevision
         ) ?? 0
+        remoteWorkerAccountID = try values.decodeIfPresent(
+            String.self,
+            forKey: .remoteWorkerAccountID
+        )
+        workerAccountReference = try values.decodeIfPresent(
+            String.self,
+            forKey: .workerAccountReference
+        )
     }
 
     func shows(_ window: UsageWindow) -> Bool { !hiddenMetricIDs.contains(window.metricID) }
@@ -320,7 +353,7 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         case defaultLiveActivityRule, liveActivityQuotaRules, bankedResetLiveActivityRule
         case missingQuotaHistoryBehaviors
         case monitorOnSelfHostedServer, selfHostedServerConsentURL
-        case selfHostedServerConsentRevision
+        case selfHostedServerConsentRevision, remoteWorkerAccountID, workerAccountReference
     }
 }
 
@@ -666,6 +699,7 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
     var resetCredits: [ResetCredit]
     var fetchedAt: Date
     var extraWindows: [UsageWindow]? = nil
+    var apiBalance: APIBalance? = nil
 
     var availableResetCredits: [ResetCredit] {
         resetCredits
@@ -739,4 +773,21 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
         ],
         fetchedAt: .now
     )
+}
+
+struct APIBalance: Codable, Hashable, Sendable {
+    var title: String
+    var currencyCode: String
+    var spent: Double
+    var limit: Double? = nil
+    var remaining: Double? = nil
+    var periodStart: Date? = nil
+    var periodEnd: Date? = nil
+    var accessExpiresAt: Date? = nil
+    var isUnlimited = false
+
+    var fractionRemaining: Double? {
+        guard !isUnlimited, let limit, limit > 0, let remaining else { return nil }
+        return max(0, min(1, remaining / limit))
+    }
 }

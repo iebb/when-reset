@@ -5,6 +5,7 @@ import {
   ProviderFetchError,
   type ProviderAccount,
   type ProviderCredentials,
+  type ProviderFetchResult,
   type ProviderID,
   type ProviderSnapshot,
 } from "./providers";
@@ -114,6 +115,7 @@ type MonitoredAccountRow = ProviderAccount & {
   encrypted_credentials: string;
   refresh_interval_seconds: number;
   next_refresh_at: number;
+  last_refresh_at: number | null;
   last_success_at: number | null;
   last_error: string | null;
   latest_snapshot: string | null;
@@ -126,12 +128,15 @@ type MonitoredAccountRow = ProviderAccount & {
 };
 
 type AccountSyncRow = {
+  provider_id: ProviderID;
+  workspace_id: string;
   profile_name: string | null;
   email: string | null;
   plan: string | null;
   plan_expires_at: number | null;
   trial_expires_at: number | null;
   latest_snapshot: string | null;
+  last_refresh_at: number | null;
   last_success_at: number | null;
   last_error: string | null;
   consent_revision: number;
@@ -154,16 +159,31 @@ type RemoteAccountCandidateRow = {
   plan_expires_at: number | null;
   trial_expires_at: number | null;
   credential_fingerprint: string;
+  latest_snapshot: string | null;
+  last_refresh_at: number | null;
   last_success_at: number | null;
+  last_error: string | null;
 };
 
 type RemoteAccountCandidate = RemoteAccountCandidateRow & {
   remote_account_id: string;
+  synced_account_reference: string;
+  account_reference: string;
 };
+
+type WorkerSessionStatus = "active" | "expired" | "error" | "unchecked";
 
 type RemoteAccountImport = {
   remote_account_id: string;
   local_account_id: string;
+};
+
+type CredentialTargetRow = ProviderAccount & {
+  device_id: string;
+  account_id: string;
+  refresh_interval_seconds: number;
+  credential_revision: number;
+  latest_snapshot: string | null;
 };
 
 type MonitorRunRow = {
@@ -316,7 +336,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (request.method === "PUT" && !accountMatch[3]) {
       const upload = await parseAccountUpload(request);
       if (!upload) return json({ error: "invalid_account" }, 400);
-      return upsertMonitoredAccount(env, deviceID, accountID, upload);
+      return upsertMonitoredAccount(
+        env,
+        deviceID,
+        accountID,
+        upload,
+        request.headers.get("x-when-reset-credential-update") === "replace-remote",
+      );
     }
     if (request.method === "DELETE" && !accountMatch[3]) {
       const consentRevision = parseDeleteConsentRevision(url);
@@ -350,20 +376,27 @@ async function route(request: Request, env: Env): Promise<Response> {
     const tokenUpdate = await parseDeviceTokenUpdate(request);
     if (!tokenUpdate) return json({ error: "invalid_device_token" }, 400);
     const now = Math.floor(Date.now() / 1_000);
-    const result = await env.DB.prepare(
-      `UPDATE devices SET apns_token = ?, apns_environment = ?,
-         last_seen_at = ?, push_disabled_at = NULL
-       WHERE device_id = ?
-         AND NOT EXISTS (
-           SELECT 1 FROM devices AS token_owner
-           WHERE token_owner.apns_token = ? AND token_owner.device_id <> ?
-         )`
-    ).bind(
-      tokenUpdate.apns_token, tokenUpdate.apns_environment, now, deviceID,
-      tokenUpdate.apns_token, deviceID,
-    ).run();
+    const results = await env.DB.batch([
+      releaseAPNSToken(env, tokenUpdate.apns_token, deviceID, now),
+      env.DB.prepare(
+        `UPDATE devices SET apns_token = ?, apns_environment = ?,
+           last_seen_at = ?, push_disabled_at = NULL
+         WHERE device_id = ?
+           AND NOT EXISTS (
+             SELECT 1 FROM devices AS token_owner
+             WHERE token_owner.apns_token = ? AND token_owner.device_id <> ?
+           )`
+      ).bind(
+        tokenUpdate.apns_token, tokenUpdate.apns_environment, now, deviceID,
+        tokenUpdate.apns_token, deviceID,
+      ),
+    ]);
+    const result = results[1];
     if ((result.meta.changes ?? 0) !== 1) {
       return json({ error: "apns_token_conflict" }, 409);
+    }
+    if ((results[0]?.meta.changes ?? 0) > 0) {
+      console.log(JSON.stringify({ event: "apns_token_reassigned" }));
     }
     console.log(JSON.stringify({ event: "device_updated" }));
     return json({ ok: true });
@@ -493,9 +526,6 @@ async function claimLinkSession(
   if (existing && !(await secretsMatch(registration.device_secret, existing.secret_hash))) {
     return linkJSON({ error: "device_conflict" }, 409);
   }
-  if (await apnsTokenBelongsToAnotherDevice(env, registration.apns_token, registration.device_id)) {
-    return linkJSON({ error: "apns_token_conflict" }, 409);
-  }
 
   const now = Math.floor(Date.now() / 1_000);
   const tokenHash = await hashSecret(token);
@@ -504,6 +534,15 @@ async function claimLinkSession(
     AND expires_at > ? AND consumed_at IS NULL`;
   const sessionBindings = [session.session_id, tokenHash, session.server_origin, now] as const;
   const results = await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE devices SET
+         apns_token = 'retired:' || device_id,
+         push_disabled_at = COALESCE(push_disabled_at, ?)
+       WHERE apns_token = ? AND device_id <> ?
+         AND EXISTS (SELECT 1 FROM link_sessions WHERE ${validSession})`
+    ).bind(
+      now, registration.apns_token, registration.device_id, ...sessionBindings,
+    ),
     env.DB.prepare(
       `INSERT INTO devices (
          device_id, secret_hash, apns_token, apns_environment, created_at, last_seen_at
@@ -554,8 +593,9 @@ async function claimLinkSession(
       registration.device_id, deviceSecretHash, registration.apns_token,
     ),
   ]);
-  const deviceChanges = results[0]?.meta.changes ?? 0;
-  const sessionChanges = results[2]?.meta.changes ?? 0;
+  const tokenReassignments = results[0]?.meta.changes ?? 0;
+  const deviceChanges = results[1]?.meta.changes ?? 0;
+  const sessionChanges = results[3]?.meta.changes ?? 0;
   if (deviceChanges !== 1 || sessionChanges !== 1) {
     if (await apnsTokenBelongsToAnotherDevice(
       env, registration.apns_token, registration.device_id
@@ -563,6 +603,9 @@ async function claimLinkSession(
       return linkJSON({ error: "apns_token_conflict" }, 409);
     }
     return linkJSON({ error: "link_session_used" }, 409);
+  }
+  if (tokenReassignments > 0) {
+    console.log(JSON.stringify({ event: "apns_token_reassigned" }));
   }
   console.log(JSON.stringify({ event: "device_linked" }));
   return linkJSON({ ok: true }, 201);
@@ -656,13 +699,11 @@ async function registerDevice(env: Env, registration: DeviceRegistration): Promi
   if (existing && !(await secretsMatch(registration.device_secret, existing.secret_hash))) {
     return json({ error: "unauthorized" }, 401);
   }
-  if (await apnsTokenBelongsToAnotherDevice(env, registration.apns_token, registration.device_id)) {
-    return json({ error: "apns_token_conflict" }, 409);
-  }
 
   const now = Math.floor(Date.now() / 1_000);
   const secretHash = existing?.secret_hash ?? await hashSecret(registration.device_secret);
   const results = await env.DB.batch([
+    releaseAPNSToken(env, registration.apns_token, registration.device_id, now),
     env.DB.prepare(
       `INSERT INTO devices (
          device_id, secret_hash, apns_token, apns_environment, created_at, last_seen_at
@@ -696,7 +737,7 @@ async function registerDevice(env: Env, registration: DeviceRegistration): Promi
          )`
     ).bind(registration.device_id, registration.device_id, secretHash),
   ]);
-  const result = results[0];
+  const result = results[1];
   if ((result.meta.changes ?? 0) !== 1) {
     if (await apnsTokenBelongsToAnotherDevice(
       env, registration.apns_token, registration.device_id
@@ -706,8 +747,25 @@ async function registerDevice(env: Env, registration: DeviceRegistration): Promi
     return json({ error: "device_conflict" }, 409);
   }
 
+  if ((results[0]?.meta.changes ?? 0) > 0) {
+    console.log(JSON.stringify({ event: "apns_token_reassigned" }));
+  }
   console.log(JSON.stringify({ event: existing ? "device_updated" : "device_registered" }));
   return json({ ok: true }, existing ? 200 : 201);
+}
+
+function releaseAPNSToken(
+  env: Env,
+  apnsToken: string,
+  destinationDeviceID: string,
+  disabledAt: number,
+): D1PreparedStatement {
+  return env.DB.prepare(
+    `UPDATE devices SET
+       apns_token = 'retired:' || device_id,
+       push_disabled_at = COALESCE(push_disabled_at, ?)
+     WHERE apns_token = ? AND device_id <> ?`
+  ).bind(disabledAt, apnsToken, destinationDeviceID);
 }
 
 async function apnsTokenBelongsToAnotherDevice(
@@ -751,7 +809,9 @@ async function importRemoteAccounts(
             monitored_accounts.display_name, monitored_accounts.profile_name,
             monitored_accounts.email, monitored_accounts.plan,
             monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
-            monitored_accounts.credential_fingerprint, monitored_accounts.last_success_at
+            monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
+            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+            monitored_accounts.last_error
      FROM remote_account_subscriptions
      INNER JOIN monitored_accounts
        ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
@@ -766,6 +826,8 @@ async function importRemoteAccounts(
       remote_account_id: await remoteAccountReference(
         env, subscribedSource.device_id, subscribedSource.account_id
       ),
+      synced_account_reference: await syncedAccountReference(subscribedSource.account_id),
+      account_reference: await accountReferenceForRow(env, subscribedSource),
     };
     if (existing.remote_account_id !== imported.remote_account_id) {
       return json({ error: "remote_account_conflict" }, 409);
@@ -838,13 +900,15 @@ async function loadRemoteAccountCandidates(
   env: Env,
   subscriberDeviceID: string,
 ): Promise<RemoteAccountCandidate[]> {
-  const result = await env.DB.prepare(
+  const [result, localResult, subscribedResult] = await Promise.all([env.DB.prepare(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.display_name, monitored_accounts.profile_name,
             monitored_accounts.email, monitored_accounts.plan,
             monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
-            monitored_accounts.credential_fingerprint, monitored_accounts.last_success_at
+            monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
+            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+            monitored_accounts.last_error
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
@@ -859,20 +923,62 @@ async function loadRemoteAccountCandidates(
            AND remote_account_subscriptions.source_device_id = monitored_accounts.device_id
            AND remote_account_subscriptions.source_account_id = monitored_accounts.account_id
        )
-     ORDER BY monitored_accounts.last_success_at DESC,
+     ORDER BY (monitored_accounts.last_error IS NOT NULL),
+              monitored_accounts.last_success_at DESC,
               monitored_accounts.device_id, monitored_accounts.account_id
      LIMIT ?`
-  ).bind(subscriberDeviceID, subscriberDeviceID, MAX_REMOTE_ACCOUNT_IMPORTS * 4)
-    .all<RemoteAccountCandidateRow>();
+  ).bind(subscriberDeviceID, subscriberDeviceID, MAX_REMOTE_ACCOUNT_IMPORTS * 8)
+    .all<RemoteAccountCandidateRow>(), env.DB.prepare(
+    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.display_name, monitored_accounts.profile_name,
+            monitored_accounts.email, monitored_accounts.plan,
+            monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
+            monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
+            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+            monitored_accounts.last_error
+     FROM monitored_accounts
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE monitored_accounts.device_id = ?
+       AND monitored_accounts.credential_fingerprint IS NOT NULL`
+  ).bind(subscriberDeviceID).all<RemoteAccountCandidateRow>(), env.DB.prepare(
+    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.display_name, monitored_accounts.profile_name,
+            monitored_accounts.email, monitored_accounts.plan,
+            monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
+            monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
+            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+            monitored_accounts.last_error
+     FROM remote_account_subscriptions
+     INNER JOIN monitored_accounts
+       ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
+      AND monitored_accounts.account_id = remote_account_subscriptions.source_account_id
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE remote_account_subscriptions.subscriber_device_id = ?
+       AND monitored_accounts.credential_fingerprint IS NOT NULL`
+  ).bind(subscriberDeviceID).all<RemoteAccountCandidateRow>()]);
+  const localReferences = new Set<string>();
+  for (const row of [...localResult.results, ...subscribedResult.results]) {
+    localReferences.add(await accountReferenceForRow(env, row));
+  }
   const seen = new Set<string>();
   const candidates: RemoteAccountCandidate[] = [];
   for (const row of result.results) {
-    const duplicateKey = `${row.provider_id}\u0000${row.workspace_id}\u0000${row.credential_fingerprint}`;
-    if (seen.has(duplicateKey)) continue;
-    seen.add(duplicateKey);
+    const accountReference = await accountReferenceForRow(env, row);
+    if (localReferences.has(accountReference) || seen.has(accountReference)) continue;
+    seen.add(accountReference);
     candidates.push({
       ...row,
       remote_account_id: await remoteAccountReference(env, row.device_id, row.account_id),
+      synced_account_reference: await syncedAccountReference(row.account_id),
+      account_reference: accountReference,
     });
     if (candidates.length >= MAX_REMOTE_ACCOUNT_IMPORTS) break;
   }
@@ -893,14 +999,67 @@ async function parseRemoteAccountImport(request: Request): Promise<RemoteAccount
 }
 
 function remoteAccountPayload(candidate: RemoteAccountCandidate): Record<string, unknown> {
+  const session = workerSession(candidate);
   return {
     remote_account_id: candidate.remote_account_id,
+    synced_account_reference: candidate.synced_account_reference,
+    account_reference: candidate.account_reference,
     provider_id: candidate.provider_id,
     display_name: candidate.display_name ?? providerDisplayName(candidate.provider_id),
     plan: candidate.plan,
     metadata: accountMetadataPayload(candidate),
     last_success_at: candidate.last_success_at,
+    session_status: session.status,
+    session_checked_at: session.checkedAt,
   };
+}
+
+async function syncedAccountReference(accountID: string): Promise<string> {
+  return hashSecret(`when-reset:synced-account:v1:${accountID.toLowerCase()}`);
+}
+
+async function accountReferenceForRow(
+  env: Env,
+  row: { provider_id: ProviderID; workspace_id: string; latest_snapshot: string | null },
+): Promise<string> {
+  if (row.latest_snapshot) {
+    try {
+      const snapshot = JSON.parse(row.latest_snapshot) as ProviderSnapshot;
+      if (typeof snapshot.account_reference === "string"
+          && /^[A-Za-z0-9_-]{43}$/.test(snapshot.account_reference)) {
+        return snapshot.account_reference;
+      }
+    } catch { /* Fall back to the uploaded provider account identifier. */ }
+  }
+  return providerIdentityReference(env, row.provider_id, `workspace:${row.workspace_id}`);
+}
+
+async function providerIdentityReference(
+  env: Env,
+  providerID: ProviderID,
+  identity: string,
+): Promise<string> {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await credentialFingerprintKey(env),
+    new TextEncoder().encode(`when-reset:provider-account:v1:${providerID}:${identity}`),
+  );
+  return base64URL(new Uint8Array(signature));
+}
+
+function workerSession(row: {
+  last_refresh_at: number | null;
+  last_success_at: number | null;
+  last_error: string | null;
+}): { status: WorkerSessionStatus; checkedAt: number | null } {
+  const checkedAt = row.last_refresh_at ?? row.last_success_at;
+  if (row.last_error) {
+    const normalized = row.last_error.toLowerCase();
+    const expired = /http\s*(401|403)|refresh token is missing|authorization expired|session expired|invalid[_ -]?grant|unauthori[sz]ed|revoked/.test(normalized);
+    return { status: expired ? "expired" : "error", checkedAt };
+  }
+  if (checkedAt !== null) return { status: "active", checkedAt };
+  return { status: "unchecked", checkedAt: null };
 }
 
 function accountMetadataPayload(row: {
@@ -923,12 +1082,15 @@ function providerDisplayName(providerID: ProviderID): string {
   switch (providerID) {
     case "chatgpt": return "ChatGPT";
     case "claude": return "Claude";
+    case "grok": return "Grok";
     case "kimi": return "Kimi Code";
     case "github_copilot": return "GitHub Copilot";
     case "zai": return "Z.AI Coding Plan";
     case "minimax": return "MiniMax Token Plan";
     case "synthetic": return "Synthetic";
     case "warp": return "Warp";
+    case "openai_api": return "OpenAI API";
+    case "anthropic_api": return "Anthropic API";
   }
 }
 
@@ -967,7 +1129,11 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
   const refreshToken = requiredBoundedString(rawCredentials.refresh_token, 32_768, true);
   const idToken = requiredBoundedString(rawCredentials.id_token, 32_768, true);
   const expiresAt = nullableTimestamp(rawCredentials.expires_at);
+  const monthlyBudget = nullablePositiveNumber(rawCredentials.monthly_budget);
+  const currencyCode = optionalBoundedString(rawCredentials.currency_code, 8);
   if (accessToken === null || refreshToken === null || idToken === null || expiresAt === undefined
+      || monthlyBudget === undefined || currencyCode === undefined
+      || (currencyCode !== null && !/^[A-Za-z]{3}$/.test(currencyCode))
       || !credentialsSufficient(value.provider_id, accessToken, refreshToken)) return null;
   return {
     provider_id: value.provider_id,
@@ -986,6 +1152,8 @@ async function parseAccountUpload(request: Request): Promise<AccountUpload | nul
       refresh_token: refreshToken,
       id_token: idToken,
       expires_at: expiresAt,
+      monthly_budget: monthlyBudget,
+      currency_code: currencyCode?.toUpperCase() ?? null,
     },
   };
 }
@@ -995,18 +1163,44 @@ async function upsertMonitoredAccount(
   deviceID: string,
   accountID: string,
   upload: AccountUpload,
+  replaceRemoteCredential: boolean,
+  fetchUsage: typeof fetchProviderUsage = fetchProviderUsage,
 ): Promise<Response> {
   const remoteSubscription = await env.DB.prepare(
-    `SELECT local_account_id FROM remote_account_subscriptions
-     WHERE subscriber_device_id = ? AND local_account_id = ?`
-  ).bind(deviceID, accountID).first<{ local_account_id: string }>();
+    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
+            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot
+     FROM remote_account_subscriptions
+     INNER JOIN monitored_accounts
+       ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
+      AND monitored_accounts.account_id = remote_account_subscriptions.source_account_id
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE remote_account_subscriptions.subscriber_device_id = ?
+       AND remote_account_subscriptions.local_account_id = ?`
+  ).bind(deviceID, accountID).first<CredentialTargetRow>();
   if (remoteSubscription) {
+    if (replaceRemoteCredential) {
+      return replaceRemoteAccountCredential(
+        env,
+        deviceID,
+        accountID,
+        remoteSubscription,
+        upload,
+        fetchUsage,
+      );
+    }
     return json({ error: "remote_account_is_read_only" }, 409, {
       "cache-control": "no-store",
     });
   }
   const now = Math.floor(Date.now() / 1_000);
-  const encrypted = await encryptCredentials(env, deviceID, accountID, upload.provider_id, upload.credentials);
+  const encrypted = await encryptCredentials(
+    env, deviceID, accountID, upload.provider_id, upload.credentials
+  );
   const fingerprint = await credentialFingerprint(env, upload, upload.credentials);
   const existing = await env.DB.prepare(
     "SELECT account_id FROM monitored_accounts WHERE device_id = ? AND account_id = ?"
@@ -1096,7 +1290,193 @@ async function upsertMonitoredAccount(
   const row = await loadAccountSyncRow(env, deviceID, accountID);
   if (!row) throw new Error("Could not save monitored account");
   console.log(JSON.stringify({ event: existing ? "account_monitor_updated" : "account_monitor_created" }));
-  return accountSyncResponse(row, [], existing ? 200 : 201, null);
+  return accountSyncResponse(env, row, [], existing ? 200 : 201, null);
+}
+
+async function replaceRemoteAccountCredential(
+  env: Env,
+  subscriberDeviceID: string,
+  localAccountID: string,
+  source: CredentialTargetRow,
+  upload: AccountUpload,
+  fetchUsage: typeof fetchProviderUsage = fetchProviderUsage,
+): Promise<Response> {
+  if (source.provider_id !== upload.provider_id
+      || source.workspace_id !== upload.workspace_id) {
+    return json({ error: "provider_account_mismatch" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
+  const now = Math.floor(Date.now() / 1_000);
+  let result: ProviderFetchResult;
+  try {
+    result = await fetchUsage(source, upload.credentials, now);
+    result.snapshot.account_reference = await providerIdentityReference(
+      env,
+      source.provider_id,
+      result.account_identity ?? `workspace:${source.workspace_id}`,
+    );
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: "remote_account_credential_check_failed",
+      provider: source.provider_id,
+      error: safeError(error),
+    }));
+    return providerCredentialErrorResponse(error);
+  }
+  const previousReference = explicitSnapshotAccountReference(source.latest_snapshot);
+  if (previousReference && previousReference !== result.snapshot.account_reference) {
+    return json({ error: "provider_account_mismatch" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
+  await env.DB.prepare(
+    `UPDATE monitored_accounts SET display_name = ?, profile_name = ?, email = ?,
+       plan_expires_at = ?, trial_expires_at = ?, missing_quotas = ?, updated_at = ?
+     WHERE device_id = ? AND account_id = ?`
+  ).bind(
+    upload.display_name, upload.profile_name, upload.email,
+    upload.plan_expires_at, upload.trial_expires_at, JSON.stringify(upload.missing_quotas), now,
+    source.device_id, source.account_id,
+  ).run();
+  await applyVerifiedCredentialResult(env, source, result);
+  const duplicates = await loadSameAccountCredentialTargets(
+    env, source.provider_id, source.workspace_id, source.device_id, source.account_id
+  );
+  let mergedAccounts = 1;
+  for (const target of duplicates) {
+    const knownReference = explicitSnapshotAccountReference(target.latest_snapshot);
+    if (knownReference && knownReference !== result.snapshot.account_reference) continue;
+    await applyVerifiedCredentialResult(env, target, result);
+    mergedAccounts += 1;
+  }
+  const row = await loadAccountSyncSourceRow(env, subscriberDeviceID, localAccountID);
+  if (!row) return json({ error: "remote_account_not_found" }, 404);
+  console.log(JSON.stringify({
+    event: "remote_account_credential_replaced",
+    provider: source.provider_id,
+    merged_accounts: mergedAccounts,
+  }));
+  return accountSyncResponse(env, row, [], 200, null);
+}
+
+function providerCredentialErrorResponse(error: unknown): Response {
+  const providerError = error instanceof ProviderFetchError ? error : null;
+  const status = providerError?.status === 401 || providerError?.status === 403 ? 401 : 502;
+  return json({ error: status === 401 ? "provider_session_expired" : "provider_check_failed" }, status, {
+    "cache-control": "no-store",
+  });
+}
+
+function explicitSnapshotAccountReference(snapshotJSON: string | null): string | null {
+  if (!snapshotJSON) return null;
+  try {
+    const snapshot = JSON.parse(snapshotJSON) as ProviderSnapshot;
+    return typeof snapshot.account_reference === "string"
+        && /^[A-Za-z0-9_-]{43}$/.test(snapshot.account_reference)
+      ? snapshot.account_reference : null;
+  } catch {
+    return null;
+  }
+}
+
+async function loadCredentialTarget(
+  env: Env,
+  deviceID: string,
+  accountID: string,
+): Promise<CredentialTargetRow | null> {
+  return env.DB.prepare(
+    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
+            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot
+     FROM monitored_accounts
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?`
+  ).bind(deviceID, accountID).first<CredentialTargetRow>();
+}
+
+async function loadSameAccountCredentialTargets(
+  env: Env,
+  providerID: ProviderID,
+  workspaceID: string,
+  excludedDeviceID: string,
+  excludedAccountID: string,
+): Promise<CredentialTargetRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
+            monitored_accounts.credential_revision, monitored_accounts.latest_snapshot
+     FROM monitored_accounts
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
+     WHERE monitored_accounts.provider_id = ? AND monitored_accounts.workspace_id = ?
+       AND NOT (monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?)
+     ORDER BY monitored_accounts.device_id, monitored_accounts.account_id
+     LIMIT ?`
+  ).bind(
+    providerID, workspaceID, excludedDeviceID, excludedAccountID, MAX_REMOTE_ACCOUNT_IMPORTS
+  ).all<CredentialTargetRow>();
+  return result.results;
+}
+
+async function applyVerifiedCredentialResult(
+  env: Env,
+  target: CredentialTargetRow,
+  result: ProviderFetchResult,
+): Promise<void> {
+  const appliedAt = result.snapshot.fetched_at;
+  const effectivePlan = result.snapshot.plan ?? target.plan;
+  const snapshot: ProviderSnapshot = { ...result.snapshot, plan: effectivePlan };
+  const fingerprint = await credentialFingerprint(env, {
+    provider_id: target.provider_id,
+    workspace_id: target.workspace_id,
+    plan: effectivePlan,
+  }, result.credentials);
+  const encrypted = await encryptCredentials(
+    env, target.device_id, target.account_id, target.provider_id, result.credentials
+  );
+  const statements: D1PreparedStatement[] = [
+    env.DB.prepare(
+      `DELETE FROM monitor_run_targets
+       WHERE device_id = ? AND account_id = ? AND applied_at IS NULL`
+    ).bind(target.device_id, target.account_id),
+    env.DB.prepare(
+      `UPDATE monitored_accounts SET plan = ?, encrypted_credentials = ?,
+         credential_fingerprint = ?, latest_snapshot = ?, scheduled_monitor_at = NULL,
+         last_refresh_at = ?, last_success_at = ?, last_error = NULL,
+         consecutive_failures = 0, next_refresh_at = ?, updated_at = ?
+       WHERE device_id = ? AND account_id = ?`
+    ).bind(
+      effectivePlan, encrypted, fingerprint, JSON.stringify(snapshot),
+      appliedAt, appliedAt, appliedAt + target.refresh_interval_seconds, appliedAt,
+      target.device_id, target.account_id,
+    ),
+    ...snapshot.windows.map((window) => env.DB.prepare(
+      `INSERT INTO usage_history (
+         device_id, account_id, provider_id, metric_id, metric_title, kind, window_minutes,
+         remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(device_id, account_id, metric_id, recorded_at) DO UPDATE SET
+         remaining_percent = excluded.remaining_percent,
+         resets_at = excluded.resets_at,
+         seconds_until_reset = excluded.seconds_until_reset,
+         plan = excluded.plan`
+    ).bind(
+      target.device_id, target.account_id, snapshot.provider_id, window.metric_id,
+      window.title, window.kind, window.window_minutes, window.remaining_percent,
+      snapshot.fetched_at, window.resets_at,
+      Math.max(0, window.resets_at - snapshot.fetched_at), effectivePlan,
+    )),
+  ];
+  await env.DB.batch(statements);
+  await enqueueRemoteAccountRefreshHints(env, target.device_id, target.account_id);
 }
 
 async function disableMonitoredAccount(
@@ -1190,10 +1570,11 @@ async function syncMonitoredAccount(
   const last = history.at(-1);
   const nextCursor = hasMore && last
     ? encodeHistoryCursor(last.recorded_at, last.metric_id) : null;
-  return accountSyncResponse(row, history, 200, nextCursor);
+  return accountSyncResponse(env, row, history, 200, nextCursor);
 }
 
 async function accountSyncResponse(
+  env: Env,
   row: AccountSyncRow,
   history: HistoryRow[],
   status: number,
@@ -1204,14 +1585,18 @@ async function accountSyncResponse(
     try { snapshot = JSON.parse(row.latest_snapshot) as ProviderSnapshot; }
     catch { snapshot = null; }
   }
+  const session = workerSession(row);
   return json({
     snapshot,
     metadata: accountMetadataPayload(row),
     history,
     consent_revision: row.consent_revision,
     next_cursor: nextCursor,
+    account_reference: await accountReferenceForRow(env, row),
     last_success_at: row.last_success_at,
     last_error: row.last_error,
+    session_status: session.status,
+    session_checked_at: session.checkedAt,
   }, status, { "cache-control": "no-store" });
 }
 
@@ -1221,10 +1606,12 @@ async function loadAccountSyncRow(
   accountID: string,
 ): Promise<AccountSyncRow | null> {
   return env.DB.prepare(
-    `SELECT monitored_accounts.profile_name, monitored_accounts.email,
+    `SELECT monitored_accounts.provider_id, monitored_accounts.workspace_id,
+            monitored_accounts.profile_name, monitored_accounts.email,
             monitored_accounts.plan, monitored_accounts.plan_expires_at,
             monitored_accounts.trial_expires_at,
-            monitored_accounts.last_success_at, monitored_accounts.last_error,
+            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+            monitored_accounts.last_error,
             monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
@@ -1243,10 +1630,12 @@ async function loadAccountSyncSourceRow(
   const direct = await env.DB.prepare(
     `SELECT monitored_accounts.device_id AS source_device_id,
             monitored_accounts.account_id AS source_account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.profile_name, monitored_accounts.email,
             monitored_accounts.plan, monitored_accounts.plan_expires_at,
             monitored_accounts.trial_expires_at,
-            monitored_accounts.last_success_at, monitored_accounts.last_error,
+            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+            monitored_accounts.last_error,
             monitored_accounts.latest_snapshot, account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
@@ -1259,10 +1648,12 @@ async function loadAccountSyncSourceRow(
   return env.DB.prepare(
     `SELECT monitored_accounts.device_id AS source_device_id,
             monitored_accounts.account_id AS source_account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.profile_name, monitored_accounts.email,
             monitored_accounts.plan, monitored_accounts.plan_expires_at,
             monitored_accounts.trial_expires_at,
-            monitored_accounts.last_success_at, monitored_accounts.last_error,
+            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+            monitored_accounts.last_error,
             monitored_accounts.latest_snapshot, 1 AS consent_revision
      FROM remote_account_subscriptions
      INNER JOIN monitored_accounts
@@ -1654,7 +2045,7 @@ async function refreshMonitorRun(
     return;
   }
 
-  let result: { credentials: ProviderCredentials; snapshot: ProviderSnapshot };
+  let result: ProviderFetchResult;
   try {
     const credentials = await decryptCredentials(env, source);
     const actualFingerprint = await credentialFingerprint(env, source, credentials);
@@ -1663,6 +2054,11 @@ async function refreshMonitorRun(
       throw new Error("Scheduled credentials changed before refresh");
     }
     result = await fetchUsage(source, credentials, startedAt);
+    result.snapshot.account_reference = await providerIdentityReference(
+      env,
+      source.provider_id,
+      result.account_identity ?? `workspace:${source.workspace_id}`,
+    );
     const encryptedResult = await encryptRunCredentials(
       env, runID, source.provider_id, result.credentials
     );
@@ -1809,18 +2205,25 @@ async function applyMonitorResultToTarget(
   snapshot: ProviderSnapshot,
 ): Promise<void> {
   const appliedAt = Math.floor(Date.now() / 1_000);
+  const storedCredentials = await decryptCredentials(env, row);
+  const targetCredentials: ProviderCredentials = {
+    ...credentials,
+    monthly_budget: storedCredentials.monthly_budget ?? null,
+    currency_code: storedCredentials.currency_code ?? credentials.currency_code ?? null,
+  };
+  const targetSnapshot = snapshotForCredentials(snapshot, targetCredentials);
   const effectivePlan = snapshot.plan ?? row.plan;
   const effectiveSnapshot = mergeSupplementarySnapshot(
-    { ...snapshot, plan: effectivePlan },
+    { ...targetSnapshot, plan: effectivePlan },
     row.latest_snapshot,
   );
   const nextFingerprint = await credentialFingerprint(env, {
     provider_id: row.provider_id,
     workspace_id: row.workspace_id,
     plan: effectivePlan,
-  }, credentials);
+  }, targetCredentials);
   const encrypted = await encryptCredentials(
-    env, row.device_id, row.account_id, row.provider_id, credentials
+    env, row.device_id, row.account_id, row.provider_id, targetCredentials
   );
   const actualMetricIDs = new Set(snapshot.windows.map((window) => window.metric_id));
   const syntheticWindows = storedMissingQuotas(row.missing_quotas)
@@ -1905,7 +2308,65 @@ async function applyMonitorResultToTarget(
   const results = await env.DB.batch(statements);
   if ((results[0]?.meta.changes ?? 0) === 1) {
     await enqueueRemoteAccountRefreshHints(env, row.device_id, row.account_id);
+    if (row.provider_id === "chatgpt") {
+      await propagateVerifiedCredentialToSameAccount(env, row, {
+        credentials: targetCredentials,
+        snapshot: effectiveSnapshot,
+      });
+    }
   }
+}
+
+async function propagateVerifiedCredentialToSameAccount(
+  env: Env,
+  source: CredentialTargetRow,
+  result: ProviderFetchResult,
+): Promise<void> {
+  const reference = result.snapshot.account_reference;
+  if (!reference) return;
+  const targets = await loadSameAccountCredentialTargets(
+    env,
+    source.provider_id,
+    source.workspace_id,
+    source.device_id,
+    source.account_id,
+  );
+  let updated = 0;
+  for (const target of targets) {
+    const knownReference = explicitSnapshotAccountReference(target.latest_snapshot);
+    if (knownReference && knownReference !== reference) continue;
+    await applyVerifiedCredentialResult(env, target, result);
+    updated += 1;
+  }
+  if (updated > 0) {
+    console.log(JSON.stringify({
+      event: "same_provider_account_credentials_merged",
+      provider: source.provider_id,
+      accounts: updated + 1,
+    }));
+  }
+}
+
+function snapshotForCredentials(
+  snapshot: ProviderSnapshot,
+  credentials: ProviderCredentials,
+): ProviderSnapshot {
+  if (!snapshot.api_balance
+      || (snapshot.provider_id !== "openai_api" && snapshot.provider_id !== "anthropic_api")) {
+    return snapshot;
+  }
+  const budget = credentials.monthly_budget;
+  const limit = typeof budget === "number" && Number.isFinite(budget) && budget > 0
+    ? budget : null;
+  return {
+    ...snapshot,
+    api_balance: {
+      ...snapshot.api_balance,
+      title: limit === null ? "API spend this month" : "Monthly API budget",
+      limit,
+      remaining: limit === null ? null : Math.max(0, limit - snapshot.api_balance.spent),
+    },
+  };
 }
 
 async function enqueueRemoteAccountRefreshHints(
@@ -2284,10 +2745,21 @@ async function decryptCredentials(env: Env, row: MonitoredAccountRow): Promise<P
   const refreshToken = requiredBoundedString(value.refresh_token, 32_768, true);
   const idToken = requiredBoundedString(value.id_token, 32_768, true);
   const expiresAt = nullableTimestamp(value.expires_at);
-  if (accessToken === null || refreshToken === null || idToken === null || expiresAt === undefined) {
+  const monthlyBudget = nullablePositiveNumber(value.monthly_budget);
+  const currencyCode = optionalBoundedString(value.currency_code, 8);
+  if (accessToken === null || refreshToken === null || idToken === null || expiresAt === undefined
+      || monthlyBudget === undefined || currencyCode === undefined
+      || (currencyCode !== null && !/^[A-Za-z]{3}$/.test(currencyCode))) {
     throw new Error("Stored credentials are invalid");
   }
-  return { access_token: accessToken, refresh_token: refreshToken, id_token: idToken, expires_at: expiresAt };
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    id_token: idToken,
+    expires_at: expiresAt,
+    monthly_budget: monthlyBudget,
+    currency_code: currencyCode?.toUpperCase() ?? null,
+  };
 }
 
 async function encryptRunCredentials(
@@ -2332,10 +2804,21 @@ async function decryptRunCredentials(
   const refreshToken = requiredBoundedString(value.refresh_token, 32_768, true);
   const idToken = requiredBoundedString(value.id_token, 32_768, true);
   const expiresAt = nullableTimestamp(value.expires_at);
-  if (accessToken === null || refreshToken === null || idToken === null || expiresAt === undefined) {
+  const monthlyBudget = nullablePositiveNumber(value.monthly_budget);
+  const currencyCode = optionalBoundedString(value.currency_code, 8);
+  if (accessToken === null || refreshToken === null || idToken === null || expiresAt === undefined
+      || monthlyBudget === undefined || currencyCode === undefined
+      || (currencyCode !== null && !/^[A-Za-z]{3}$/.test(currencyCode))) {
     throw new Error("Stored monitor result credentials are invalid");
   }
-  return { access_token: accessToken, refresh_token: refreshToken, id_token: idToken, expires_at: expiresAt };
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    id_token: idToken,
+    expires_at: expiresAt,
+    monthly_budget: monthlyBudget,
+    currency_code: currencyCode?.toUpperCase() ?? null,
+  };
 }
 
 async function credentialFingerprint(
@@ -2415,13 +2898,14 @@ function decodeBase64URL(value: string): Uint8Array<ArrayBuffer> {
 
 function isProviderID(value: unknown): value is ProviderID {
   return typeof value === "string"
-    && ["chatgpt", "claude", "kimi", "github_copilot", "zai", "minimax", "synthetic", "warp"]
+    && ["chatgpt", "claude", "grok", "kimi", "github_copilot", "zai", "minimax", "synthetic", "warp",
+      "openai_api", "anthropic_api"]
       .includes(value);
 }
 
 function credentialsSufficient(providerID: ProviderID, accessToken: string, refreshToken: string): boolean {
   if (!accessToken) return false;
-  return !["chatgpt", "claude", "kimi"].includes(providerID) || refreshToken.length > 0;
+  return !["chatgpt", "claude", "grok", "kimi"].includes(providerID) || refreshToken.length > 0;
 }
 
 function parseAccountMetadata(value: unknown): {
@@ -2509,6 +2993,11 @@ function optionalBoundedString(value: unknown, maximum: number): string | null |
 }
 
 function nullableTimestamp(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function nullablePositiveNumber(value: unknown): number | null | undefined {
   if (value === null || value === undefined) return null;
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
@@ -2654,5 +3143,7 @@ export const testing = {
   pruneMonitorRuns,
   refreshMonitorRun,
   runScheduledRefresh,
+  snapshotForCredentials,
   syntheticResetAt,
+  upsertMonitoredAccount,
 };

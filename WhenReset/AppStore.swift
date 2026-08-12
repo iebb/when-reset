@@ -151,6 +151,18 @@ struct AccountRefreshFailure: Equatable, Sendable {
         }
     }
 
+    init(workerSessionStatus: WorkerSessionStatus, checkedAt: Date? = nil) {
+        failedAt = checkedAt ?? .now
+        switch workerSessionStatus {
+        case .expired:
+            kind = .authentication
+            message = "The Worker reports that this sign-in expired or was revoked. Sign in again to replace its encrypted credential."
+        case .error, .unchecked, .active:
+            kind = .update
+            message = "The Worker could not verify this provider session. Saved usage remains available while it retries."
+        }
+    }
+
     private static func updateMessage(for error: Error) -> String {
         if let pushError = error as? PushServerError,
            case .remoteAccountUnavailable = pushError {
@@ -302,6 +314,22 @@ enum WorkerMetadataPolicy {
     }
 }
 
+enum WorkerHistoryFetchScope: Sendable {
+    case incremental
+    case retainedHistory
+
+    func startDate(now: Date, latestServerPoint: Date?) -> Date {
+        let earliestRetainedDate = now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
+        switch self {
+        case .retainedHistory:
+            return earliestRetainedDate
+        case .incremental:
+            guard let latestServerPoint else { return earliestRetainedDate }
+            return max(earliestRetainedDate, latestServerPoint.addingTimeInterval(-60))
+        }
+    }
+}
+
 @MainActor @Observable
 final class AppStore {
     private(set) var accounts: [MonitoredAccount] = []
@@ -326,6 +354,7 @@ final class AppStore {
     private let accountsKey = "accounts.v1"
     private let provider = ChatGPTProvider()
     private let claudeProvider = ClaudeProvider()
+    private let grokProvider = GrokProvider()
     private let kimiProvider = KimiProvider()
     private let copilotProvider = CopilotProvider()
     private let zaiProvider = ZAIProvider()
@@ -335,7 +364,11 @@ final class AppStore {
     private let warpProvider = WarpProvider()
     private let antigravityProvider = AntigravityProvider()
     private let compatibleAPIProvider = CompatibleAPIProvider()
+    private let openAIAPIProvider = OpenAIAPIProvider()
+    private let anthropicAPIProvider = AnthropicAPIProvider()
+    private let newAPIProvider = NewAPIProvider()
     private var chatGPTLink: DeviceLink?
+    private var grokLink: GrokDeviceLink?
     private var kimiLink: KimiDeviceLink?
     private var copilotLink: CopilotDeviceLink?
     private let settingsKey = "monitorSettings.v1"
@@ -546,6 +579,10 @@ final class AppStore {
         }
 
         if hasStarted {
+            if let serverURL = try? currentPushSettings.resolvedServerURL(),
+               (try? KeychainStore.loadPushRegistration(for: serverURL)) != nil {
+                _ = try? await reconcileRemoteWorkerAccounts()
+            }
             for account in accountsToRefresh {
                 _ = await refresh(account, source: .background, publishChanges: false)
             }
@@ -580,14 +617,45 @@ final class AppStore {
 
     func availableRemoteWorkerAccounts() async throws -> [RemoteWorkerAccountCandidate] {
         let candidates = try await PushServerClient.remoteAccounts(settings: pushServerSettings)
+        let serverURL = (try? pushServerSettings.resolvedServerURL())?.absoluteString
         let existing = Set(accounts.compactMap { account -> String? in
-            guard account.remoteWorkerServerURL
-                    == (try? pushServerSettings.resolvedServerURL())?.absoluteString else {
-                return nil
+            if account.remoteWorkerServerURL == serverURL,
+               let remoteAccountID = account.remoteWorkerAccountID {
+                return remoteAccountID
             }
-            return account.remoteWorkerAccountID
+            let accountSettings = settings(for: account)
+            guard accountSettings.selfHostedServerConsentURL == serverURL else { return nil }
+            return accountSettings.remoteWorkerAccountID
         })
-        return candidates.filter { !existing.contains($0.remoteAccountID) }
+        let existingReferences = Set(accounts.compactMap { account -> String? in
+            let accountSettings = settings(for: account)
+            guard accountSettings.selfHostedServerConsentURL == serverURL
+                    || account.remoteWorkerServerURL == serverURL else { return nil }
+            return accountSettings.workerAccountReference
+        })
+        return candidates.filter { candidate in
+            !existing.contains(candidate.remoteAccountID)
+                && candidate.workerAccountReference.map {
+                    !existingReferences.contains($0)
+                } != false
+        }
+    }
+
+    @discardableResult
+    func reconcileRemoteWorkerAccounts() async throws -> [MonitoredAccount] {
+        let candidates = try await availableRemoteWorkerAccounts()
+        let matchingCandidates = candidates.filter { candidate in
+            accounts.contains { account in
+                !account.isRemoteOnly
+                    && RemoteWorkerAccountMatcher.matches(
+                        candidate,
+                        account: account,
+                        settings: settings(for: account)
+                    )
+            }
+        }
+        guard !matchingCandidates.isEmpty else { return [] }
+        return try await importRemoteWorkerAccounts(matchingCandidates)
     }
 
     @discardableResult
@@ -598,38 +666,71 @@ final class AppStore {
         }
         var imported: [MonitoredAccount] = []
         for candidate in candidates {
-            guard !accounts.contains(where: {
+            let matchingLocalAccount = accounts.first { account in
+                !account.isRemoteOnly
+                    && RemoteWorkerAccountMatcher.matches(
+                        candidate,
+                        account: account,
+                        settings: settings(for: account)
+                    )
+            }
+            let alreadyImported = accounts.contains(where: {
                 $0.remoteWorkerServerURL == serverURL.absoluteString
                     && $0.remoteWorkerAccountID == candidate.remoteAccountID
-            }) else { continue }
-            let localAccountID = UUID()
+                    || (candidate.workerAccountReference != nil
+                        && settings(for: $0).selfHostedServerConsentURL
+                            == serverURL.absoluteString
+                        && settings(for: $0).workerAccountReference
+                            == candidate.workerAccountReference)
+            }) || matchingLocalAccount.map { account in
+                let accountSettings = settings(for: account)
+                return accountSettings.selfHostedServerConsentURL == serverURL.absoluteString
+                    && accountSettings.remoteWorkerAccountID == candidate.remoteAccountID
+            } == true
+            guard !alreadyImported else { continue }
+            let localAccountID = matchingLocalAccount?.id ?? UUID()
             let remoteAccount = try await PushServerClient.importRemoteAccount(
                 settings: pushServerSettings,
                 candidate: candidate,
                 localAccountID: localAccountID
             )
-            let details = remoteAccount.metadata?.accountDetails
-            let account = MonitoredAccount(
-                id: localAccountID,
-                providerID: remoteAccount.providerID,
-                displayName: remoteAccount.displayName,
-                workspaceID: MonitoredAccount.remoteWorkspacePrefix + remoteAccount.remoteAccountID,
-                plan: details?.plan ?? remoteAccount.plan,
-                addedAt: .now,
-                profileName: details?.profileName,
-                email: details?.email,
-                planExpiresAt: details?.planExpiresAt,
-                trialExpiresAt: details?.trialExpiresAt,
-                remoteWorkerAccountID: remoteAccount.remoteAccountID,
-                remoteWorkerServerURL: serverURL.absoluteString
-            )
-            KeychainStore.delete(for: localAccountID)
-            accounts.append(account)
-            monitorSettings[localAccountID] = AccountMonitorSettings(
-                monitorOnSelfHostedServer: true,
-                selfHostedServerConsentURL: serverURL.absoluteString,
-                selfHostedServerConsentRevision: 1
-            )
+            let account: MonitoredAccount
+            if let matchingLocalAccount {
+                account = matchingLocalAccount
+                var accountSettings = settings(for: matchingLocalAccount)
+                accountSettings.monitorOnSelfHostedServer = true
+                accountSettings.selfHostedServerConsentURL = serverURL.absoluteString
+                accountSettings.selfHostedServerConsentRevision = 1
+                accountSettings.remoteWorkerAccountID = remoteAccount.remoteAccountID
+                accountSettings.workerAccountReference = remoteAccount.workerAccountReference
+                monitorSettings[localAccountID] = accountSettings
+            } else {
+                let details = remoteAccount.metadata?.accountDetails
+                account = MonitoredAccount(
+                    id: localAccountID,
+                    providerID: remoteAccount.providerID,
+                    displayName: remoteAccount.displayName,
+                    workspaceID: MonitoredAccount.remoteWorkspacePrefix
+                        + remoteAccount.remoteAccountID,
+                    plan: details?.plan ?? remoteAccount.plan,
+                    addedAt: .now,
+                    profileName: details?.profileName,
+                    email: details?.email,
+                    planExpiresAt: details?.planExpiresAt,
+                    trialExpiresAt: details?.trialExpiresAt,
+                    remoteWorkerAccountID: remoteAccount.remoteAccountID,
+                    remoteWorkerServerURL: serverURL.absoluteString
+                )
+                KeychainStore.delete(for: localAccountID)
+                accounts.append(account)
+                monitorSettings[localAccountID] = AccountMonitorSettings(
+                    monitorOnSelfHostedServer: true,
+                    selfHostedServerConsentURL: serverURL.absoluteString,
+                    selfHostedServerConsentRevision: 1,
+                    remoteWorkerAccountID: remoteAccount.remoteAccountID,
+                    workerAccountReference: remoteAccount.workerAccountReference
+                )
+            }
             recordServerConsentHighWater(accountID: localAccountID, revision: 1)
             imported.append(account)
         }
@@ -637,7 +738,7 @@ final class AppStore {
         persistAccounts()
         persistMonitorSettings()
         for account in imported {
-            _ = await refresh(account, source: .manual, publishChanges: false)
+            _ = await fetchRetainedWorkerHistory(for: account)
         }
         publishSnapshots()
         await reconcileScheduledResetNotifications()
@@ -684,6 +785,11 @@ final class AppStore {
                 chatGPTLink = link
                 deviceLink = .init(providerID: .chatGPT, verificationURL: link.verificationURL,
                                    userCode: link.userCode, expiresAt: .now.addingTimeInterval(15 * 60))
+            case .grok:
+                let link = try await grokProvider.beginLink()
+                grokLink = link
+                deviceLink = .init(providerID: .grok, verificationURL: link.verificationURL,
+                                   userCode: link.userCode, expiresAt: link.expiresAt)
             case .kimi:
                 let link = try await kimiProvider.beginLink()
                 kimiLink = link
@@ -695,7 +801,7 @@ final class AppStore {
                 deviceLink = .init(providerID: .githubCopilot, verificationURL: link.verificationURL,
                                    userCode: link.userCode, expiresAt: link.expiresAt)
             case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
-                 .antigravity, .compatibleAPI:
+                 .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI:
                 throw ProviderError.server(400, "This provider does not use device linking.")
             }
         } catch {
@@ -708,12 +814,17 @@ final class AppStore {
     @discardableResult
     func completeDeviceLink(replacing relinkingAccount: MonitoredAccount? = nil) async -> Bool {
         guard let deviceLink else { return false }
+        isLinking = true
+        errorMessage = nil
         do {
             let identity: LinkedIdentity
             switch deviceLink.providerID {
             case .chatGPT:
                 guard let chatGPTLink else { throw ProviderError.invalidResponse }
                 identity = try await provider.finishLink(chatGPTLink)
+            case .grok:
+                guard let grokLink else { throw ProviderError.invalidResponse }
+                identity = try await grokProvider.finishLink(grokLink)
             case .kimi:
                 guard let kimiLink else { throw ProviderError.invalidResponse }
                 identity = try await kimiProvider.finishLink(kimiLink)
@@ -721,8 +832,17 @@ final class AppStore {
                 guard let copilotLink else { throw ProviderError.invalidResponse }
                 identity = try await copilotProvider.finishLink(copilotLink)
             case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
-                 .antigravity, .compatibleAPI:
+                 .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI:
                 throw ProviderError.invalidResponse
+            }
+            if let relinkingAccount, relinkingAccount.isRemoteOnly {
+                try await replaceRemoteWorkerCredential(
+                    for: relinkingAccount,
+                    identity: identity,
+                    providerID: deviceLink.providerID
+                )
+                clearPendingLinks(); isLinking = false
+                return true
             }
             let account = try saveLinkedAccount(identity, providerID: deviceLink.providerID,
                                                 replacing: relinkingAccount)
@@ -731,12 +851,45 @@ final class AppStore {
             await refresh(account, source: .accountLink)
             return true
         } catch is CancellationError {
-            clearPendingLinks(); isLinking = false
+            // Preserve the still-valid device code so the UI can resume polling or explicitly
+            // start over. Closing the linking view calls cancelLink(), which clears it.
+            isLinking = false
             return false
         } catch {
             errorMessage = error.localizedDescription; clearPendingLinks(); isLinking = false
             return false
         }
+    }
+
+    private func replaceRemoteWorkerCredential(
+        for account: MonitoredAccount,
+        identity: LinkedIdentity,
+        providerID: ProviderID
+    ) async throws {
+        guard account.isRemoteOnly,
+              account.providerID == providerID,
+              accounts.contains(where: { $0.id == account.id }) else {
+            throw ProviderError.server(400, "The remote Worker account is no longer available.")
+        }
+        var verifiedAccount = account
+        verifiedAccount.workspaceID = identity.workspaceID
+        verifiedAccount.displayName = identity.displayName
+        verifiedAccount.mergeProviderDetails(identity.accountDetails)
+        let result = try await PushServerClient.uploadAccount(
+            settings: pushServerSettings,
+            account: verifiedAccount,
+            credentials: identity.credentials,
+            missingQuotas: [],
+            consentRevision: 1,
+            replacingRemoteCredential: true
+        )
+        await consumeServerResult(
+            result,
+            for: account,
+            consentRevision: 1,
+            deliverNotifications: true,
+            presentErrors: true
+        )
     }
 
     func beginClaudeLink() {
@@ -872,6 +1025,50 @@ final class AppStore {
         await addLinkedIdentity(providerID: .compatibleAPI, replacing: relinkingAccount) {
             try await self.compatibleAPIProvider.link(
                 endpoint: endpoint,
+                apiKey: apiKey,
+                name: name
+            )
+        }
+    }
+
+    @discardableResult
+    func addOpenAIAPIAccount(
+        apiKey: String,
+        monthlyBudget: Double?,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .openAIAPI, replacing: relinkingAccount) {
+            try await self.openAIAPIProvider.link(
+                apiKey: apiKey,
+                monthlyBudget: monthlyBudget
+            )
+        }
+    }
+
+    @discardableResult
+    func addAnthropicAPIAccount(
+        apiKey: String,
+        monthlyBudget: Double?,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .anthropicAPI, replacing: relinkingAccount) {
+            try await self.anthropicAPIProvider.link(
+                apiKey: apiKey,
+                monthlyBudget: monthlyBudget
+            )
+        }
+    }
+
+    @discardableResult
+    func addNewAPIAccount(
+        baseURL: String,
+        apiKey: String,
+        name: String,
+        replacing relinkingAccount: MonitoredAccount? = nil
+    ) async -> Bool {
+        await addLinkedIdentity(providerID: .newAPI, replacing: relinkingAccount) {
+            try await self.newAPIProvider.link(
+                baseURL: baseURL,
                 apiKey: apiKey,
                 name: name
             )
@@ -1017,6 +1214,20 @@ final class AppStore {
                     effectiveAccount = updated
                 }
                 snapshot = try await claudeProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
+            case .grok:
+                let refreshed = try await grokProvider.refreshedIfNeeded(credentials)
+                if refreshed != credentials {
+                    try KeychainStore.save(refreshed, for: account.id)
+                    credentials = refreshed
+                }
+                if let identity = try? GrokProvider.linkedIdentity(credentials: credentials),
+                   let updated = mergeProviderDetails(identity.accountDetails, for: account.id) {
+                    effectiveAccount = updated
+                }
+                snapshot = try await grokProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
             case .kimi:
                 let refreshed = try await kimiProvider.refreshedIfNeeded(credentials)
                 if refreshed != credentials {
@@ -1061,6 +1272,21 @@ final class AppStore {
                 )
             case .compatibleAPI:
                 snapshot = try await compatibleAPIProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
+            case .openAIAPI:
+                snapshot = try await openAIAPIProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
+            case .anthropicAPI:
+                snapshot = try await anthropicAPIProvider.fetchUsage(
+                    account: effectiveAccount,
+                    credentials: credentials
+                )
+            case .newAPI:
+                snapshot = try await newAPIProvider.fetchUsage(
                     account: effectiveAccount,
                     credentials: credentials
                 )
@@ -1141,6 +1367,7 @@ final class AppStore {
     private func clearPendingLinks() {
         deviceLink = nil
         chatGPTLink = nil
+        grokLink = nil
         kimiLink = nil
         copilotLink = nil
         claudeLink = nil
@@ -1277,6 +1504,23 @@ final class AppStore {
         serverMonitoringEnabled(settings(for: account), account: account)
     }
 
+    @discardableResult
+    func fetchRetainedWorkerHistory(for account: MonitoredAccount) async -> Bool {
+        errorMessage = nil
+        guard let currentAccount = accounts.first(where: { $0.id == account.id }),
+              pushServerSettings.mode != .disabled,
+              isServerMonitoringEnabled(for: currentAccount) else {
+            errorMessage = "Connect this account to a Worker before fetching remote history."
+            return false
+        }
+        return await syncServerAccount(
+            currentAccount,
+            publishChanges: true,
+            presentErrors: true,
+            historyFetchScope: .retainedHistory
+        )
+    }
+
     private func serverMonitoringEnabled(_ settings: AccountMonitorSettings,
                                          account: MonitoredAccount) -> Bool {
         pendingPushServerCleanupSettings == nil
@@ -1290,20 +1534,37 @@ final class AppStore {
         if account.isRemoteOnly {
             return account.remoteWorkerServerURL == serverURL.absoluteString
         }
-        guard account.providerID.supportsOffDeviceMonitoring,
-              settings.monitorOnSelfHostedServer else { return false }
+        guard settings.monitorOnSelfHostedServer else { return false }
+        if let remoteAccountID = settings.remoteWorkerAccountID {
+            return remoteAccountID.count == 43
+                && settings.selfHostedServerConsentURL == serverURL.absoluteString
+        }
+        guard account.providerID.supportsOffDeviceMonitoring else { return false }
         return settings.selfHostedServerConsentURL == serverURL.absoluteString
+    }
+
+    private func remoteWorkerAccountID(for account: MonitoredAccount,
+                                       settings: AccountMonitorSettings) -> String? {
+        if account.isRemoteOnly {
+            return account.remoteWorkerAccountID
+        }
+        guard settings.monitorOnSelfHostedServer,
+              settings.selfHostedServerConsentURL
+                == (try? pushServerSettings.resolvedServerURL())?.absoluteString else {
+            return nil
+        }
+        return settings.remoteWorkerAccountID
     }
 
     func setSettings(_ proposedSettings: AccountMonitorSettings, for account: MonitoredAccount) {
         if account.isRemoteOnly {
             var settings = proposedSettings
+            let existingSettings = self.settings(for: account)
             settings.monitorOnSelfHostedServer = true
             settings.selfHostedServerConsentURL = account.remoteWorkerServerURL
-            settings.selfHostedServerConsentRevision = max(
-                1,
-                settings.selfHostedServerConsentRevision
-            )
+            settings.selfHostedServerConsentRevision = 1
+            settings.remoteWorkerAccountID = account.remoteWorkerAccountID
+            settings.workerAccountReference = existingSettings.workerAccountReference
             monitorSettings[account.id] = settings
             persistMonitorSettings()
             publishSnapshots()
@@ -1311,6 +1572,15 @@ final class AppStore {
         }
         let previousSettings = self.settings(for: account)
         var settings = proposedSettings
+        if settings.remoteWorkerAccountID?.count != 43 {
+            settings.remoteWorkerAccountID = nil
+        }
+        if settings.workerAccountReference?.range(
+            of: #"^[A-Za-z0-9_-]{43}$"#,
+            options: .regularExpression
+        ) == nil {
+            settings.workerAccountReference = nil
+        }
         if settings.monitorOnSelfHostedServer,
            !hasServerConsent(settings, account: account) {
             settings.monitorOnSelfHostedServer = false
@@ -1318,7 +1588,17 @@ final class AppStore {
         }
         let wasServerMonitoring = hasServerConsent(previousSettings, account: account)
         let isServerMonitoring = hasServerConsent(settings, account: account)
-        if wasServerMonitoring != isServerMonitoring {
+        let isRemoteWorkerSource = remoteWorkerAccountID(
+            for: account,
+            settings: settings
+        ) != nil
+        if !isServerMonitoring {
+            settings.remoteWorkerAccountID = nil
+            settings.workerAccountReference = nil
+        }
+        if isRemoteWorkerSource {
+            settings.selfHostedServerConsentRevision = 1
+        } else if wasServerMonitoring != isServerMonitoring {
             settings.selfHostedServerConsentRevision = nextServerConsentRevision(
                 for: account.id,
                 after: previousSettings.selfHostedServerConsentRevision
@@ -1386,7 +1666,8 @@ final class AppStore {
                 }
             } else if isServerMonitoring,
                       previousSettings.missingQuotaHistoryBehaviors
-                        != settings.missingQuotaHistoryBehaviors {
+                        != settings.missingQuotaHistoryBehaviors,
+                      !isRemoteWorkerSource {
                 await uploadServerAccount(account)
             }
             if previousSettings.notifyAboutResets != settings.notifyAboutResets {
@@ -1492,11 +1773,16 @@ final class AppStore {
             let enabled = eligibleIDs.contains(account.id)
             let hadConsentForThisServer = accountSettings.monitorOnSelfHostedServer
                 && accountSettings.selfHostedServerConsentURL == serverURL.absoluteString
+            let keepsRemoteWorkerSource = enabled
+                && hadConsentForThisServer
+                && accountSettings.remoteWorkerAccountID?.count == 43
             let previousRevision = max(
                 accountSettings.selfHostedServerConsentRevision,
                 serverConsentHighWater[account.id] ?? 0
             )
-            if enabled {
+            if keepsRemoteWorkerSource {
+                accountSettings.selfHostedServerConsentRevision = 1
+            } else if enabled {
                 accountSettings.selfHostedServerConsentRevision = hadConsentForThisServer
                     ? max(1, previousRevision)
                     : nextServerConsentRevision(
@@ -1526,6 +1812,9 @@ final class AppStore {
             }
             accountSettings.monitorOnSelfHostedServer = enabled
             accountSettings.selfHostedServerConsentURL = enabled ? serverURL.absoluteString : nil
+            if !keepsRemoteWorkerSource {
+                accountSettings.remoteWorkerAccountID = nil
+            }
             monitorSettings[account.id] = accountSettings
             if previousURL == serverURL,
                previouslyEnabled.contains(account.id),
@@ -1574,7 +1863,9 @@ final class AppStore {
         )
         Task {
             for account in accounts
-                where isServerMonitoringEnabled(for: account) && !account.isRemoteOnly {
+                where isServerMonitoringEnabled(for: account)
+                    && !account.isRemoteOnly
+                    && remoteWorkerAccountID(for: account, settings: settings(for: account)) == nil {
                 await uploadServerAccount(account)
             }
         }
@@ -1597,6 +1888,7 @@ final class AppStore {
             }
             accountSettings.monitorOnSelfHostedServer = false
             accountSettings.selfHostedServerConsentURL = nil
+            accountSettings.remoteWorkerAccountID = nil
             monitorSettings[account.id] = accountSettings
         }
         persistMonitorSettings()
@@ -1723,15 +2015,30 @@ final class AppStore {
                 pendingServerAccountDeletionURL = nil
             }
             persistPendingServerCleanup()
+            var remoteAttachmentFailure: Error?
+            do {
+                _ = try await reconcileRemoteWorkerAccounts()
+            } catch {
+                remoteAttachmentFailure = error
+            }
             if enrollment != nil {
                 for account in accounts
-                    where isServerMonitoringEnabled(for: account) && !account.isRemoteOnly {
+                    where isServerMonitoringEnabled(for: account)
+                        && !account.isRemoteOnly
+                        && remoteWorkerAccountID(
+                            for: account,
+                            settings: self.settings(for: account)
+                        ) == nil {
                     await uploadServerAccount(account)
                 }
             }
             guard (try? pushServerSettings.resolvedServerURL()) == serverURL else { return }
             if let cleanupFailure {
                 let message = "Worker linked, but old account credentials could not be removed: \(cleanupFailure.localizedDescription)"
+                errorMessage = message
+                pushServerStatus = .failed(message)
+            } else if let remoteAttachmentFailure {
+                let message = "Worker linked, but remote history could not be attached: \(remoteAttachmentFailure.localizedDescription)"
                 errorMessage = message
                 pushServerStatus = .failed(message)
             } else {
@@ -2295,6 +2602,7 @@ final class AppStore {
         var accountSettings = settings(for: account)
         guard !account.isDemo,
               !account.isRemoteOnly,
+              remoteWorkerAccountID(for: account, settings: accountSettings) == nil,
               serverMonitoringEnabled(accountSettings, account: account),
               pushServerSettings.mode != .disabled,
               let currentAccount = accounts.first(where: { $0.id == account.id }) else { return false }
@@ -2350,12 +2658,14 @@ final class AppStore {
 
     private func syncServerAccount(_ account: MonitoredAccount,
                                    publishChanges: Bool,
-                                   presentErrors: Bool) async -> Bool {
+                                   presentErrors: Bool,
+                                   historyFetchScope: WorkerHistoryFetchScope = .incremental) async -> Bool {
         await serverAccountOperationGate.acquire(accountID: account.id)
         let succeeded = await performServerAccountSync(
             account,
             publishChanges: publishChanges,
-            presentErrors: presentErrors
+            presentErrors: presentErrors,
+            historyFetchScope: historyFetchScope
         )
         await serverAccountOperationGate.release(accountID: account.id)
         return succeeded
@@ -2363,19 +2673,26 @@ final class AppStore {
 
     private func performServerAccountSync(_ account: MonitoredAccount,
                                           publishChanges: Bool,
-                                          presentErrors: Bool) async -> Bool {
+                                          presentErrors: Bool,
+                                          historyFetchScope: WorkerHistoryFetchScope) async -> Bool {
         let accountSettings = settings(for: account)
         guard !account.isDemo,
               serverMonitoringEnabled(accountSettings, account: account),
               pushServerSettings.mode != .disabled,
               accounts.contains(where: { $0.id == account.id }) else { return false }
         let consentRevision = accountSettings.selfHostedServerConsentRevision
-        let earliest = Date.now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
+        let remoteAccountID = remoteWorkerAccountID(
+            for: account,
+            settings: accountSettings
+        )
         let latestServerPoint = usageHistory.lazy
             .filter { $0.accountID == account.id && $0.source == .server }
             .map(\.recordedAt)
             .max()
-        let since = max(earliest, latestServerPoint?.addingTimeInterval(-60) ?? earliest)
+        let since = historyFetchScope.startDate(
+            now: .now,
+            latestServerPoint: latestServerPoint
+        )
         do {
             let currentAccount = accounts.first(where: { $0.id == account.id }) ?? account
             var result = try await PushServerClient.syncAccount(
@@ -2383,7 +2700,7 @@ final class AppStore {
                 account: currentAccount,
                 since: since
             )
-            if !currentAccount.isRemoteOnly {
+            if remoteAccountID == nil {
                 mergeLatestPlan(result.snapshot?.plan, for: currentAccount.id)
                 let metadataSource = accounts.first(where: { $0.id == currentAccount.id })
                     ?? currentAccount
@@ -2409,11 +2726,12 @@ final class AppStore {
             )
             return true
         } catch let PushServerError.serverRejected(code) where code == 404 {
-            if account.isRemoteOnly {
+            if let remoteAccountID {
                 do {
                     try await PushServerClient.restoreRemoteAccount(
                         settings: pushServerSettings,
-                        account: account
+                        account: account,
+                        remoteAccountID: remoteAccountID
                     )
                     let restoredAccount = accounts.first(where: { $0.id == account.id }) ?? account
                     let result = try await PushServerClient.syncAccount(
@@ -2522,10 +2840,17 @@ final class AppStore {
                                      deliverNotifications: Bool,
                                      presentErrors: Bool) async {
         guard var currentAccount = accounts.first(where: { $0.id == account.id }) else { return }
-        let currentSettings = settings(for: currentAccount)
+        var currentSettings = settings(for: currentAccount)
         guard serverMonitoringEnabled(currentSettings, account: currentAccount),
               currentSettings.selfHostedServerConsentRevision == consentRevision,
               result.consentRevision == consentRevision else { return }
+        if let reference = result.workerAccountReference,
+           reference.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression) != nil,
+           currentSettings.workerAccountReference != reference {
+            currentSettings.workerAccountReference = reference
+            monitorSettings[account.id] = currentSettings
+            persistMonitorSettings()
+        }
         if let details = result.accountDetails,
            let updated = mergeProviderDetails(details, for: currentAccount.id) {
             currentAccount = updated
@@ -2540,29 +2865,80 @@ final class AppStore {
             historyStorageError = error.localizedDescription
         }
 
-        // A successful Worker sync supersedes any old on-device provider failure. Provider-side
-        // monitoring errors are retried by the Worker and are not client request failures.
-        refreshFailures.removeValue(forKey: account.id)
-
-        guard let snapshot = result.snapshot,
-              snapshot.fetchedAt > (snapshots[account.id]?.fetchedAt ?? .distantPast),
-              accounts.contains(where: { $0.id == account.id }) else {
-            return
+        switch result.sessionStatus {
+        case .active:
+            refreshFailures.removeValue(forKey: account.id)
+        case .expired, .error:
+            refreshFailures[account.id] = AccountRefreshFailure(
+                workerSessionStatus: result.sessionStatus!,
+                checkedAt: result.sessionCheckedAt
+            )
+        case .unchecked, nil:
+            if result.lastError == nil { refreshFailures.removeValue(forKey: account.id) }
         }
-        mergeLatestPlan(snapshot.plan, for: account.id)
-        await recordSuccessfulSnapshot(
-            snapshot,
-            for: currentAccount,
-            source: .server,
-            deliverNotifications: deliverNotifications
-        )
-        snapshots[account.id] = snapshot
-        refreshFailures.removeValue(forKey: account.id)
+        if let snapshot = result.snapshot,
+           snapshot.fetchedAt > (snapshots[account.id]?.fetchedAt ?? .distantPast),
+           accounts.contains(where: { $0.id == account.id }) {
+            mergeLatestPlan(snapshot.plan, for: account.id)
+            await recordSuccessfulSnapshot(
+                snapshot,
+                for: currentAccount,
+                source: .server,
+                deliverNotifications: deliverNotifications
+            )
+            snapshots[account.id] = snapshot
+        }
+        if let reference = currentSettings.workerAccountReference {
+            await mergeRemoteWorkerDuplicates(
+                accountReference: reference,
+                preferredAccountID: account.id
+            )
+        }
         if deliverNotifications {
             publishSnapshots()
             await reconcileScheduledResetNotifications()
             await updateLiveActivity()
             await reconcileLiveActivity()
+        }
+    }
+
+    private func mergeRemoteWorkerDuplicates(
+        accountReference: String,
+        preferredAccountID: UUID
+    ) async {
+        guard let serverURL = (try? pushServerSettings.resolvedServerURL())?.absoluteString else {
+            return
+        }
+        let matchingAccounts = accounts.filter { account in
+            let accountSettings = settings(for: account)
+            let usesServer = account.remoteWorkerServerURL == serverURL
+                || accountSettings.selfHostedServerConsentURL == serverURL
+            return usesServer && accountSettings.workerAccountReference == accountReference
+        }
+        let directAccounts = matchingAccounts.filter { !$0.isRemoteOnly }
+        guard let target = directAccounts.first(where: { $0.id == preferredAccountID })
+                ?? directAccounts.first else { return }
+        let duplicates = matchingAccounts.filter { $0.isRemoteOnly && $0.id != target.id }
+        for duplicate in duplicates {
+            do {
+                usageHistory = try await historyStore.mergeAccount(
+                    sourceID: duplicate.id,
+                    into: target.id
+                )
+                historyStorageError = nil
+            } catch {
+                historyStorageError = error.localizedDescription
+                continue
+            }
+            if let duplicateSnapshot = snapshots[duplicate.id],
+               duplicateSnapshot.fetchedAt > (snapshots[target.id]?.fetchedAt ?? .distantPast) {
+                var mergedSnapshot = duplicateSnapshot
+                mergedSnapshot.accountID = target.id
+                mergedSnapshot.accountName = target.resolvedDisplayName
+                mergedSnapshot.accountSymbolName = target.customSymbolName
+                snapshots[target.id] = mergedSnapshot
+            }
+            remove(duplicate)
         }
     }
 

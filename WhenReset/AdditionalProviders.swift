@@ -8,6 +8,7 @@ enum AdditionalProviderError: LocalizedError {
     case missingRefreshToken(String)
     case invalidResponse(String)
     case noResettableQuota(String)
+    case noBillingData(String)
     case invalidEndpoint
     case stateMismatch
     case responseTooLarge(String)
@@ -25,6 +26,8 @@ enum AdditionalProviderError: LocalizedError {
             "\(provider) returned unreadable quota data."
         case let .noResettableQuota(provider):
             "\(provider) did not report any resettable quota windows."
+        case let .noBillingData(provider):
+            "\(provider) did not return readable billing data."
         case .invalidEndpoint:
             "Enter a valid HTTPS usage endpoint. Loopback HTTP is allowed for local development."
         case .stateMismatch:
@@ -45,6 +48,434 @@ enum AdditionalProviderError: LocalizedError {
         default:
             false
         }
+    }
+}
+
+// MARK: - API billing providers
+
+private enum APIBillingSupport {
+    static func apiKey(_ rawValue: String, provider: String) throws -> String {
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard value.utf8.count >= 8, value.utf8.count <= 16_384,
+              value.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else {
+            throw AdditionalProviderError.invalidCredential(
+                provider,
+                "Enter a valid \(provider) API key."
+            )
+        }
+        return value
+    }
+
+    static func monthlyPeriod(containing date: Date) -> DateInterval {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        return calendar.dateInterval(of: .month, for: date)
+            ?? DateInterval(start: date, duration: 31 * 86_400)
+    }
+
+    static func budget(_ value: Double?) -> Double? {
+        guard let value, value.isFinite, value > 0 else { return nil }
+        return value
+    }
+
+    static func snapshot(
+        account: MonitoredAccount,
+        providerName: String,
+        spent: Double,
+        currencyCode: String,
+        monthlyBudget: Double?,
+        period: DateInterval,
+        title: String = "API spend this month",
+        accessExpiresAt: Date? = nil,
+        isUnlimited: Bool = false,
+        now: Date
+    ) -> UsageSnapshot {
+        let limit = budget(monthlyBudget)
+        let remaining = limit.map { max(0, $0 - spent) }
+        return UsageSnapshot(
+            accountID: account.id,
+            providerName: providerName,
+            accountName: account.displayName,
+            accountProviderID: account.providerID,
+            plan: account.plan,
+            primary: nil,
+            secondary: nil,
+            availableResetCount: 0,
+            resetCredits: [],
+            fetchedAt: now,
+            apiBalance: APIBalance(
+                title: limit == nil ? title : "Monthly API budget",
+                currencyCode: currencyCode.uppercased(),
+                spent: max(0, spent),
+                limit: limit,
+                remaining: remaining,
+                periodStart: period.start,
+                periodEnd: period.end,
+                accessExpiresAt: accessExpiresAt,
+                isUnlimited: isUnlimited
+            )
+        )
+    }
+
+    static func request(
+        _ url: URL,
+        headers: [String: String],
+        session: URLSession,
+        provider: String
+    ) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+        for (name, value) in headers { request.setValue(value, forHTTPHeaderField: name) }
+        let (data, response) = try await AdditionalProviderNetworking.data(
+            for: request,
+            session: session,
+            provider: provider
+        )
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 401 || status == 403 {
+            throw AdditionalProviderError.authorizationFailed(provider)
+        }
+        guard (200..<300).contains(status) else {
+            throw AdditionalProviderError.server(provider, status)
+        }
+        guard response.url == url else { throw AdditionalProviderError.invalidEndpoint }
+        return data
+    }
+}
+
+struct OpenAIAPIProvider {
+    static let costsURL = URL(string: "https://api.openai.com/v1/organization/costs")!
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
+
+    func link(apiKey rawAPIKey: String, monthlyBudget: Double?) async throws -> LinkedIdentity {
+        let apiKey = try APIBillingSupport.apiKey(rawAPIKey, provider: "OpenAI API")
+        let credentials = AccountCredentials(
+            accessToken: apiKey,
+            refreshToken: "",
+            idToken: "",
+            monthlyBudget: APIBillingSupport.budget(monthlyBudget),
+            currencyCode: "USD"
+        )
+        let account = pendingAccount(providerID: .openAIAPI, name: "OpenAI API organization")
+        _ = try await fetchUsage(account: account, credentials: credentials)
+        return LinkedIdentity(
+            workspaceID: "openai-api-\(AdditionalProviderParsing.fingerprint(apiKey))",
+            displayName: "OpenAI API organization",
+            plan: nil,
+            credentials: credentials
+        )
+    }
+
+    func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws
+        -> UsageSnapshot {
+        let now = Date.now
+        let period = APIBillingSupport.monthlyPeriod(containing: now)
+        var components = URLComponents(url: Self.costsURL, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            .init(name: "start_time", value: String(Int(period.start.timeIntervalSince1970))),
+            .init(name: "end_time", value: String(Int(now.timeIntervalSince1970) + 1)),
+            .init(name: "bucket_width", value: "1d"),
+            .init(name: "limit", value: "31")
+        ]
+        guard let url = components.url else { throw AdditionalProviderError.invalidEndpoint }
+        let data = try await APIBillingSupport.request(
+            url,
+            headers: ["Authorization": "Bearer \(credentials.accessToken)"],
+            session: session,
+            provider: "OpenAI API"
+        )
+        return try Self.parseUsage(
+            account: account,
+            data: data,
+            monthlyBudget: credentials.monthlyBudget,
+            now: now
+        )
+    }
+
+    static func parseUsage(
+        account: MonitoredAccount,
+        data: Data,
+        monthlyBudget: Double?,
+        now: Date = .now
+    ) throws -> UsageSnapshot {
+        let root = try AdditionalProviderParsing.json(data, provider: "OpenAI API")
+        guard let buckets = root["data"] as? [[String: Any]] else {
+            throw AdditionalProviderError.noBillingData("OpenAI API")
+        }
+        var spent = 0.0
+        var currency = "USD"
+        for bucket in buckets {
+            for result in AdditionalProviderParsing.dictionaries(bucket["results"]) {
+                if let amount = AdditionalProviderParsing.dictionary(result["amount"]),
+                   let value = AdditionalProviderParsing.number(amount["value"]) {
+                    spent += value
+                    currency = AdditionalProviderParsing.string(amount["currency"]) ?? currency
+                }
+            }
+        }
+        return APIBillingSupport.snapshot(
+            account: account,
+            providerName: "OpenAI API",
+            spent: spent,
+            currencyCode: currency,
+            monthlyBudget: monthlyBudget,
+            period: APIBillingSupport.monthlyPeriod(containing: now),
+            now: now
+        )
+    }
+}
+
+struct AnthropicAPIProvider {
+    static let costsURL = URL(string: "https://api.anthropic.com/v1/organizations/cost_report")!
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
+
+    func link(apiKey rawAPIKey: String, monthlyBudget: Double?) async throws -> LinkedIdentity {
+        let apiKey = try APIBillingSupport.apiKey(rawAPIKey, provider: "Anthropic API")
+        let credentials = AccountCredentials(
+            accessToken: apiKey,
+            refreshToken: "",
+            idToken: "",
+            monthlyBudget: APIBillingSupport.budget(monthlyBudget),
+            currencyCode: "USD"
+        )
+        let account = pendingAccount(providerID: .anthropicAPI, name: "Anthropic API organization")
+        _ = try await fetchUsage(account: account, credentials: credentials)
+        return LinkedIdentity(
+            workspaceID: "anthropic-api-\(AdditionalProviderParsing.fingerprint(apiKey))",
+            displayName: "Anthropic API organization",
+            plan: nil,
+            credentials: credentials
+        )
+    }
+
+    func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws
+        -> UsageSnapshot {
+        let now = Date.now
+        let period = APIBillingSupport.monthlyPeriod(containing: now)
+        let formatter = ISO8601DateFormatter()
+        var components = URLComponents(url: Self.costsURL, resolvingAgainstBaseURL: false)!
+        components.queryItems = [
+            .init(name: "starting_at", value: formatter.string(from: period.start)),
+            .init(name: "ending_at", value: formatter.string(from: now)),
+            .init(name: "bucket_width", value: "1d"),
+            .init(name: "limit", value: "31")
+        ]
+        guard let url = components.url else { throw AdditionalProviderError.invalidEndpoint }
+        let data = try await APIBillingSupport.request(
+            url,
+            headers: [
+                "x-api-key": credentials.accessToken,
+                "anthropic-version": "2023-06-01"
+            ],
+            session: session,
+            provider: "Anthropic API"
+        )
+        return try Self.parseUsage(
+            account: account,
+            data: data,
+            monthlyBudget: credentials.monthlyBudget,
+            now: now
+        )
+    }
+
+    static func parseUsage(
+        account: MonitoredAccount,
+        data: Data,
+        monthlyBudget: Double?,
+        now: Date = .now
+    ) throws -> UsageSnapshot {
+        let root = try AdditionalProviderParsing.json(data, provider: "Anthropic API")
+        guard let buckets = root["data"] as? [[String: Any]] else {
+            throw AdditionalProviderError.noBillingData("Anthropic API")
+        }
+        var cents = 0.0
+        var currency = "USD"
+        for bucket in buckets {
+            for result in AdditionalProviderParsing.dictionaries(bucket["results"]) {
+                if let amount = AdditionalProviderParsing.dictionary(result["amount"]),
+                   let value = AdditionalProviderParsing.number(amount["value"]) {
+                    cents += value
+                    currency = AdditionalProviderParsing.string(amount["currency"]) ?? currency
+                } else if let value = AdditionalProviderParsing.number(result["amount"]) {
+                    cents += value
+                    currency = AdditionalProviderParsing.string(result["currency"]) ?? currency
+                }
+            }
+        }
+        return APIBillingSupport.snapshot(
+            account: account,
+            providerName: "Anthropic API",
+            spent: cents / 100,
+            currencyCode: currency,
+            monthlyBudget: monthlyBudget,
+            period: APIBillingSupport.monthlyPeriod(containing: now),
+            now: now
+        )
+    }
+}
+
+struct NewAPIProvider {
+    private let session: URLSession
+
+    init(session: URLSession = .shared) { self.session = session }
+
+    func link(baseURL rawBaseURL: String, apiKey rawAPIKey: String, name rawName: String) async throws
+        -> LinkedIdentity {
+        let baseURL = try Self.normalizedBaseURL(rawBaseURL)
+        let apiKey = try APIBillingSupport.apiKey(rawAPIKey, provider: "New API-compatible")
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 64 else {
+            throw AdditionalProviderError.invalidCredential(
+                "New API-compatible",
+                "Enter a short name for this API provider."
+            )
+        }
+        let credentials = AccountCredentials(
+            accessToken: apiKey,
+            refreshToken: "",
+            idToken: "",
+            endpointURL: baseURL.absoluteString,
+            accountLabel: name,
+            currencyCode: "USD"
+        )
+        let account = pendingAccount(providerID: .newAPI, name: name)
+        _ = try await fetchUsage(account: account, credentials: credentials)
+        return LinkedIdentity(
+            workspaceID: "new-api-\(AdditionalProviderParsing.fingerprint(baseURL.absoluteString, apiKey))",
+            displayName: name,
+            plan: nil,
+            credentials: credentials
+        )
+    }
+
+    func fetchUsage(account: MonitoredAccount, credentials: AccountCredentials) async throws
+        -> UsageSnapshot {
+        guard let rawBaseURL = credentials.endpointURL else {
+            throw AdditionalProviderError.invalidEndpoint
+        }
+        let baseURL = try Self.normalizedBaseURL(rawBaseURL)
+        let now = Date.now
+        let period = APIBillingSupport.monthlyPeriod(containing: now)
+        let subscriptionURL = try Self.billingURL(baseURL: baseURL, endpoint: "subscription")
+        let usageURL = try Self.billingURL(
+            baseURL: baseURL,
+            endpoint: "usage",
+            period: period
+        )
+        let headers = ["Authorization": "Bearer \(credentials.accessToken)"]
+        async let subscription = APIBillingSupport.request(
+            subscriptionURL,
+            headers: headers,
+            session: session,
+            provider: account.displayName
+        )
+        async let usage = APIBillingSupport.request(
+            usageURL,
+            headers: headers,
+            session: session,
+            provider: account.displayName
+        )
+        return try await Self.parseUsage(
+            account: account,
+            subscriptionData: subscription,
+            usageData: usage,
+            currencyCode: credentials.currencyCode ?? "USD",
+            now: now
+        )
+    }
+
+    static func parseUsage(
+        account: MonitoredAccount,
+        subscriptionData: Data,
+        usageData: Data,
+        currencyCode: String = "USD",
+        now: Date = .now
+    ) throws -> UsageSnapshot {
+        let provider = account.displayName
+        let subscription = try AdditionalProviderParsing.json(subscriptionData, provider: provider)
+        let usage = try AdditionalProviderParsing.json(usageData, provider: provider)
+        if subscription["error"] != nil || usage["error"] != nil {
+            throw AdditionalProviderError.noBillingData(provider)
+        }
+        guard let hardLimit = AdditionalProviderParsing.firstNumber(subscription, keys: [
+            "hard_limit_usd", "system_hard_limit_usd", "hardLimitUSD", "limit",
+        ]),
+        let totalUsage = AdditionalProviderParsing.firstNumber(usage, keys: [
+            "total_usage", "totalUsage", "used",
+        ]) else {
+            throw AdditionalProviderError.noBillingData(provider)
+        }
+        let spent = max(0, totalUsage / 100)
+        let unlimited = hardLimit >= 99_999_999
+        let expires = AdditionalProviderParsing.date(subscription["access_until"])
+        let period = APIBillingSupport.monthlyPeriod(containing: now)
+        var snapshot = APIBillingSupport.snapshot(
+            account: account,
+            providerName: provider,
+            spent: spent,
+            currencyCode: currencyCode,
+            monthlyBudget: unlimited ? nil : hardLimit,
+            period: period,
+            title: "API key balance",
+            accessExpiresAt: expires,
+            isUnlimited: unlimited,
+            now: now
+        )
+        snapshot.apiBalance?.title = "API key balance"
+        return snapshot
+    }
+
+    static func normalizedBaseURL(_ value: String) throws -> URL {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.utf8.count <= 2_048,
+              var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(),
+              let host = components.host?.lowercased(), !host.isEmpty,
+              components.user == nil, components.password == nil,
+              components.query == nil, components.fragment == nil else {
+            throw AdditionalProviderError.invalidEndpoint
+        }
+        let loopback = host == "localhost" || host == "127.0.0.1" || host == "::1"
+        guard scheme == "https" || (scheme == "http" && loopback) else {
+            throw AdditionalProviderError.invalidEndpoint
+        }
+        components.scheme = scheme
+        components.host = host
+        while components.path.count > 1, components.path.hasSuffix("/") {
+            components.path.removeLast()
+        }
+        guard let url = components.url else { throw AdditionalProviderError.invalidEndpoint }
+        return url
+    }
+
+    private static func billingURL(
+        baseURL: URL,
+        endpoint: String,
+        period: DateInterval? = nil
+    ) throws -> URL {
+        var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
+        let basePath = components.path == "/" ? "" : components.path
+        let prefix = basePath.hasSuffix("/v1") ? basePath : basePath + "/v1"
+        components.path = prefix + "/dashboard/billing/\(endpoint)"
+        if let period {
+            let formatter = DateFormatter()
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "yyyy-MM-dd"
+            components.queryItems = [
+                .init(name: "start_date", value: formatter.string(from: period.start)),
+                .init(name: "end_date", value: formatter.string(from: min(.now, period.end)))
+            ]
+        }
+        guard let url = components.url else { throw AdditionalProviderError.invalidEndpoint }
+        return url
     }
 }
 
@@ -197,6 +628,505 @@ private enum AdditionalProviderNetworking {
             data.append(byte)
         }
         return (data, response)
+    }
+}
+
+// MARK: - Grok
+
+struct GrokDeviceLink: Sendable {
+    let verificationURL: URL
+    let userCode: String
+    let deviceCode: String
+    let interval: TimeInterval
+    let expiresAt: Date
+}
+
+struct GrokProvider {
+    /// Public OAuth client used by the official Grok Build device-code flow.
+    static let clientID = "b1a00492-073a-47ea-816f-4c329264a828"
+    static let deviceAuthorizationURL = URL(string: "https://auth.x.ai/oauth2/device/code")!
+    static let tokenURL = URL(string: "https://auth.x.ai/oauth2/token")!
+    static let userURL = URL(string: "https://cli-chat-proxy.grok.com/v1/user?include=subscription")!
+    static let billingURL = URL(string: "https://cli-chat-proxy.grok.com/v1/billing?format=credits")!
+    private static let scopes = [
+        "openid", "profile", "email", "offline_access", "grok-cli:access", "api:access",
+    ]
+    private static let tokenAuthHeader = "xai-grok-cli"
+    private static let grokClientVersion = "1.0.0"
+
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    func beginLink() async throws -> GrokDeviceLink {
+        var request = URLRequest(url: Self.deviceAuthorizationURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.httpBody = Self.formEncoded([
+            ("client_id", Self.clientID),
+            ("scope", Self.scopes.joined(separator: " ")),
+            ("referrer", "grok-build"),
+        ])
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue(Self.grokClientVersion, forHTTPHeaderField: "x-grok-client-version")
+        request.setValue("ui", forHTTPHeaderField: "x-grok-client-surface")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await AdditionalProviderNetworking.data(
+            for: request, session: session, provider: "Grok"
+        )
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw AdditionalProviderError.server("Grok", status)
+        }
+        return try Self.deviceLink(from: data)
+    }
+
+    func finishLink(_ link: GrokDeviceLink) async throws -> LinkedIdentity {
+        var interval = max(1, link.interval)
+        while Date.now < link.expiresAt {
+            try await Self.sleep(interval: interval, before: link.expiresAt)
+            try Task.checkCancellation()
+
+            var request = URLRequest(url: Self.tokenURL)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 20
+            request.httpBody = Self.formEncoded([
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", link.deviceCode),
+                ("client_id", Self.clientID),
+            ])
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            request.setValue(Self.grokClientVersion, forHTTPHeaderField: "x-grok-client-version")
+            request.setValue("ui", forHTTPHeaderField: "x-grok-client-surface")
+            request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+
+            do {
+                let (data, response) = try await AdditionalProviderNetworking.data(
+                    for: request, session: session, provider: "Grok"
+                )
+                let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+                if (200..<300).contains(status) {
+                    let credentials = try Self.credentials(from: data)
+                    let fallback = try Self.linkedIdentity(credentials: credentials)
+                    return (try? await fetchIdentity(credentials: credentials, fallback: fallback))
+                        ?? fallback
+                }
+
+                switch Self.oauthError(in: data) {
+                case "authorization_pending":
+                    continue
+                case "slow_down":
+                    interval += 5
+                    continue
+                case "access_denied":
+                    throw AdditionalProviderError.authorizationFailed("Grok")
+                case "expired_token":
+                    throw AdditionalProviderError.server("Grok", 408)
+                default:
+                    if status == 429 || status >= 500 { continue }
+                    if status == 401 || status == 403 {
+                        throw AdditionalProviderError.authorizationFailed("Grok")
+                    }
+                    throw AdditionalProviderError.server("Grok", status)
+                }
+            } catch let error as URLError where Self.isTransient(error.code) {
+                continue
+            }
+        }
+        throw AdditionalProviderError.server("Grok", 408)
+    }
+
+    func refreshedIfNeeded(_ credentials: AccountCredentials) async throws -> AccountCredentials {
+        let expiresAt = credentials.expiresAt
+            ?? Self.jwtExpiration(credentials.accessToken)
+        if let expiresAt, expiresAt.timeIntervalSinceNow >= 5 * 60 {
+            return credentials
+        }
+        guard !credentials.refreshToken.isEmpty else {
+            throw AdditionalProviderError.missingRefreshToken("Grok")
+        }
+
+        let accessClaims = Self.jwtClaims(credentials.accessToken)
+        var fields = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", credentials.refreshToken),
+            ("client_id", Self.clientID),
+        ]
+        if let principalType = AdditionalProviderParsing.string(accessClaims["principal_type"]) {
+            fields.append(("principal_type", principalType))
+        }
+        if let principalID = AdditionalProviderParsing.string(accessClaims["principal_id"]) {
+            fields.append(("principal_id", principalID))
+        }
+
+        var request = URLRequest(url: Self.tokenURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.httpBody = Self.formEncoded(fields)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue(Self.grokClientVersion, forHTTPHeaderField: "x-grok-client-version")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await AdditionalProviderNetworking.data(
+            for: request, session: session, provider: "Grok"
+        )
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 400 || status == 401 || status == 403 {
+            throw AdditionalProviderError.authorizationFailed("Grok")
+        }
+        guard (200..<300).contains(status) else {
+            throw AdditionalProviderError.server("Grok", status)
+        }
+        return try Self.credentials(from: data, previous: credentials)
+    }
+
+    private func fetchIdentity(credentials: AccountCredentials,
+                               fallback: LinkedIdentity) async throws -> LinkedIdentity {
+        var request = URLRequest(url: Self.userURL)
+        request.timeoutInterval = 10
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(Self.tokenAuthHeader, forHTTPHeaderField: "X-XAI-Token-Auth")
+        request.setValue(Self.grokClientVersion, forHTTPHeaderField: "x-grok-client-version")
+        request.setValue("interactive", forHTTPHeaderField: "x-grok-client-mode")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await AdditionalProviderNetworking.data(
+            for: request, session: session, provider: "Grok"
+        )
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw AdditionalProviderError.server("Grok", status)
+        }
+        return try Self.enrichedIdentity(credentials: credentials, data: data, fallback: fallback)
+    }
+
+    func fetchUsage(account: MonitoredAccount,
+                    credentials: AccountCredentials) async throws -> UsageSnapshot {
+        var request = URLRequest(url: Self.billingURL)
+        request.timeoutInterval = 20
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(Self.tokenAuthHeader, forHTTPHeaderField: "X-XAI-Token-Auth")
+        request.setValue(account.workspaceID, forHTTPHeaderField: "x-userid")
+        request.setValue(Self.grokClientVersion, forHTTPHeaderField: "x-grok-client-version")
+        request.setValue("interactive", forHTTPHeaderField: "x-grok-client-mode")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await AdditionalProviderNetworking.data(
+            for: request, session: session, provider: "Grok"
+        )
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        if status == 401 || status == 403 {
+            throw AdditionalProviderError.authorizationFailed("Grok")
+        }
+        guard (200..<300).contains(status) else {
+            throw AdditionalProviderError.server("Grok", status)
+        }
+        return try Self.parseUsage(
+            account: account,
+            data: data,
+            accessToken: credentials.accessToken
+        )
+    }
+
+    static func deviceLink(from data: Data, now: Date = .now) throws -> GrokDeviceLink {
+        let root = try AdditionalProviderParsing.json(data, provider: "Grok")
+        guard let deviceCode = AdditionalProviderParsing.string(root["device_code"]),
+              let userCode = AdditionalProviderParsing.string(root["user_code"]),
+              userCode.unicodeScalars.allSatisfy({ scalar in
+                  scalar.isASCII && (CharacterSet.alphanumerics.contains(scalar) || scalar.value == 45)
+              }),
+              let verificationValue = AdditionalProviderParsing.string(root["verification_uri_complete"])
+                ?? AdditionalProviderParsing.string(root["verification_uri"]),
+              let verificationURL = URL(string: verificationValue),
+              Self.isAllowedVerificationURL(verificationURL),
+              let expiresIn = AdditionalProviderParsing.number(root["expires_in"]), expiresIn > 0 else {
+            throw AdditionalProviderError.invalidResponse("Grok")
+        }
+        let interval = max(1, AdditionalProviderParsing.number(root["interval"]) ?? 5)
+        return GrokDeviceLink(
+            verificationURL: verificationURL,
+            userCode: userCode,
+            deviceCode: deviceCode,
+            interval: interval,
+            expiresAt: now.addingTimeInterval(expiresIn)
+        )
+    }
+
+    static func credentials(from data: Data, previous: AccountCredentials? = nil,
+                            now: Date = .now) throws -> AccountCredentials {
+        let root = try AdditionalProviderParsing.json(data, provider: "Grok")
+        guard let accessToken = AdditionalProviderParsing.string(root["access_token"]) else {
+            throw AdditionalProviderError.invalidResponse("Grok")
+        }
+        let refreshToken = AdditionalProviderParsing.string(root["refresh_token"])
+            ?? previous?.refreshToken
+        guard let refreshToken, !refreshToken.isEmpty else {
+            throw AdditionalProviderError.missingRefreshToken("Grok")
+        }
+        let idToken = AdditionalProviderParsing.string(root["id_token"])
+            ?? previous?.idToken ?? ""
+        let expiresAt = AdditionalProviderParsing.number(root["expires_in"])
+            .map { now.addingTimeInterval($0) }
+            ?? Self.jwtExpiration(accessToken)
+        return AccountCredentials(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            idToken: idToken,
+            expiresAt: expiresAt
+        )
+    }
+
+    static func linkedIdentity(credentials: AccountCredentials) throws -> LinkedIdentity {
+        let accessClaims = Self.jwtClaims(credentials.accessToken)
+        let idClaims = Self.jwtClaims(credentials.idToken)
+        let principalType = AdditionalProviderParsing.string(accessClaims["principal_type"])
+        let principalID = AdditionalProviderParsing.string(accessClaims["principal_id"])
+        let personalSubject = AdditionalProviderParsing.string(idClaims["sub"])
+            ?? AdditionalProviderParsing.string(accessClaims["sub"])
+        let workspaceID: String?
+        if principalType?.localizedCaseInsensitiveCompare("Team") == .orderedSame
+            || principalType?.localizedCaseInsensitiveCompare("Organization") == .orderedSame {
+            workspaceID = principalID
+        } else {
+            workspaceID = personalSubject
+        }
+        guard let workspaceID else {
+            throw AdditionalProviderError.invalidResponse("Grok")
+        }
+
+        let email = AdditionalProviderParsing.string(idClaims["email"])
+            ?? AdditionalProviderParsing.string(accessClaims["email"])
+        let profileName = Self.profileName(in: idClaims)
+            ?? Self.profileName(in: accessClaims)
+        let displayName = profileName ?? email ?? "Grok account"
+        return LinkedIdentity(
+            workspaceID: workspaceID,
+            displayName: displayName,
+            profileName: profileName,
+            email: email,
+            plan: Self.plan(in: accessClaims) ?? Self.plan(in: idClaims),
+            credentials: credentials
+        )
+    }
+
+    static func enrichedIdentity(credentials: AccountCredentials, data: Data,
+                                 fallback: LinkedIdentity? = nil) throws -> LinkedIdentity {
+        let fallback = try fallback ?? linkedIdentity(credentials: credentials)
+        let root = try AdditionalProviderParsing.json(data, provider: "Grok")
+        let userID = AdditionalProviderParsing.string(root["userId"] ?? root["user_id"])
+            ?? fallback.workspaceID
+        let email = AdditionalProviderParsing.string(root["email"])
+            ?? fallback.email
+        let firstName = AdditionalProviderParsing.string(root["firstName"] ?? root["first_name"])
+        let lastName = AdditionalProviderParsing.string(root["lastName"] ?? root["last_name"])
+        let profileName = [firstName, lastName].compactMap { $0 }.joined(separator: " ")
+        let resolvedProfileName = profileName.isEmpty ? fallback.profileName : profileName
+        let displayName = resolvedProfileName ?? email ?? fallback.displayName
+        let plan = AdditionalProviderParsing.string(
+            root["subscriptionTier"] ?? root["subscription_tier"]
+        ).map(Self.displayPlan) ?? fallback.plan
+        return LinkedIdentity(
+            workspaceID: userID,
+            displayName: displayName,
+            profileName: resolvedProfileName,
+            email: email,
+            plan: plan,
+            credentials: credentials
+        )
+    }
+
+    static func parseUsage(account: MonitoredAccount, data: Data,
+                           accessToken: String = "", now: Date = .now) throws -> UsageSnapshot {
+        let root = try AdditionalProviderParsing.json(data, provider: "Grok")
+        guard let config = AdditionalProviderParsing.dictionary(root["config"]) else {
+            throw AdditionalProviderError.noResettableQuota("Grok")
+        }
+        let usedPercent = AdditionalProviderParsing.number(
+            config["creditUsagePercent"] ?? config["credit_usage_percent"]
+        ) ?? Self.legacyUsedPercent(config)
+        guard let usedPercent, usedPercent.isFinite else {
+            throw AdditionalProviderError.invalidResponse("Grok")
+        }
+
+        let period = AdditionalProviderParsing.dictionary(
+            config["currentPeriod"] ?? config["current_period"]
+        )
+        let periodStart = AdditionalProviderParsing.date(
+            period?["start"] ?? config["billingPeriodStart"] ?? config["billing_period_start"]
+        )
+        guard let periodEnd = AdditionalProviderParsing.date(
+            period?["end"] ?? config["billingPeriodEnd"] ?? config["billing_period_end"]
+        ), periodEnd > now else {
+            throw AdditionalProviderError.noResettableQuota("Grok")
+        }
+
+        let periodType = AdditionalProviderParsing.string(period?["type"])?.uppercased()
+        let periodCode = AdditionalProviderParsing.integer(period?["type"])
+        let durationMinutes = periodStart.map {
+            max(1, Int((periodEnd.timeIntervalSince($0) / 60).rounded()))
+        }
+        let isWeekly = periodType?.contains("WEEKLY") == true
+            || periodCode == 1
+            || durationMinutes.map { (9_000...11_000).contains($0) } == true
+        let isMonthly = periodType?.contains("MONTHLY") == true
+            || periodCode == 2
+            || durationMinutes.map { (38_000...46_000).contains($0) } == true
+        let title = isWeekly ? "Weekly limit" : isMonthly ? "Monthly limit" : "Coding limit"
+        let minutes = isWeekly ? 10_080 : durationMinutes
+        let kind: UsageWindowKind = isWeekly ? .weekly : .additional
+        let metricID = isWeekly ? "grok:weekly" : isMonthly ? "grok:monthly" : "grok:coding"
+        let window = UsageWindow(
+            title: title,
+            usedPercent: min(100, max(0, usedPercent)),
+            resetsAt: periodEnd,
+            windowMinutes: minutes,
+            kind: kind,
+            identifier: metricID
+        )
+
+        let claims = Self.jwtClaims(accessToken)
+        let plan = AdditionalProviderParsing.firstString(root, keys: [
+            "subscriptionTier", "subscription_tier", "plan", "tier",
+        ]).map(Self.displayPlan)
+            ?? Self.plan(in: claims)
+            ?? account.plan
+        return UsageSnapshot(
+            accountID: account.id,
+            providerName: "Grok",
+            accountName: account.resolvedDisplayName,
+            accountProviderID: account.providerID,
+            accountSymbolName: account.customSymbolName,
+            plan: plan,
+            primary: window,
+            secondary: nil,
+            availableResetCount: 0,
+            resetCredits: [],
+            fetchedAt: now
+        )
+    }
+
+    private static func legacyUsedPercent(_ config: [String: Any]) -> Double? {
+        guard let limit = centValue(config["monthlyLimit"] ?? config["monthly_limit"]), limit > 0,
+              let used = centValue(config["used"]) else { return nil }
+        return used / limit * 100
+    }
+
+    private static func centValue(_ value: Any?) -> Double? {
+        if let root = AdditionalProviderParsing.dictionary(value) {
+            return AdditionalProviderParsing.number(root["val"])
+        }
+        return AdditionalProviderParsing.number(value)
+    }
+
+    private static func plan(in claims: [String: Any]) -> String? {
+        for key in ["subscription_tier", "subscriptionTier", "plan"] {
+            if let value = AdditionalProviderParsing.string(claims[key]) {
+                return displayPlan(value)
+            }
+        }
+        guard let tier = AdditionalProviderParsing.integer(claims["tier"]) else { return nil }
+        return switch tier {
+        case 0: "Free"
+        case 1: "SuperGrok"
+        case 2: "X Basic"
+        case 3: "X Premium"
+        case 4: "X Premium+"
+        case 5: "SuperGrok Heavy"
+        case 6: "SuperGrok Lite"
+        case 7: "SuperGrok+"
+        default: "Tier \(tier)"
+        }
+    }
+
+    private static func displayPlan(_ rawValue: String) -> String {
+        let normalized = rawValue
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized.split(separator: " ").map { word in
+            switch word.lowercased() {
+            case "grokpro", "supergrok": "SuperGrok"
+            case "supergrokpro", "heavy": word.lowercased() == "heavy" ? "Heavy" : "SuperGrok Heavy"
+            case "supergroklite": "SuperGrok Lite"
+            case "supergrokplus": "SuperGrok+"
+            default: String(word).capitalized
+            }
+        }.joined(separator: " ")
+    }
+
+    private static func profileName(in claims: [String: Any]) -> String? {
+        if let name = AdditionalProviderParsing.string(claims["name"]) { return name }
+        let first = AdditionalProviderParsing.string(claims["given_name"] ?? claims["first_name"])
+        let last = AdditionalProviderParsing.string(claims["family_name"] ?? claims["last_name"])
+        let combined = [first, last].compactMap { $0 }.joined(separator: " ")
+        return combined.isEmpty ? nil : combined
+    }
+
+    private static func jwtClaims(_ token: String) -> [String: Any] {
+        let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count >= 2, let data = base64URLDecoded(parts[1]),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return [:]
+        }
+        return root
+    }
+
+    private static func jwtExpiration(_ token: String) -> Date? {
+        AdditionalProviderParsing.number(jwtClaims(token)["exp"])
+            .map(Date.init(timeIntervalSince1970:))
+    }
+
+    private static func base64URLDecoded(_ value: Substring) -> Data? {
+        var payload = String(value)
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        return Data(base64Encoded: payload)
+    }
+
+    private static func oauthError(in data: Data) -> String? {
+        guard let root = try? AdditionalProviderParsing.json(data, provider: "Grok") else {
+            return nil
+        }
+        return AdditionalProviderParsing.string(root["error"])
+    }
+
+    private static func isAllowedVerificationURL(_ url: URL) -> Bool {
+        guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased(),
+              url.user == nil, url.password == nil else { return false }
+        return host == "accounts.x.ai" || host == "auth.x.ai" || host == "grok.com"
+    }
+
+    private static func formEncoded(_ values: [(String, String)]) -> Data {
+        var components = URLComponents()
+        components.queryItems = values.map { URLQueryItem(name: $0.0, value: $0.1) }
+        return Data((components.percentEncodedQuery ?? "").utf8)
+    }
+
+    private static func sleep(interval: TimeInterval, before expiry: Date) async throws {
+        guard Date.now.addingTimeInterval(interval) < expiry else {
+            throw AdditionalProviderError.server("Grok", 408)
+        }
+        try await Task.sleep(for: .seconds(interval))
+    }
+
+    private static func isTransient(_ code: URLError.Code) -> Bool {
+        switch code {
+        case .timedOut, .networkConnectionLost, .notConnectedToInternet,
+             .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+             .internationalRoamingOff, .dataNotAllowed:
+            true
+        default:
+            false
+        }
     }
 }
 

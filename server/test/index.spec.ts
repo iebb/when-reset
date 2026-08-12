@@ -437,7 +437,7 @@ describe("one-use Worker linking", () => {
       .toEqual({ claimed_device_id: deviceID });
   });
 
-  it("rejects an APNs token owned by another device without consuming the link", async () => {
+  it("reassigns an APNs token during linking without deleting the previous device", async () => {
     await registerDevice();
     const session = await createLinkSession();
     const otherDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab99";
@@ -451,12 +451,18 @@ describe("one-use Worker linking", () => {
       }),
     });
 
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "apns_token_conflict" });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ ok: true });
     expect(await env.DB.prepare("SELECT device_id FROM devices WHERE apns_token = ?")
-      .bind(apnsToken).first<{ device_id: string }>()).toEqual({ device_id: deviceID });
-    expect(await env.DB.prepare("SELECT consumed_at FROM link_sessions WHERE session_id = ?")
-      .bind(session.session_id).first<{ consumed_at: number | null }>()).toEqual({ consumed_at: null });
+      .bind(apnsToken).first<{ device_id: string }>()).toEqual({ device_id: otherDeviceID });
+    expect(await env.DB.prepare(
+      "SELECT apns_token, push_disabled_at FROM devices WHERE device_id = ?"
+    ).bind(deviceID).first<{ apns_token: string; push_disabled_at: number | null }>())
+      .toEqual({ apns_token: `retired:${deviceID}`, push_disabled_at: expect.any(Number) });
+    expect(await env.DB.prepare(
+      "SELECT claimed_device_id FROM link_sessions WHERE session_id = ? AND consumed_at IS NOT NULL"
+    ).bind(session.session_id).first<{ claimed_device_id: string }>())
+      .toEqual({ claimed_device_id: otherDeviceID });
   });
 
   it("rejects expired sessions and prunes them", async () => {
@@ -566,7 +572,7 @@ describe("push registration API", () => {
     });
   });
 
-  it("returns a deliberate conflict when registrations reuse another device’s APNs token", async () => {
+  it("reassigns an APNs token during access-key registration", async () => {
     await registerDevice();
     const otherDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab99";
     const response = await SELF.fetch("https://push.example/v1/devices", {
@@ -579,13 +585,19 @@ describe("push registration API", () => {
       }),
     });
 
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "apns_token_conflict" });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toEqual({ ok: true });
     expect(await env.DB.prepare("SELECT COUNT(*) AS count FROM devices")
-      .first<{ count: number }>()).toEqual({ count: 1 });
+      .first<{ count: number }>()).toEqual({ count: 2 });
+    expect(await env.DB.prepare(
+      "SELECT apns_token, push_disabled_at FROM devices WHERE device_id = ?"
+    ).bind(deviceID).first<{ apns_token: string; push_disabled_at: number | null }>())
+      .toEqual({ apns_token: `retired:${deviceID}`, push_disabled_at: expect.any(Number) });
+    expect(await env.DB.prepare("SELECT device_id FROM devices WHERE apns_token = ?")
+      .bind(apnsToken).first<{ device_id: string }>()).toEqual({ device_id: otherDeviceID });
   });
 
-  it("returns a deliberate conflict when token rotation targets another device", async () => {
+  it("reassigns an APNs token during authenticated token rotation", async () => {
     await registerDevice();
     const otherDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab99";
     const otherAPNSToken = "b".repeat(64);
@@ -605,10 +617,14 @@ describe("push registration API", () => {
       headers: { authorization: `Bearer ${deviceSecret}` },
       body: JSON.stringify({ apns_token: otherAPNSToken }),
     });
-    expect(response.status).toBe(409);
-    expect(await response.json()).toEqual({ error: "apns_token_conflict" });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true });
     expect(await env.DB.prepare("SELECT apns_token FROM devices WHERE device_id = ?")
-      .bind(deviceID).first<{ apns_token: string }>()).toEqual({ apns_token: apnsToken });
+      .bind(deviceID).first<{ apns_token: string }>()).toEqual({ apns_token: otherAPNSToken });
+    expect(await env.DB.prepare(
+      "SELECT apns_token, push_disabled_at FROM devices WHERE device_id = ?"
+    ).bind(otherDeviceID).first<{ apns_token: string; push_disabled_at: number | null }>())
+      .toEqual({ apns_token: `retired:${otherDeviceID}`, push_disabled_at: expect.any(Number) });
   });
 
   it("requires the original secret to update or delete a registration", async () => {
@@ -1085,6 +1101,8 @@ describe("self-hosted account monitoring API", () => {
     expect(candidates.accounts).toHaveLength(1);
     expect(candidates.accounts[0]).toMatchObject({
       provider_id: "chatgpt",
+      synced_account_reference: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      account_reference: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
       display_name: "Worker account",
       plan: "Plus",
       metadata: {
@@ -1095,7 +1113,12 @@ describe("self-hosted account monitoring API", () => {
         trial_expires_at: 1_999_000_000,
       },
       last_success_at: fetchedAt,
+      session_status: "active",
+      session_checked_at: fetchedAt,
     });
+    expect(candidates.accounts[0]).not.toHaveProperty("credentials");
+    expect(candidates.accounts[0]).not.toHaveProperty("encrypted_credentials");
+    expect(candidates.accounts[0]).not.toHaveProperty("credential_fingerprint");
     const serializedCandidates = JSON.stringify(candidates);
     expect(serializedCandidates).not.toContain(deviceID);
     expect(serializedCandidates).not.toContain(accountID);
@@ -1116,6 +1139,10 @@ describe("self-hosted account monitoring API", () => {
     const importedBody = await imported.json<Record<string, unknown>>();
     expect(importedBody).toMatchObject({
       account: {
+        synced_account_reference: candidates.accounts[0].synced_account_reference,
+        account_reference: candidates.accounts[0].account_reference,
+        session_status: "active",
+        session_checked_at: fetchedAt,
         metadata: {
           name: "Provider Person",
           email: "person@example.com",
@@ -1150,6 +1177,9 @@ describe("self-hosted account monitoring API", () => {
     expect(sync.status).toBe(200);
     expect(await sync.json()).toMatchObject({
       snapshot,
+      account_reference: candidates.accounts[0].account_reference,
+      session_status: "active",
+      session_checked_at: fetchedAt,
       metadata: {
         name: "Provider Person",
         email: "person@example.com",
@@ -1182,6 +1212,102 @@ describe("self-hosted account monitoring API", () => {
         body: JSON.stringify(accountRequestBody()),
       },
     )).status).toBe(409);
+
+    const beforeReplacement = await env.DB.prepare(
+      `SELECT encrypted_credentials, credential_fingerprint
+       FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first<{
+      encrypted_credentials: string;
+      credential_fingerprint: string;
+    }>();
+    await env.DB.prepare(
+      `UPDATE monitored_accounts SET last_refresh_at = ?, last_error = 'Provider returned HTTP 401.'
+       WHERE device_id = ? AND account_id = ?`
+    ).bind(fetchedAt + 1, deviceID, accountID).run();
+    const replacementUpload = accountRequestBody("chatgpt", 1);
+    replacementUpload.credentials.access_token = "fresh-write-only-access";
+    replacementUpload.credentials.refresh_token = "fresh-write-only-refresh";
+    replacementUpload.credentials.id_token = "fresh-write-only-id";
+    const parsedReplacement = await testing.parseAccountUpload(new Request(
+      "https://push.example/credential-replacement-test",
+      { method: "PUT", body: JSON.stringify(replacementUpload) },
+    ));
+    expect(parsedReplacement).not.toBeNull();
+    let providerCheckCount = 0;
+    let checkedWorkspace: string | null = null;
+    let checkedAccessToken: string | null = null;
+    const replacement = await testing.upsertMonitoredAccount(
+      env,
+      subscriberDeviceID,
+      localAccountID,
+      parsedReplacement!,
+      true,
+      async (providerAccount, credentials, checkedAt) => {
+        providerCheckCount += 1;
+        checkedWorkspace = providerAccount.workspace_id;
+        checkedAccessToken = credentials.access_token;
+        const effectiveCheckedAt = checkedAt ?? Math.floor(Date.now() / 1_000);
+        return {
+          credentials,
+          account_identity: "user:same-chatgpt-user",
+          snapshot: {
+            provider_id: "chatgpt",
+            plan: "Plus",
+            fetched_at: effectiveCheckedAt,
+            windows: [{
+              position: 0,
+              metric_id: "weekly",
+              title: "Weekly limit",
+              kind: "weekly",
+              window_minutes: 10_080,
+              remaining_percent: 80,
+              resets_at: effectiveCheckedAt + 604_800,
+            }],
+            available_reset_count: 0,
+            reset_credits: [],
+          },
+        };
+      },
+    );
+    expect(replacement.status).toBe(200);
+    expect(replacement.headers.get("cache-control")).toBe("no-store");
+    const replacementBody = await replacement.json<Record<string, unknown>>();
+    expect(replacementBody).toMatchObject({
+      account_reference: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+      session_status: "active",
+      last_error: null,
+    });
+    const serializedReplacement = JSON.stringify(replacementBody);
+    expect(serializedReplacement).not.toContain("fresh-write-only-access");
+    expect(serializedReplacement).not.toContain("fresh-write-only-refresh");
+    expect(serializedReplacement).not.toContain("fresh-write-only-id");
+    expect(replacementBody).not.toHaveProperty("credentials");
+    expect(replacementBody).not.toHaveProperty("encrypted_credentials");
+    expect(replacementBody).not.toHaveProperty("credential_fingerprint");
+    expect(providerCheckCount).toBe(1);
+    expect(checkedWorkspace).toBe("workspace-123");
+    expect(checkedAccessToken).toBe("fresh-write-only-access");
+    const afterReplacement = await env.DB.prepare(
+      `SELECT encrypted_credentials, credential_fingerprint, last_error, latest_snapshot
+       FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first<{
+      encrypted_credentials: string;
+      credential_fingerprint: string;
+      last_error: string | null;
+      latest_snapshot: string;
+    }>();
+    expect(afterReplacement?.encrypted_credentials).not.toBe(
+      beforeReplacement?.encrypted_credentials
+    );
+    expect(afterReplacement?.credential_fingerprint).not.toBe(
+      beforeReplacement?.credential_fingerprint
+    );
+    expect(afterReplacement?.encrypted_credentials).not.toContain("fresh-write-only-access");
+    expect(afterReplacement?.last_error).toBeNull();
+    expect(JSON.parse(afterReplacement!.latest_snapshot)).toMatchObject({
+      account_reference: replacementBody.account_reference,
+    });
+
     expect((await SELF.fetch(
       `https://push.example/v1/devices/${subscriberDeviceID}/accounts/${localAccountID}?consent_revision=2`,
       {
@@ -1195,6 +1321,95 @@ describe("self-hosted account monitoring API", () => {
     expect(await env.DB.prepare(
       "SELECT COUNT(*) AS count FROM remote_account_subscriptions"
     ).first()).toEqual({ count: 0 });
+  });
+
+  it("offers one logical account and hides all of its copies after import", async () => {
+    await registerDevice();
+    const firstUpload = accountRequestBody("chatgpt", 1);
+    firstUpload.display_name = "ieb";
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(firstUpload),
+    })).status).toBe(201);
+
+    const secondDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab98";
+    const secondDeviceSecret = "C".repeat(43);
+    const secondAPNSToken = "c".repeat(64);
+    const secondAccountID = "019f724a-3414-4d52-ae37-0c7024a1ab96";
+    await registerDevice(secondDeviceID, secondDeviceSecret, secondAPNSToken);
+    const secondUpload = accountRequestBody("chatgpt", 1);
+    secondUpload.display_name = "Natu Leppanen";
+    expect((await SELF.fetch(
+      `https://push.example/v1/devices/${secondDeviceID}/accounts/${secondAccountID}`,
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${secondDeviceSecret}` },
+        body: JSON.stringify(secondUpload),
+      },
+    )).status).toBe(201);
+
+    const fetchedAt = Math.floor(Date.now() / 1_000) - 30;
+    const accountReference = "D".repeat(43);
+    const snapshot = JSON.stringify({
+      provider_id: "chatgpt",
+      plan: "Plus",
+      fetched_at: fetchedAt,
+      windows: [],
+      available_reset_count: 0,
+      reset_credits: [],
+      account_reference: accountReference,
+    });
+    await env.DB.batch([
+      env.DB.prepare(
+        `UPDATE monitored_accounts SET latest_snapshot = ?, last_refresh_at = ?,
+           last_success_at = ?, last_error = NULL
+         WHERE device_id = ? AND account_id = ?`
+      ).bind(snapshot, fetchedAt, fetchedAt, deviceID, accountID),
+      env.DB.prepare(
+        `UPDATE monitored_accounts SET latest_snapshot = ?, last_refresh_at = ?,
+           last_success_at = ?, last_error = 'Provider returned HTTP 401.'
+         WHERE device_id = ? AND account_id = ?`
+      ).bind(snapshot, fetchedAt - 60, fetchedAt - 60, secondDeviceID, secondAccountID),
+    ]);
+
+    const subscriberDeviceID = "019f724a-3414-4d52-ae37-0c7024a1ab99";
+    const subscriberSecret = "E".repeat(43);
+    const subscriberToken = "e".repeat(64);
+    const localAccountID = "019f724a-3414-4d52-ae37-0c7024a1aba0";
+    await registerDevice(subscriberDeviceID, subscriberSecret, subscriberToken);
+    const remoteAccountsURL = `https://push.example/v1/devices/${subscriberDeviceID}/remote-accounts`;
+    const available = await SELF.fetch(remoteAccountsURL, {
+      headers: { authorization: `Bearer ${subscriberSecret}` },
+    });
+    const availableBody = await available.json<{
+      accounts: Array<{
+        remote_account_id: string;
+        account_reference: string;
+        display_name: string;
+        session_status: string;
+      }>;
+    }>();
+    expect(availableBody.accounts).toEqual([
+      expect.objectContaining({
+        account_reference: accountReference,
+        display_name: "ieb",
+        session_status: "active",
+      }),
+    ]);
+
+    expect((await SELF.fetch(remoteAccountsURL, {
+      method: "POST",
+      headers: { authorization: `Bearer ${subscriberSecret}` },
+      body: JSON.stringify({
+        remote_account_id: availableBody.accounts[0].remote_account_id,
+        local_account_id: localAccountID,
+      }),
+    })).status).toBe(201);
+    const afterImport = await SELF.fetch(remoteAccountsURL, {
+      headers: { authorization: `Bearer ${subscriberSecret}` },
+    });
+    expect(await afterImport.json()).toEqual({ accounts: [] });
   });
 
   it("does not overwrite refreshed Worker credentials or backoff on an idempotent upload", async () => {
@@ -2150,5 +2365,57 @@ describe("self-hosted account monitoring API", () => {
         history: [expect.objectContaining({ metric_id: "weekly", remaining_percent: 73 })],
       });
     }
+  });
+
+  it("deduplicates API credentials across display budgets and reapplies each budget", async () => {
+    const account = {
+      provider_id: "openai_api" as const,
+      workspace_id: "organization-123",
+      plan: null,
+    };
+    const credentials = {
+      access_token: "admin-api-key",
+      refresh_token: "",
+      id_token: "",
+      expires_at: null,
+      currency_code: "USD",
+    };
+    const firstFingerprint = await testing.credentialFingerprint(
+      env,
+      account,
+      { ...credentials, monthly_budget: 10 },
+    );
+    const secondFingerprint = await testing.credentialFingerprint(
+      env,
+      account,
+      { ...credentials, monthly_budget: 25 },
+    );
+    expect(firstFingerprint).toBe(secondFingerprint);
+
+    const snapshot = testing.snapshotForCredentials({
+      provider_id: "openai_api",
+      plan: null,
+      fetched_at: 2_000_000_000,
+      windows: [],
+      available_reset_count: 0,
+      reset_credits: [],
+      api_balance: {
+        title: "Monthly API budget",
+        currency_code: "USD",
+        spent: 2,
+        limit: 10,
+        remaining: 8,
+        period_start: 1_999_000_000,
+        period_end: 2_001_000_000,
+        access_expires_at: null,
+        is_unlimited: false,
+      },
+    }, { ...credentials, monthly_budget: 25 });
+    expect(snapshot.api_balance).toMatchObject({
+      title: "Monthly API budget",
+      spent: 2,
+      limit: 25,
+      remaining: 23,
+    });
   });
 });

@@ -5,8 +5,8 @@ const RATE_LIMIT_RETRY_FLOOR_SECONDS = 30 * 60;
 const CREDENTIAL_ERROR_RETRY_FLOOR_SECONDS = 6 * 60 * 60;
 const MAX_PROVIDER_RETRY_SECONDS = 8 * 60 * 60;
 
-export type ProviderID = "chatgpt" | "claude" | "kimi" | "github_copilot" | "zai" | "minimax"
-  | "synthetic" | "warp";
+export type ProviderID = "chatgpt" | "claude" | "grok" | "kimi" | "github_copilot" | "zai" | "minimax"
+  | "synthetic" | "warp" | "openai_api" | "anthropic_api";
 export type WindowKind = "fiveHour" | "weekly" | "additional";
 
 export type ProviderCredentials = {
@@ -14,6 +14,8 @@ export type ProviderCredentials = {
   refresh_token: string;
   id_token: string;
   expires_at: number | null;
+  monthly_budget?: number | null;
+  currency_code?: string | null;
 };
 
 export type ProviderAccount = {
@@ -47,11 +49,28 @@ export type ProviderSnapshot = {
   available_reset_count: number;
   reset_credits: ProviderResetCredit[];
   reset_credits_authoritative?: boolean;
+  api_balance?: ProviderAPIBalance;
+  // An opaque HMAC added by the Worker after provider-side identity verification.
+  // Raw provider user IDs never leave the refresh call or enter D1.
+  account_reference?: string;
+};
+
+export type ProviderAPIBalance = {
+  title: string;
+  currency_code: string;
+  spent: number;
+  limit: number | null;
+  remaining: number | null;
+  period_start: number | null;
+  period_end: number | null;
+  access_expires_at: number | null;
+  is_unlimited: boolean;
 };
 
 export type ProviderFetchResult = {
   credentials: ProviderCredentials;
   snapshot: ProviderSnapshot;
+  account_identity?: string;
 };
 
 export class ProviderFetchError extends Error {
@@ -88,13 +107,293 @@ export async function fetchProviderUsage(
   switch (account.provider_id) {
     case "chatgpt": return fetchChatGPT(account, originalCredentials, now);
     case "claude": return fetchClaude(account, originalCredentials, now);
+    case "grok": return fetchGrok(account, originalCredentials, now);
     case "kimi": return fetchKimi(account, originalCredentials, now);
     case "github_copilot": return fetchCopilot(account, originalCredentials, now);
     case "zai": return fetchZAI(account, originalCredentials, now);
     case "minimax": return fetchMiniMax(account, originalCredentials, now);
     case "synthetic": return fetchSynthetic(account, originalCredentials, now);
     case "warp": return fetchWarp(account, originalCredentials, now);
+    case "openai_api": return fetchOpenAIAPI(account, originalCredentials, now);
+    case "anthropic_api": return fetchAnthropicAPI(account, originalCredentials, now);
   }
+}
+
+async function fetchGrok(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const refreshed = await refreshGrok(credentials, now);
+  const value = await getJSON(
+    "https://cli-chat-proxy.grok.com/v1/billing?format=credits",
+    {
+      authorization: `Bearer ${refreshed.access_token}`,
+      "x-xai-token-auth": "xai-grok-cli",
+      "x-userid": account.workspace_id,
+      "x-grok-client-version": "1.0.0",
+      "x-grok-client-mode": "headless",
+      accept: "application/json",
+      "user-agent": USER_AGENT,
+    },
+  );
+  const parsed = grokBilling(value, now);
+  return {
+    credentials: refreshed,
+    snapshot: snapshot(
+      account.provider_id,
+      parsed.plan ?? grokTierPlan(refreshed.access_token) ?? account.plan,
+      now,
+      [parsed.window],
+      0,
+      [],
+    ),
+  };
+}
+
+async function refreshGrok(
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderCredentials> {
+  const expiration = credentials.expires_at ?? jwtExpiration(credentials.access_token);
+  if (expiration !== null && expiration - now >= 5 * 60) return credentials;
+  if (!credentials.refresh_token) {
+    throw new ProviderFetchError("Grok refresh token is missing.", 401);
+  }
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: credentials.refresh_token,
+    client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+  });
+  const accessClaims = jwtClaims(credentials.access_token);
+  const principalType = text(accessClaims?.principal_type);
+  const principalID = text(accessClaims?.principal_id);
+  if (principalType) body.set("principal_type", principalType);
+  if (principalID) body.set("principal_id", principalID);
+
+  const value = await requestJSON("https://auth.x.ai/oauth2/token", {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+      "x-grok-client-version": "1.0.0",
+      "user-agent": USER_AGENT,
+    },
+    body: body.toString(),
+  });
+  const root = requiredRecord(value, "Grok returned an unreadable token response.");
+  const accessToken = requiredText(root.access_token, "Grok did not return an access token.");
+  const expiresIn = number(root.expires_in);
+  return {
+    ...credentials,
+    access_token: accessToken,
+    refresh_token: text(root.refresh_token) ?? credentials.refresh_token,
+    id_token: text(root.id_token) ?? credentials.id_token,
+    expires_at: expiresIn !== null ? now + expiresIn : jwtExpiration(accessToken),
+  };
+}
+
+function grokBilling(value: unknown, now: number): {
+  window: ProviderUsageWindow;
+  plan: string | null;
+} {
+  const root = requiredRecord(value, "Grok returned unreadable billing data.");
+  const config = asRecord(root.config);
+  if (!config) throw new ProviderFetchError("Grok returned no resettable quota.");
+  const limit = centValue(config.monthlyLimit ?? config.monthly_limit);
+  const used = centValue(config.used);
+  const usedPercent = number(config.creditUsagePercent ?? config.credit_usage_percent)
+    ?? (limit !== null && limit > 0 && used !== null ? used / limit * 100 : null);
+  if (usedPercent === null) throw new ProviderFetchError("Grok returned unreadable billing data.");
+
+  const period = asRecord(config.currentPeriod ?? config.current_period);
+  const start = timestamp(period?.start ?? config.billingPeriodStart ?? config.billing_period_start);
+  const end = timestamp(period?.end ?? config.billingPeriodEnd ?? config.billing_period_end);
+  if (end === null || end <= now) throw new ProviderFetchError("Grok returned no resettable quota.");
+  const duration = start !== null ? Math.max(1, Math.round((end - start) / 60)) : null;
+  const periodType = text(period?.type)?.toUpperCase();
+  const periodCode = integer(period?.type);
+  const weekly = periodType?.includes("WEEKLY") === true || periodCode === 1
+    || (duration !== null && duration >= 9_000 && duration <= 11_000);
+  const monthly = periodType?.includes("MONTHLY") === true || periodCode === 2
+    || (duration !== null && duration >= 38_000 && duration <= 46_000);
+  const title = weekly ? "Weekly limit" : monthly ? "Monthly limit" : "Coding limit";
+  const id = weekly ? "grok:weekly" : monthly ? "grok:monthly" : "grok:coding";
+  const plan = firstText(root, ["subscriptionTier", "subscription_tier", "plan"]);
+  return {
+    window: window(
+      0,
+      id,
+      title,
+      weekly ? "weekly" : "additional",
+      weekly ? 10_080 : duration,
+      100 - clamp(usedPercent),
+      end,
+    ),
+    plan: plan ? displayGrokPlan(plan) : null,
+  };
+}
+
+function centValue(value: unknown): number | null {
+  const root = asRecord(value);
+  return root ? number(root.val) : number(value);
+}
+
+function grokTierPlan(token: string): string | null {
+  const claims = jwtClaims(token);
+  const named = text(claims?.subscription_tier ?? claims?.subscriptionTier ?? claims?.plan);
+  if (named) return displayGrokPlan(named);
+  switch (integer(claims?.tier)) {
+    case 0: return "Free";
+    case 1: return "SuperGrok";
+    case 2: return "X Basic";
+    case 3: return "X Premium";
+    case 4: return "X Premium+";
+    case 5: return "SuperGrok Heavy";
+    case 6: return "SuperGrok Lite";
+    case 7: return "SuperGrok+";
+    default: return null;
+  }
+}
+
+function displayGrokPlan(value: string): string {
+  const words = value.trim().replace(/[_-]+/g, " ").split(/\s+/);
+  return words.map((word) => {
+    switch (word.toLowerCase()) {
+      case "supergrok": return "SuperGrok";
+      case "supergrokpro": return "SuperGrok Heavy";
+      case "supergroklite": return "SuperGrok Lite";
+      case "supergrokplus": return "SuperGrok+";
+      default: return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    }
+  }).join(" ");
+}
+
+async function fetchOpenAIAPI(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const period = utcMonthPeriod(now);
+  const parameters = new URLSearchParams({
+    start_time: String(period.start),
+    end_time: String(now + 1),
+    bucket_width: "1d",
+    limit: "31",
+  });
+  const value = await getJSON(
+    `https://api.openai.com/v1/organization/costs?${parameters.toString()}`,
+    {
+      authorization: `Bearer ${credentials.access_token}`,
+      "user-agent": USER_AGENT,
+    },
+  );
+  const balance = openAIAPIBalance(value, credentials.monthly_budget ?? null, period);
+  const result = snapshot(account.provider_id, account.plan, now, [], 0, []);
+  result.api_balance = balance;
+  return { credentials, snapshot: result };
+}
+
+async function fetchAnthropicAPI(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<ProviderFetchResult> {
+  const period = utcMonthPeriod(now);
+  const parameters = new URLSearchParams({
+    starting_at: new Date(period.start * 1_000).toISOString(),
+    ending_at: new Date(now * 1_000).toISOString(),
+    bucket_width: "1d",
+    limit: "31",
+  });
+  const value = await getJSON(
+    `https://api.anthropic.com/v1/organizations/cost_report?${parameters.toString()}`,
+    {
+      "x-api-key": credentials.access_token,
+      "anthropic-version": "2023-06-01",
+      "user-agent": USER_AGENT,
+    },
+  );
+  const balance = anthropicAPIBalance(value, credentials.monthly_budget ?? null, period);
+  const result = snapshot(account.provider_id, account.plan, now, [], 0, []);
+  result.api_balance = balance;
+  return { credentials, snapshot: result };
+}
+
+type BillingPeriod = { start: number; end: number };
+
+function utcMonthPeriod(now: number): BillingPeriod {
+  const date = new Date(now * 1_000);
+  const start = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1) / 1_000;
+  const end = Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1) / 1_000;
+  return { start, end };
+}
+
+function openAIAPIBalance(
+  value: unknown,
+  rawBudget: number | null,
+  period: BillingPeriod,
+): ProviderAPIBalance {
+  const root = requiredRecord(value, "OpenAI API returned unreadable billing data.");
+  const buckets = asRecords(root.data);
+  if (!buckets) throw new ProviderFetchError("OpenAI API returned unreadable billing data.");
+  let spent = 0;
+  let currency = "USD";
+  for (const bucket of buckets) {
+    const results = asRecords(bucket.results);
+    if (!results) continue;
+    for (const result of results) {
+      const amount = asRecord(result.amount);
+      const amountValue = number(amount?.value);
+      if (amountValue !== null) spent += amountValue;
+      currency = text(amount?.currency)?.toUpperCase() ?? currency;
+    }
+  }
+  return apiBalance(spent, rawBudget, currency, period);
+}
+
+function anthropicAPIBalance(
+  value: unknown,
+  rawBudget: number | null,
+  period: BillingPeriod,
+): ProviderAPIBalance {
+  const root = requiredRecord(value, "Anthropic API returned unreadable billing data.");
+  const buckets = asRecords(root.data);
+  if (!buckets) throw new ProviderFetchError("Anthropic API returned unreadable billing data.");
+  let cents = 0;
+  let currency = "USD";
+  for (const bucket of buckets) {
+    const results = asRecords(bucket.results);
+    if (!results) continue;
+    for (const result of results) {
+      const amount = asRecord(result.amount);
+      const amountValue = number(amount?.value ?? result.amount);
+      if (amountValue !== null) cents += amountValue;
+      currency = text(amount?.currency ?? result.currency)?.toUpperCase() ?? currency;
+    }
+  }
+  return apiBalance(cents / 100, rawBudget, currency, period);
+}
+
+function apiBalance(
+  spent: number,
+  rawBudget: number | null,
+  currency: string,
+  period: BillingPeriod,
+): ProviderAPIBalance {
+  const limit = rawBudget !== null && Number.isFinite(rawBudget) && rawBudget > 0
+    ? rawBudget : null;
+  return {
+    title: limit === null ? "API spend this month" : "Monthly API budget",
+    currency_code: currency,
+    spent: Math.max(0, spent),
+    limit,
+    remaining: limit === null ? null : Math.max(0, limit - spent),
+    period_start: period.start,
+    period_end: period.end,
+    access_expires_at: null,
+    is_unlimited: false,
+  };
 }
 
 async function fetchChatGPT(
@@ -102,7 +401,8 @@ async function fetchChatGPT(
   credentials: ProviderCredentials,
   now: number,
 ): Promise<ProviderFetchResult> {
-  const refreshed = await refreshChatGPT(credentials, now);
+  const verified = await verifyChatGPTIdentity(account, credentials, now);
+  const refreshed = verified.credentials;
   const headers = {
     authorization: `Bearer ${refreshed.access_token}`,
     "chatgpt-account-id": account.workspace_id,
@@ -173,6 +473,7 @@ async function fetchChatGPT(
   const plan = preferredPlan(reportedPlan, account.plan);
   return {
     credentials: refreshed,
+    account_identity: verified.identity,
     snapshot: snapshot(
       account.provider_id,
       plan,
@@ -185,6 +486,62 @@ async function fetchChatGPT(
   };
 }
 
+async function verifyChatGPTIdentity(
+  account: ProviderAccount,
+  credentials: ProviderCredentials,
+  now: number,
+): Promise<{ credentials: ProviderCredentials; identity: string }> {
+  const refreshed = await refreshChatGPT(credentials, now);
+  const headers = {
+    authorization: `Bearer ${refreshed.access_token}`,
+    "chatgpt-account-id": account.workspace_id,
+    "user-agent": USER_AGENT,
+  };
+  const tokenIdentity = chatGPTTokenIdentity(refreshed.id_token)
+    ?? chatGPTTokenIdentity(refreshed.access_token);
+  let profileIdentity: string | null = null;
+  try {
+    profileIdentity = chatGPTProfileIdentity(
+      await getJSON("https://chatgpt.com/backend-api/me", headers)
+    );
+  } catch (error) {
+    // Authentication failures are authoritative session checks. A temporary or unsupported
+    // profile endpoint must not interrupt quota history when the signed token still supplies
+    // the same stable user identity.
+    if (error instanceof ProviderFetchError && (error.status === 401 || error.status === 403)) {
+      throw error;
+    }
+    if (!tokenIdentity) throw error;
+  }
+  const identity = profileIdentity ?? tokenIdentity;
+  if (!identity) {
+    throw new ProviderFetchError("ChatGPT returned no stable account identity.");
+  }
+  return { credentials: refreshed, identity };
+}
+
+function chatGPTProfileIdentity(value: unknown): string | null {
+  const root = asRecord(value);
+  if (!root) return null;
+  const user = asRecord(root.user);
+  const account = asRecord(root.account);
+  const id = text(root.id)
+    ?? text(root.user_id)
+    ?? text(user?.id)
+    ?? text(user?.user_id)
+    ?? text(account?.user_id);
+  return id ? `user:${id}` : null;
+}
+
+function chatGPTTokenIdentity(token: string): string | null {
+  const claims = jwtClaims(token);
+  const auth = asRecord(claims?.["https://api.openai.com/auth"]);
+  const id = text(auth?.chatgpt_user_id)
+    ?? text(auth?.user_id)
+    ?? text(claims?.sub);
+  return id ? `user:${id}` : null;
+}
+
 async function refreshChatGPT(credentials: ProviderCredentials, now: number): Promise<ProviderCredentials> {
   const expiration = credentials.expires_at ?? jwtExpiration(credentials.access_token);
   if (expiration !== null && expiration - now >= 5 * 60) return credentials;
@@ -194,11 +551,19 @@ async function refreshChatGPT(credentials: ProviderCredentials, now: number): Pr
     grant_type: "refresh_token",
     refresh_token: credentials.refresh_token,
   });
-  const value = await requestJSON("https://auth.openai.com/oauth/token", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: body.toString(),
-  });
+  let value: unknown;
+  try {
+    value = await requestJSON("https://auth.openai.com/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+  } catch (error) {
+    if (error instanceof ProviderFetchError && [400, 401, 403].includes(error.status)) {
+      throw new ProviderFetchError("ChatGPT authorization expired.", 401);
+    }
+    throw error;
+  }
   const root = requiredRecord(value, "ChatGPT returned an unreadable token response.");
   const accessToken = requiredText(root.access_token, "ChatGPT did not return an access token.");
   const idToken = text(root.id_token) ?? credentials.id_token;
@@ -951,12 +1316,16 @@ function secondsFromNow(value: unknown): number | null {
 }
 
 function jwtExpiration(token: string): number | null {
+  return number(jwtClaims(token)?.exp);
+}
+
+function jwtClaims(token: string): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length < 2) return null;
   try {
     const value = parts[1].replace(/-/g, "+").replace(/_/g, "/");
     const padded = value + "=".repeat((4 - value.length % 4) % 4);
-    return number(asRecord(JSON.parse(atob(padded)) as unknown)?.exp);
+    return asRecord(JSON.parse(atob(padded)) as unknown);
   } catch {
     return null;
   }
@@ -1043,14 +1412,18 @@ function clamp(value: number): number {
 }
 
 export const providerTesting = {
+  anthropicAPIBalance,
   chatGPTWindow,
   fallbackResetCreditID,
+  grokBilling,
+  grokTierPlan,
   jwtExpiration,
   parseRetryAfterSeconds,
   providerRetryDelaySeconds,
   quotaFromUnknown,
   requestJSON,
   miniMaxWindow,
+  openAIAPIBalance,
   syntheticWindows,
   warpWindow,
   zaiWindow,

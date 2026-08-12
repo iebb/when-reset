@@ -219,12 +219,217 @@ final class AdditionalProvidersTests: XCTestCase {
         XCTAssertThrowsError(try CompatibleAPIProvider.normalizedEndpoint("https://quota.example/usage?target=x"))
     }
 
+    func testOpenAIOrganizationCostsBuildBudgetBalance() throws {
+        let data = Data(#"""
+        {
+          "object": "page",
+          "data": [
+            {"results": [{"amount": {"value": 1.25, "currency": "usd"}}]},
+            {"results": [{"amount": {"value": 0.75, "currency": "usd"}}]}
+          ]
+        }
+        """#.utf8)
+
+        let snapshot = try OpenAIAPIProvider.parseUsage(
+            account: makeAccount(.openAIAPI, name: "OpenAI API organization"),
+            data: data,
+            monthlyBudget: 10,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.apiBalance?.spent, 2)
+        XCTAssertEqual(snapshot.apiBalance?.remaining, 8)
+        XCTAssertEqual(snapshot.apiBalance?.limit, 10)
+        XCTAssertEqual(snapshot.apiBalance?.currencyCode, "USD")
+        XCTAssertTrue(snapshot.usageWindows.isEmpty)
+    }
+
+    func testAnthropicOrganizationCostsConvertCentsToDollars() throws {
+        let data = Data(#"""
+        {
+          "data": [
+            {"results": [
+              {"amount": "123", "currency": "USD"},
+              {"amount": {"value": "77", "currency": "USD"}}
+            ]}
+          ]
+        }
+        """#.utf8)
+
+        let snapshot = try AnthropicAPIProvider.parseUsage(
+            account: makeAccount(.anthropicAPI, name: "Anthropic API organization"),
+            data: data,
+            monthlyBudget: nil,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.apiBalance?.spent ?? -1, 2, accuracy: 0.001)
+        XCTAssertNil(snapshot.apiBalance?.remaining)
+        XCTAssertEqual(snapshot.apiBalance?.title, "API spend this month")
+    }
+
+    func testNewAPICompatibleBillingBuildsActualKeyBalance() throws {
+        let subscription = Data(#"""
+        {"hard_limit_usd": 50, "access_until": 1893456000}
+        """#.utf8)
+        let usage = Data(#"{"total_usage": 1250}"#.utf8)
+
+        let snapshot = try NewAPIProvider.parseUsage(
+            account: makeAccount(.newAPI, name: "My gateway"),
+            subscriptionData: subscription,
+            usageData: usage,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.apiBalance?.spent ?? -1, 12.5, accuracy: 0.001)
+        XCTAssertEqual(snapshot.apiBalance?.remaining ?? -1, 37.5, accuracy: 0.001)
+        XCTAssertEqual(snapshot.apiBalance?.title, "API key balance")
+        XCTAssertNotNil(snapshot.apiBalance?.accessExpiresAt)
+    }
+
+    func testNewAPIBaseURLRequiresHTTPSExceptLoopback() throws {
+        XCTAssertEqual(
+            try NewAPIProvider.normalizedBaseURL("https://api.example.com/v1/").absoluteString,
+            "https://api.example.com/v1"
+        )
+        XCTAssertEqual(
+            try NewAPIProvider.normalizedBaseURL("http://localhost:3000").port,
+            3000
+        )
+        XCTAssertThrowsError(try NewAPIProvider.normalizedBaseURL("http://api.example.com"))
+        XCTAssertThrowsError(try NewAPIProvider.normalizedBaseURL("https://key@api.example.com"))
+    }
+
+    func testGrokParsesCurrentWeeklyCreditPeriod() throws {
+        let data = Data(#"""
+        {
+          "subscriptionTier": "supergrok_heavy",
+          "config": {
+            "creditUsagePercent": 42.5,
+            "currentPeriod": {
+              "type": "USAGE_PERIOD_TYPE_WEEKLY",
+              "start": "2030-01-01T00:00:00Z",
+              "end": "2030-01-08T00:00:00Z"
+            }
+          }
+        }
+        """#.utf8)
+
+        let snapshot = try GrokProvider.parseUsage(
+            account: makeAccount(.grok, name: "Grok account"),
+            data: data,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.plan, "SuperGrok Heavy")
+        XCTAssertEqual(snapshot.primary?.metricID, "grok:weekly")
+        XCTAssertEqual(snapshot.primary?.windowMinutes, 10_080)
+        XCTAssertEqual(snapshot.primary?.kind, .weekly)
+        XCTAssertEqual(snapshot.primary?.usedPercent ?? -1, 42.5, accuracy: 0.001)
+        XCTAssertEqual(snapshot.primary?.remainingPercent ?? -1, 57.5, accuracy: 0.001)
+    }
+
+    func testGrokFallsBackToLegacyMonthlyBillingShape() throws {
+        let data = Data(#"""
+        {
+          "config": {
+            "monthlyLimit": { "val": 2000 },
+            "used": { "val": 500 },
+            "billingPeriodStart": "2030-02-01T00:00:00Z",
+            "billingPeriodEnd": "2030-03-01T00:00:00Z"
+          }
+        }
+        """#.utf8)
+
+        let snapshot = try GrokProvider.parseUsage(
+            account: makeAccount(.grok, name: "Grok account"),
+            data: data,
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.primary?.metricID, "grok:monthly")
+        XCTAssertEqual(snapshot.primary?.kind, .additional)
+        XCTAssertEqual(snapshot.primary?.remainingPercent ?? -1, 75, accuracy: 0.001)
+    }
+
+    func testGrokIdentityUsesOAuthSubjectAndTierWithoutTreatingTokenExpiryAsPlanExpiry() throws {
+        let idToken = jwt(["sub": "user-123", "email": "person@example.com", "name": "Grok User"])
+        let accessToken = jwt(["sub": "user-123", "tier": 5, "exp": 2_000_000_000])
+        let identity = try GrokProvider.linkedIdentity(credentials: AccountCredentials(
+            accessToken: accessToken,
+            refreshToken: "refresh-token",
+            idToken: idToken,
+            expiresAt: Date(timeIntervalSince1970: 2_000_000_000)
+        ))
+
+        XCTAssertEqual(identity.workspaceID, "user-123")
+        XCTAssertEqual(identity.displayName, "Grok User")
+        XCTAssertEqual(identity.email, "person@example.com")
+        XCTAssertEqual(identity.plan, "SuperGrok Heavy")
+        XCTAssertNil(identity.planExpiresAt)
+    }
+
+    func testGrokEnrichesIdentityFromOfficialUserProfile() throws {
+        let idToken = jwt(["sub": "token-user", "email": "old@example.com"])
+        let credentials = AccountCredentials(
+            accessToken: jwt(["sub": "token-user", "tier": 1]),
+            refreshToken: "refresh-token",
+            idToken: idToken,
+            expiresAt: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+        let data = Data(#"""
+        {
+          "userId": "live-user",
+          "email": "person@example.com",
+          "firstName": "Grok",
+          "lastName": "Builder",
+          "subscriptionTier": "supergrok_heavy"
+        }
+        """#.utf8)
+
+        let identity = try GrokProvider.enrichedIdentity(credentials: credentials, data: data)
+
+        XCTAssertEqual(identity.workspaceID, "live-user")
+        XCTAssertEqual(identity.displayName, "Grok Builder")
+        XCTAssertEqual(identity.profileName, "Grok Builder")
+        XCTAssertEqual(identity.email, "person@example.com")
+        XCTAssertEqual(identity.plan, "SuperGrok Heavy")
+        XCTAssertNil(identity.planExpiresAt)
+    }
+
+    func testGrokDeviceLinkOnlyAcceptsOfficialHTTPSConfirmationHost() throws {
+        let valid = Data(#"""
+        {
+          "device_code": "device-test",
+          "user_code": "ABCD-EFGH",
+          "verification_uri_complete": "https://accounts.x.ai/oauth2/device?user_code=ABCD-EFGH",
+          "expires_in": 1800,
+          "interval": 5
+        }
+        """#.utf8)
+        XCTAssertEqual(try GrokProvider.deviceLink(from: valid, now: now).userCode, "ABCD-EFGH")
+
+        let phishing = Data(#"""
+        {
+          "device_code": "device-test",
+          "user_code": "ABCD-EFGH",
+          "verification_uri": "https://accounts.x.ai.attacker.example/device",
+          "expires_in": 1800
+        }
+        """#.utf8)
+        XCTAssertThrowsError(try GrokProvider.deviceLink(from: phishing, now: now))
+    }
+
     func testSensitiveAndUserSelectedProvidersRemainOnDevice() {
+        XCTAssertTrue(ProviderID.grok.supportsOffDeviceMonitoring)
         XCTAssertTrue(ProviderID.synthetic.supportsOffDeviceMonitoring)
         XCTAssertTrue(ProviderID.warp.supportsOffDeviceMonitoring)
         XCTAssertFalse(ProviderID.ollamaCloud.supportsOffDeviceMonitoring)
         XCTAssertFalse(ProviderID.antigravity.supportsOffDeviceMonitoring)
         XCTAssertFalse(ProviderID.compatibleAPI.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.openAIAPI.supportsOffDeviceMonitoring)
+        XCTAssertTrue(ProviderID.anthropicAPI.supportsOffDeviceMonitoring)
+        XCTAssertFalse(ProviderID.newAPI.supportsOffDeviceMonitoring)
     }
 
     func testOlderCredentialPayloadStillDecodes() throws {
@@ -236,6 +441,8 @@ final class AdditionalProvidersTests: XCTestCase {
         XCTAssertNil(credentials.accountLabel)
         XCTAssertNil(credentials.oauthClientID)
         XCTAssertNil(credentials.oauthClientSecret)
+        XCTAssertNil(credentials.monthlyBudget)
+        XCTAssertNil(credentials.currencyCode)
     }
 
     private func makeAccount(_ provider: ProviderID, name: String) -> MonitoredAccount {
@@ -247,5 +454,17 @@ final class AdditionalProvidersTests: XCTestCase {
             plan: nil,
             addedAt: now
         )
+    }
+
+    private func jwt(_ claims: [String: Any]) -> String {
+        func segment(_ value: Any) -> String {
+            let data = try! JSONSerialization.data(withJSONObject: value)
+            return data.base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+                .replacingOccurrences(of: "=", with: "")
+        }
+        let header = segment(["alg": "none"])
+        return "\(header).\(segment(claims)).signature"
     }
 }

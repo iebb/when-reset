@@ -13,6 +13,25 @@ enum SharedSnapshotStore {
         guard let data = try? JSONEncoder().encode(snapshots) else { return }
         UserDefaults(suiteName: suiteName)?.set(data, forKey: snapshotsKey)
     }
+
+    static func loadHistoryPoints(now: Date = .now) -> [UsageHistoryPoint] {
+        let fileURL = UsageHistoryStore.defaultFileURL()
+        guard let data = try? Data(contentsOf: fileURL),
+              let archive = try? JSONDecoder().decode(UsageHistoryArchive.self, from: data),
+              archive.schemaVersion <= UsageHistoryArchive.currentSchemaVersion else {
+            return []
+        }
+        let cutoff = now.addingTimeInterval(-UsageHistoryStore.retentionInterval)
+        return archive.points
+            .filter { $0.recordedAt >= cutoff && $0.recordedAt <= now.addingTimeInterval(5 * 60) }
+            .sorted {
+                if $0.recordedAt != $1.recordedAt { return $0.recordedAt < $1.recordedAt }
+                if $0.accountID != $1.accountID {
+                    return $0.accountID.uuidString < $1.accountID.uuidString
+                }
+                return $0.metricID < $1.metricID
+            }
+    }
 }
 
 enum UsageRefreshSource: String, Codable, Hashable, Sendable {
@@ -43,6 +62,61 @@ struct UsageHistoryPoint: Codable, Hashable, Identifiable, Sendable {
 
     var id: String {
         "\(accountID.uuidString):\(metricID):\(Int64(recordedAt.timeIntervalSince1970 * 1_000))"
+    }
+}
+
+struct UsageHistoryLineChartPoint: Identifiable, Equatable, Sendable {
+    let id: String
+    let point: UsageHistoryPoint
+    let segmentID: String
+    let isGapConnector: Bool
+}
+
+enum UsageHistoryLineSegmentation {
+    static let dashedGapThreshold: TimeInterval = 60 * 60
+
+    static func chartPoints(
+        from points: [UsageHistoryPoint],
+        seriesID: String
+    ) -> [UsageHistoryLineChartPoint] {
+        let sorted = points.sorted { $0.recordedAt < $1.recordedAt }
+        guard let first = sorted.first else { return [] }
+
+        var solidSegment = 0
+        var result = [UsageHistoryLineChartPoint(
+            id: "\(seriesID):solid:0:0",
+            point: first,
+            segmentID: "\(seriesID):solid:0",
+            isGapConnector: false
+        )]
+
+        for index in sorted.indices.dropFirst() {
+            let previous = sorted[index - 1]
+            let current = sorted[index]
+            if current.recordedAt.timeIntervalSince(previous.recordedAt) > dashedGapThreshold {
+                let gapSegmentID = "\(seriesID):gap:\(index)"
+                result.append(UsageHistoryLineChartPoint(
+                    id: "\(gapSegmentID):lower",
+                    point: previous,
+                    segmentID: gapSegmentID,
+                    isGapConnector: true
+                ))
+                result.append(UsageHistoryLineChartPoint(
+                    id: "\(gapSegmentID):upper",
+                    point: current,
+                    segmentID: gapSegmentID,
+                    isGapConnector: true
+                ))
+                solidSegment += 1
+            }
+            result.append(UsageHistoryLineChartPoint(
+                id: "\(seriesID):solid:\(solidSegment):\(index)",
+                point: current,
+                segmentID: "\(seriesID):solid:\(solidSegment)",
+                isGapConnector: false
+            ))
+        }
+        return result
     }
 }
 
@@ -336,6 +410,37 @@ actor UsageHistoryStore {
         archive.points.removeAll { $0.accountID == accountID }
         archive.detectorStates.removeValue(forKey: accountID)
         archive.pendingNotifications.removeAll { $0.accountID == accountID }
+        prune(&archive, now: now)
+        try persist(archive)
+        cachedArchive = archive
+        return archive.points
+    }
+
+    func mergeAccount(sourceID: UUID, into targetID: UUID,
+                      now: Date = .now) throws -> [UsageHistoryPoint] {
+        guard sourceID != targetID else { return try loadedArchive().points }
+        var archive = try loadedArchive()
+        archive.points = archive.points.map { point in
+            guard point.accountID == sourceID else { return point }
+            var merged = point
+            merged.accountID = targetID
+            return merged
+        }
+        archive.points = Array(Dictionary(
+            archive.points.map { ($0.id, $0) },
+            uniquingKeysWith: { existing, candidate in
+                candidate.source == .server ? candidate : existing
+            }
+        ).values)
+        archive.points.sort {
+            if $0.recordedAt != $1.recordedAt { return $0.recordedAt < $1.recordedAt }
+            if $0.accountID != $1.accountID {
+                return $0.accountID.uuidString < $1.accountID.uuidString
+            }
+            return $0.metricID < $1.metricID
+        }
+        archive.detectorStates.removeValue(forKey: sourceID)
+        archive.pendingNotifications.removeAll { $0.accountID == sourceID }
         prune(&archive, now: now)
         try persist(archive)
         cachedArchive = archive

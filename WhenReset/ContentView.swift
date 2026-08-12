@@ -442,8 +442,13 @@ private struct AccountFailureView: View {
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
-                if failure.requiresRelink, !account.isRemoteOnly {
-                    Button("Sign in again", systemImage: "arrow.triangle.2.circlepath", action: relink)
+                if failure.requiresRelink,
+                   !account.isRemoteOnly || account.providerID == .chatGPT {
+                    Button(
+                        account.isRemoteOnly ? "Update Worker sign-in" : "Sign in again",
+                        systemImage: "arrow.triangle.2.circlepath",
+                        action: relink
+                    )
                         .buttonStyle(.borderedProminent)
                 } else {
                     Button("Try again", systemImage: "arrow.clockwise", action: retry)
@@ -564,6 +569,24 @@ struct AccountSettingsView: View {
                     value: currentAccount.planExpiresAt?.formatted(date: .abbreviated, time: .shortened)
                         ?? "Not provided"
                 )
+                if let balance = store.snapshots[account.id]?.apiBalance {
+                    AccountInformationRow(
+                        title: balance.isUnlimited || balance.remaining != nil
+                            ? "API balance" : "API spend this month",
+                        value: balance.isUnlimited
+                            ? "Unlimited"
+                            : APIBalanceRow.formatted(
+                                balance.remaining ?? balance.spent,
+                                currencyCode: balance.currencyCode
+                            )
+                    )
+                    if let accessExpiresAt = balance.accessExpiresAt {
+                        AccountInformationRow(
+                            title: "API key expiry",
+                            value: accessExpiresAt.formatted(date: .abbreviated, time: .shortened)
+                        )
+                    }
+                }
                 if currentAccount.providerID == .claude, let trialExpiresAt = currentAccount.trialExpiresAt {
                     AccountInformationRow(
                         title: "Trial expiry",
@@ -585,14 +608,16 @@ struct AccountSettingsView: View {
                 }
             }
             if !account.isDemo {
-                Section {
-                    Toggle("Notify About Detected Resets", isOn: $settings.notifyAboutResets)
-                    Toggle("Notify at Scheduled Reset Time",
-                           isOn: $settings.notifyAtScheduledReset)
-                } header: {
-                    Text("Notifications")
-                } footer: {
-                    Text("Scheduled-time and unexpected reset alerts also require their global settings.")
+                if !(store.snapshots[account.id]?.usageWindows.isEmpty ?? false) {
+                    Section {
+                        Toggle("Notify About Detected Resets", isOn: $settings.notifyAboutResets)
+                        Toggle("Notify at Scheduled Reset Time",
+                               isOn: $settings.notifyAtScheduledReset)
+                    } header: {
+                        Text("Notifications")
+                    } footer: {
+                        Text("Scheduled-time and unexpected reset alerts also require their global settings.")
+                    }
                 }
                 Section {
                     if currentAccount.isRemoteOnly {
@@ -610,7 +635,7 @@ struct AccountSettingsView: View {
                     if currentAccount.isRemoteOnly {
                         Text("Server-side refreshes and silent pushes are the only update source. Local provider refresh and sign-in are unavailable.")
                     } else if !currentAccount.providerID.supportsOffDeviceMonitoring {
-                        Text("GitHub Copilot credentials stay on this device and cannot be uploaded for off-device monitoring.")
+                        Text("This provider’s credentials stay on this device and cannot be uploaded for off-device monitoring.")
                     } else if store.pushServerSettings.mode == .disabled {
                         Text("Configure a self-hosted server in Settings first.")
                     } else {
@@ -656,7 +681,7 @@ struct AccountSettingsView: View {
                     }
                 }
             }
-            if let snapshot = store.snapshots[account.id] {
+            if let snapshot = store.snapshots[account.id], !snapshot.usageWindows.isEmpty {
                 ForEach(snapshot.usageWindows, id: \.metricID) { window in
                     Section {
                         Toggle("Show in Usage and widgets", isOn: metricBinding(window))
@@ -680,7 +705,7 @@ struct AccountSettingsView: View {
                         metricLiveActivityFooter(window)
                     }
                 }
-            } else {
+            } else if store.snapshots[account.id]?.apiBalance == nil {
                 Section("Quotas") {
                     Label("Refresh this account to configure its quotas", systemImage: "arrow.clockwise")
                         .foregroundStyle(.secondary)
@@ -715,8 +740,12 @@ struct AccountSettingsView: View {
                     title: "Added",
                     value: currentAccount.addedAt.formatted(date: .abbreviated, time: .shortened)
                 )
-                if !account.isDemo, !currentAccount.isRemoteOnly {
-                    Button("Sign in again", systemImage: "arrow.triangle.2.circlepath") {
+                if !account.isDemo,
+                   !currentAccount.isRemoteOnly || currentAccount.providerID == .chatGPT {
+                    Button(
+                        currentAccount.isRemoteOnly ? "Update Worker sign-in" : "Sign in again",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    ) {
                         showingRelink = true
                     }
                 }
@@ -801,10 +830,12 @@ struct AccountSettingsView: View {
 
     private var credentialDisclosure: String {
         switch currentAccount.providerID {
-        case .chatGPT, .claude, .kimi:
+        case .chatGPT, .claude, .grok, .kimi:
             "this account’s access token, refresh token, and ID token when available"
         case .zai, .miniMax, .synthetic, .warp:
             "this account’s API key"
+        case .openAIAPI, .anthropicAPI:
+            "this account’s organization Admin API key and optional monthly budget"
         case .githubCopilot:
             "this account’s credentials"
         case .ollamaCloud:
@@ -812,6 +843,8 @@ struct AccountSettingsView: View {
         case .antigravity:
             "this account’s Google OAuth tokens"
         case .compatibleAPI:
+            "this account’s endpoint URL and API key"
+        case .newAPI:
             "this account’s endpoint URL and API key"
         }
     }
@@ -1013,21 +1046,8 @@ private struct UsageHistorySeries: Identifiable {
         return result
     }
 
-    var chartPoints: [UsageHistoryChartPoint] {
-        var segment = 0
-        var previousPlan: String?
-        return points.enumerated().map { index, point in
-            let plan = canonicalPlan(point.plan)
-            if index > 0, plan != previousPlan { segment += 1 }
-            previousPlan = plan
-            return UsageHistoryChartPoint(point: point, segmentID: "\(metricID):\(segment)")
-        }
-    }
-
-    var singletonChartPoints: [UsageHistoryChartPoint] {
-        Dictionary(grouping: chartPoints, by: \.segmentID).values.compactMap { segment in
-            segment.count == 1 ? segment[0] : nil
-        }
+    var chartPoints: [UsageHistoryLineChartPoint] {
+        UsageHistoryLineSegmentation.chartPoints(from: points, seriesID: metricID)
     }
 
     private func canonicalPlan(_ plan: String?) -> String? {
@@ -1038,12 +1058,6 @@ private struct UsageHistorySeries: Identifiable {
             locale: Locale(identifier: "en_US_POSIX")
         )
     }
-}
-
-private struct UsageHistoryChartPoint: Identifiable {
-    var id: String { point.id }
-    var point: UsageHistoryPoint
-    var segmentID: String
 }
 
 private struct AccountUsageHistorySections: View {
@@ -1189,24 +1203,19 @@ private struct UsageHistoryChart: View {
                     y: .value("Percent remaining", point.remainingPercent),
                     series: .value("Plan period", chartPoint.segmentID)
                 )
-                .interpolationMethod(.stepEnd)
+                .interpolationMethod(.monotone)
                 .foregroundStyle(color)
+                .lineStyle(StrokeStyle(
+                    lineWidth: 2,
+                    dash: chartPoint.isGapConnector ? [6, 4] : []
+                ))
                 .accessibilityLabel(point.recordedAt.formatted(date: .abbreviated, time: .shortened))
                 .accessibilityValue("\(Int(point.remainingPercent.rounded())) percent remaining")
-            }
-            ForEach(series.singletonChartPoints) { chartPoint in
-                let point = chartPoint.point
-                PointMark(
-                    x: .value("Refresh", point.recordedAt),
-                    y: .value("Percent remaining", point.remainingPercent)
-                )
-                .foregroundStyle(color)
-                .symbolSize(70)
             }
             ForEach(series.planChangePoints) { point in
                 RuleMark(x: .value("Plan changed", point.recordedAt))
                     .foregroundStyle(.secondary)
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
             }
         }
         .chartXScale(domain: start...end)
@@ -1811,10 +1820,12 @@ private struct WorkerLinkReviewView: View {
 
     private func credentialCategories(for providerID: ProviderID) -> String {
         switch providerID {
-        case .chatGPT, .claude, .kimi:
+        case .chatGPT, .claude, .grok, .kimi:
             "Access token, refresh token, and ID token when available"
         case .zai, .miniMax, .synthetic, .warp:
             "API key"
+        case .openAIAPI, .anthropicAPI:
+            "Organization Admin API key"
         case .githubCopilot:
             "Credentials remain on this device"
         case .ollamaCloud:
@@ -1822,6 +1833,8 @@ private struct WorkerLinkReviewView: View {
         case .antigravity:
             "Google OAuth tokens remain on this device"
         case .compatibleAPI:
+            "Endpoint and API key remain on this device"
+        case .newAPI:
             "Endpoint and API key remain on this device"
         }
     }
@@ -1900,6 +1913,7 @@ struct RemoteWorkerAccountsView: View {
                                         Text(account.providerID.sectionTitle(plan: account.plan))
                                             .font(.caption)
                                             .foregroundStyle(.secondary)
+                                        sessionStatus(account)
                                     }
                                 }
                             }
@@ -1910,6 +1924,12 @@ struct RemoteWorkerAccountsView: View {
             .navigationTitle("Add from Worker")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .secondaryAction) {
+                    Button("Check sessions", systemImage: "arrow.clockwise") {
+                        Task { await loadAccounts() }
+                    }
+                    .disabled(isLoading || isImporting)
+                }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
@@ -1918,6 +1938,7 @@ struct RemoteWorkerAccountsView: View {
                         .disabled(selectedIDs.isEmpty || isImporting)
                 }
             }
+            .refreshable { await loadAccounts() }
             .task { await loadAccounts() }
             .alert("Couldn’t Add Accounts", isPresented: Binding(
                 get: { errorMessage != nil },
@@ -1936,6 +1957,29 @@ struct RemoteWorkerAccountsView: View {
         } set: { selected in
             if selected { selectedIDs.insert(id) }
             else { selectedIDs.remove(id) }
+        }
+    }
+
+    @ViewBuilder
+    private func sessionStatus(_ account: RemoteWorkerAccountCandidate) -> some View {
+        let status = account.sessionStatus ?? .unchecked
+        HStack(spacing: 5) {
+            Image(systemName: status.systemImageName)
+            Text(status.label)
+            if let checkedAt = account.sessionCheckedAt {
+                Text("· \(checkedAt, style: .relative)")
+            }
+        }
+        .font(.caption2)
+        .foregroundStyle(sessionColor(status))
+    }
+
+    private func sessionColor(_ status: WorkerSessionStatus) -> Color {
+        switch status {
+        case .active: .green
+        case .expired: .red
+        case .error: .orange
+        case .unchecked: .secondary
         }
     }
 
@@ -2097,10 +2141,13 @@ struct UsageCard: View {
 
     var body: some View {
         VStack(spacing: 16) {
+            if let balance = snapshot.apiBalance {
+                APIBalanceRow(balance: balance)
+            }
             if snapshot.availableResetCount > 0 || !snapshot.availableResetCredits.isEmpty {
                 BankedResetBar(snapshot: snapshot)
             }
-            if snapshot.usageWindows.isEmpty {
+            if snapshot.usageWindows.isEmpty, snapshot.apiBalance == nil {
                 Label("No resettable limits reported", systemImage: "checkmark.circle")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -2112,6 +2159,77 @@ struct UsageCard: View {
             }
             HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }.font(.caption2).foregroundStyle(.tertiary)
         }.padding(.vertical, 6)
+    }
+}
+
+struct APIBalanceRow: View {
+    let balance: APIBalance
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(balance.title)
+                    .font(.headline)
+                Spacer(minLength: 8)
+                if let periodEnd = balance.periodEnd {
+                    Text("through \(periodEnd, format: .dateTime.month(.abbreviated).day())")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(primaryValue)
+                    .font(.title2.bold().monospacedDigit())
+                Text(primaryLabel)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
+            if let fraction = balance.fractionRemaining {
+                ProgressView(value: fraction, total: 1)
+                    .tint(fraction <= 0.1 ? .red : .green)
+            }
+
+            HStack(spacing: 8) {
+                Text("Spent \(Self.formatted(balance.spent, currencyCode: balance.currencyCode))")
+                if let limit = balance.limit, !balance.isUnlimited {
+                    Spacer()
+                    Text("Budget \(Self.formatted(limit, currencyCode: balance.currencyCode))")
+                }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+
+            if let accessExpiresAt = balance.accessExpiresAt {
+                HStack {
+                    Text("Key expires")
+                    Spacer()
+                    Text(accessExpiresAt, format: .dateTime.year().month(.abbreviated).day().hour().minute())
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var primaryValue: String {
+        if balance.isUnlimited { return "Unlimited" }
+        return Self.formatted(balance.remaining ?? balance.spent, currencyCode: balance.currencyCode)
+    }
+
+    private var primaryLabel: String {
+        if balance.isUnlimited { return "allowance" }
+        return balance.remaining == nil ? "spent" : "left"
+    }
+
+    static func formatted(_ amount: Double, currencyCode: String) -> String {
+        amount.formatted(
+            .currency(code: currencyCode.uppercased())
+                .precision(.fractionLength(2))
+        )
     }
 }
 
