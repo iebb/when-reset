@@ -30,6 +30,7 @@ struct AddAccountView: View {
     @State private var newAPIKey = ""
     @State private var isAddingDemo = false
     @State private var showingRemoteWorkerAccounts = false
+    @State private var remoteWorkerAccountsMissingLocally: [RemoteWorkerAccountCandidate] = []
 
     init(relinkingAccount: MonitoredAccount? = nil) {
         self.relinkingAccount = relinkingAccount
@@ -76,8 +77,13 @@ struct AddAccountView: View {
                 completionTask?.cancel()
                 store.cancelLink()
             }
-            .sheet(isPresented: $showingRemoteWorkerAccounts) {
-                RemoteWorkerAccountsView()
+            .sheet(isPresented: $showingRemoteWorkerAccounts, onDismiss: {
+                Task { await loadRemoteWorkerAccountsMissingLocally() }
+            }) {
+                RemoteWorkerAccountsView(onlyAccountsMissingLocally: true)
+            }
+            .task(id: remoteWorkerImportRefreshID) {
+                await loadRemoteWorkerAccountsMissingLocally()
             }
             .alert("Couldn’t link account", isPresented: .init(get: { store.errorMessage != nil }, set: { if !$0 { store.errorMessage = nil } })) {
                 Button("OK", role: .cancel) {}
@@ -88,6 +94,10 @@ struct AddAccountView: View {
     private var providerView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                if relinkingAccount == nil, !remoteWorkerAccountsMissingLocally.isEmpty {
+                    workerImportCard
+                }
+
                 VStack(alignment: .leading, spacing: 8) {
                     Text(relinkingAccount == nil ? "Connect an account" : "Reconnect \(relinkingAccount?.providerDisplayName ?? "account")")
                         .font(.title2.bold())
@@ -98,41 +108,6 @@ struct AddAccountView: View {
                             : "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.")
                         .font(.body)
                         .foregroundStyle(.secondary)
-                }
-
-                if relinkingAccount == nil, store.pushServerStatus == .registered {
-                    Button {
-                        showingRemoteWorkerAccounts = true
-                    } label: {
-                        HStack(spacing: 14) {
-                            Image(systemName: "lock.icloud.fill")
-                                .font(.title2)
-                                .foregroundStyle(Color.accentColor)
-                                .frame(width: 42, height: 42)
-                                .background(Color.accentColor.opacity(0.11), in: .rect(cornerRadius: 13))
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Add from self-hosted Worker")
-                                    .font(.headline)
-                                    .foregroundStyle(.primary)
-                                Text("Uses server-side refreshes without downloading provider credentials.")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            Spacer(minLength: 8)
-                            Image(systemName: "chevron.right")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .padding(16)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 20))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 20)
-                                .stroke(Color(.separator).opacity(0.35), lineWidth: 1)
-                        }
-                    }
-                    .buttonStyle(.plain)
                 }
 
                 if !availableProviders.isEmpty {
@@ -187,6 +162,66 @@ struct AddAccountView: View {
             locale: locale,
             relinkingProvider: relinkingAccount?.providerID
         )
+    }
+
+    private var remoteWorkerImportRefreshID: String {
+        let accountIDs = store.accounts.map(\.id.uuidString).sorted().joined(separator: ",")
+        return "\(store.pushServerSettings.mode.rawValue)|\(store.pushServerSettings.customServerURL)|\(accountIDs)"
+    }
+
+    private var workerImportCard: some View {
+        let count = remoteWorkerAccountsMissingLocally.count
+        return Button {
+            showingRemoteWorkerAccounts = true
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "icloud.and.arrow.down.fill")
+                    .font(.title2)
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 42, height: 42)
+                    .background(Color.accentColor.opacity(0.11), in: .rect(cornerRadius: 13))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(count == 1 ? "Import account from Worker" : "Import accounts from Worker")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Text(count == 1
+                         ? "1 account on the linked Worker is not on this device."
+                         : "\(count) accounts on the linked Worker are not on this device.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 20))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20)
+                    .stroke(Color.accentColor.opacity(0.35), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("import-worker-accounts-button")
+    }
+
+    @MainActor
+    private func loadRemoteWorkerAccountsMissingLocally() async {
+        guard relinkingAccount == nil, store.pushServerSettings.mode != .disabled else {
+            remoteWorkerAccountsMissingLocally = []
+            return
+        }
+        do {
+            let candidates = try await store.remoteWorkerAccountsMissingLocally()
+            guard !Task.isCancelled else { return }
+            remoteWorkerAccountsMissingLocally = candidates
+        } catch {
+            guard !Task.isCancelled else { return }
+            remoteWorkerAccountsMissingLocally = []
+        }
     }
 
     private var demoCard: some View {

@@ -281,6 +281,11 @@
 				TargetAttributes = {
 					7B9019459473695DBC4623CA = {
 						DevelopmentTeam = 7P8CLHDH5G;
+						SystemCapabilities = {
+							com.apple.Push = {
+								enabled = 1;
+							};
+						};
 					};
 					86734DAD1D3ED6D9F9E6C947 = {
 						DevelopmentTeam = 7P8CLHDH5G;
@@ -562,6 +567,7 @@
 		66DBE017DDC385E3BC113713 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APS_ENVIRONMENT = production;
 				ASSETCATALOG_COMPILER_APPICON_NAME = reset;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;
@@ -591,6 +597,7 @@
 		9E756774299E16F168094450 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				APS_ENVIRONMENT = development;
 				ASSETCATALOG_COMPILER_APPICON_NAME = reset;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;

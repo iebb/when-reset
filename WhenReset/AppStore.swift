@@ -644,6 +644,20 @@ final class AppStore {
         }
     }
 
+    func remoteWorkerAccountsMissingLocally() async throws -> [RemoteWorkerAccountCandidate] {
+        let candidates = try await availableRemoteWorkerAccounts()
+        return candidates.filter { candidate in
+            !accounts.contains { account in
+                !account.isRemoteOnly
+                    && RemoteWorkerAccountMatcher.matches(
+                        candidate,
+                        account: account,
+                        settings: settings(for: account)
+                    )
+            }
+        }
+    }
+
     @discardableResult
     func reconcileRemoteWorkerAccounts() async throws -> [MonitoredAccount] {
         let candidates = try await availableRemoteWorkerAccounts()
@@ -2096,6 +2110,15 @@ final class AppStore {
 
     func pushRegistrationFailed(_ error: Error) {
         guard pushServerSettings.mode != .disabled else { return }
+        if RemotePushRegistrationFailurePolicy.isMissingAPNSEntitlement(error) {
+            if let serverURL = try? pushServerSettings.resolvedServerURL(),
+               (try? KeychainStore.loadPushRegistration(for: serverURL)) != nil {
+                pushServerStatus = .registered
+            } else {
+                pushServerStatus = .waitingForDeviceToken
+            }
+            return
+        }
         pushServerStatus = .failed(error.localizedDescription)
     }
 

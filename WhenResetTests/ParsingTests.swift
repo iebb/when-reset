@@ -580,6 +580,28 @@ final class ParsingTests: XCTestCase {
         XCTAssertNil(try settings.resolvedServerURL())
     }
 
+    func testMissingAPNSEntitlementRegistrationFailureIsRecognized() {
+        let missingEntitlement = NSError(
+            domain: NSCocoaErrorDomain,
+            code: 3_000,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "No valid aps-environment entitlement string found for application"
+            ]
+        )
+        let unrelatedFailure = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorNotConnectedToInternet
+        )
+
+        XCTAssertTrue(
+            RemotePushRegistrationFailurePolicy.isMissingAPNSEntitlement(missingEntitlement)
+        )
+        XCTAssertFalse(
+            RemotePushRegistrationFailurePolicy.isMissingAPNSEntitlement(unrelatedFailure)
+        )
+    }
+
     func testPushServerURLRequiresHTTPSAndNormalizesOrigin() throws {
         let url = try PushServerConfiguration.normalizedServerURL(
             "  https://PUSH.Example.com/base///?secret=no#fragment  "

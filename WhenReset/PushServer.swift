@@ -1582,6 +1582,21 @@ private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate,
     }
 }
 
+enum RemotePushRegistrationFailurePolicy {
+    static func isMissingAPNSEntitlement(_ error: Error) -> Bool {
+        let error = error as NSError
+        let message = [
+            error.localizedDescription,
+            error.localizedFailureReason,
+            error.localizedRecoverySuggestion
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ")
+        .lowercased()
+        return message.contains("aps-environment") && message.contains("entitlement")
+    }
+}
+
 @MainActor
 final class RemotePushCoordinator {
     static let shared = RemotePushCoordinator()

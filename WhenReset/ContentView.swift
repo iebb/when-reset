@@ -57,7 +57,6 @@ private struct UsageTabView: View {
     @State private var showingAddAccount = false
     @State private var relinkingAccount: MonitoredAccount?
     @State private var accountPendingRemoval: MonitoredAccount?
-    @State private var isPreparingDemo = false
 
     var body: some View {
         NavigationStack {
@@ -116,15 +115,6 @@ private struct UsageTabView: View {
 
     private var emptyState: some View {
         FirstRunExperienceView(
-            isPreparingDemo: isPreparingDemo,
-            openDemo: {
-                guard !isPreparingDemo else { return }
-                isPreparingDemo = true
-                Task {
-                    await store.addDemoAccount()
-                    isPreparingDemo = false
-                }
-            },
             connectAccount: { showingAddAccount = true }
         )
     }
@@ -169,8 +159,6 @@ private struct UsageTabView: View {
 }
 
 private struct FirstRunExperienceView: View {
-    let isPreparingDemo: Bool
-    let openDemo: () -> Void
     let connectAccount: () -> Void
 
     private let features = [
@@ -204,40 +192,15 @@ private struct FirstRunExperienceView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                FirstRunDashboardPreview()
-
-                VStack(spacing: 10) {
-                    Button(action: connectAccount) {
-                        Label("Connect an account", systemImage: "person.crop.circle.badge.plus")
-                            .fontWeight(.semibold)
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .buttonBorderShape(.roundedRectangle(radius: 15))
-                    .controlSize(.large)
-                    .disabled(isPreparingDemo)
-                    .accessibilityIdentifier("connect-account-button")
-
-                    Button(action: openDemo) {
-                        HStack {
-                            if isPreparingDemo { ProgressView() }
-                            Text(isPreparingDemo ? "Preparing demo…" : "Try the demo")
-                                .fontWeight(.semibold)
-                            Spacer()
-                            Image(systemName: "arrow.right")
-                        }
+                Button(action: connectAccount) {
+                    Label("Connect an account", systemImage: "person.crop.circle.badge.plus")
+                        .fontWeight(.semibold)
                         .frame(maxWidth: .infinity, minHeight: 32)
-                    }
-                    .buttonStyle(.bordered)
-                    .buttonBorderShape(.roundedRectangle(radius: 15))
-                    .controlSize(.large)
-                    .disabled(isPreparingDemo)
-                    .accessibilityIdentifier("open-demo-button")
-
-                    Label("No sign-in or credentials needed for the demo", systemImage: "lock.fill")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.roundedRectangle(radius: 15))
+                .controlSize(.large)
+                .accessibilityIdentifier("connect-account-button")
 
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Made for the moments between resets")
@@ -295,90 +258,6 @@ private struct FirstRunFeatureCard: View {
             RoundedRectangle(cornerRadius: 18)
                 .stroke(Color(.separator).opacity(0.22), lineWidth: 1)
         }
-    }
-}
-
-private struct FirstRunDashboardPreview: View {
-    @State private var nextReset = Date.now.addingTimeInterval(5_430)
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(spacing: 10) {
-                Image(systemName: "timer")
-                    .font(.headline)
-                    .foregroundStyle(.white)
-                    .frame(width: 38, height: 38)
-                    .background(Color.accentColor.gradient, in: .circle)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Your AI Provider")
-                        .font(.headline)
-                    Text("Credential-free demo")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-                Spacer()
-                VStack(alignment: .trailing, spacing: 1) {
-                    Text("Next reset")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(timerInterval: Date.now...nextReset, countsDown: true, showsHours: true)
-                        .font(.headline)
-                        .monospacedDigit()
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 9) {
-                HStack(alignment: .lastTextBaseline, spacing: 5) {
-                    Text("42%")
-                        .font(.system(size: 42, weight: .bold, design: .rounded))
-                        .monospacedDigit()
-                    Text("remaining")
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
-                }
-                ProgressView(value: 42, total: 100)
-                    .tint(Color.accentColor)
-                    .scaleEffect(x: 1, y: 1.35)
-            }
-
-            HStack(spacing: 0) {
-                FirstRunMiniMetric(title: "5-hour limit", value: "42%", tint: .blue)
-                Divider()
-                    .frame(height: 34)
-                    .padding(.horizontal, 16)
-                FirstRunMiniMetric(title: "Weekly limit", value: "71%", tint: .purple)
-            }
-        }
-        .padding(20)
-        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 24))
-        .overlay {
-            RoundedRectangle(cornerRadius: 24)
-                .stroke(Color(.separator).opacity(0.28), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.06), radius: 18, y: 8)
-        .accessibilityIdentifier("first-run-preview")
-    }
-}
-
-private struct FirstRunMiniMetric: View {
-    let title: String
-    let value: String
-    let tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(tint)
-                    .frame(width: 7, height: 7)
-                Text(title)
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            Text(value)
-                .font(.headline.monospacedDigit())
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1934,11 +1813,16 @@ private struct WorkerLinkReviewView: View {
 struct RemoteWorkerAccountsView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    let onlyAccountsMissingLocally: Bool
     @State private var accounts: [RemoteWorkerAccountCandidate] = []
     @State private var selectedIDs: Set<String> = []
     @State private var isLoading = true
     @State private var isImporting = false
     @State private var errorMessage: String?
+
+    init(onlyAccountsMissingLocally: Bool = false) {
+        self.onlyAccountsMissingLocally = onlyAccountsMissingLocally
+    }
 
     var body: some View {
         NavigationStack {
@@ -1983,7 +1867,7 @@ struct RemoteWorkerAccountsView: View {
                     }
                 }
             }
-            .navigationTitle("Add from Worker")
+            .navigationTitle(onlyAccountsMissingLocally ? "Import from Worker" : "Add from Worker")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .secondaryAction) {
@@ -2050,7 +1934,9 @@ struct RemoteWorkerAccountsView: View {
         isLoading = true
         errorMessage = nil
         do {
-            accounts = try await store.availableRemoteWorkerAccounts()
+            accounts = try await (onlyAccountsMissingLocally
+                ? store.remoteWorkerAccountsMissingLocally()
+                : store.availableRemoteWorkerAccounts())
             selectedIDs.formIntersection(accounts.map(\.id))
         } catch {
             accounts = []
