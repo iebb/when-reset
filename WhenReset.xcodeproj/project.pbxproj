@@ -42,7 +42,7 @@
 		DC2B75B8636DCE7A4972BE9E /* ZAIProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E575E3228EE5BF613B2E1A3 /* ZAIProviderTests.swift */; };
 		E32EFCA194476E9D30ACF43E /* WhenResetApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1BC256FA84ACAA97F0D2E84 /* WhenResetApp.swift */; };
 		E74DCD4D7ED3024F3266D96D /* PushServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 44C03C63FA5B98872D5DD44C /* PushServer.swift */; };
-		F06C70DDCA2AAC891F3D999B /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 5DCBFB2527C10B1F831B1CD8 /* AppIcon.icon */; };
+		F06C70DDCA2AAC891F3D999B /* reset.icon in Resources */ = {isa = PBXBuildFile; fileRef = 5DCBFB2527C10B1F831B1CD8 /* reset.icon */; };
 		F932789A339C1D593DAA7D3D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 3EB0B5BDFB2E529C5F0A849E /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -98,7 +98,7 @@
 		44C03C63FA5B98872D5DD44C /* PushServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushServer.swift; sourceTree = "<group>"; };
 		4ED4854532437B4A50DA9477 /* ClaudeProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeProvider.swift; sourceTree = "<group>"; };
 		4EECEFE18766517276D0EA21 /* KimiProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KimiProvider.swift; sourceTree = "<group>"; };
-		5DCBFB2527C10B1F831B1CD8 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
+		5DCBFB2527C10B1F831B1CD8 /* reset.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = reset.icon; sourceTree = "<group>"; };
 		6BA214FCDA286C47A913F656 /* CopilotProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CopilotProviderTests.swift; sourceTree = "<group>"; };
 		7E6C4F8E3B98131AA7CCACE2 /* ChatGPTProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatGPTProvider.swift; sourceTree = "<group>"; };
 		7FC7BEDD54B2367F7AE9D12C /* MiniMaxProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MiniMaxProvider.swift; sourceTree = "<group>"; };
@@ -128,7 +128,7 @@
 			children = (
 				A10000000000000000000003 /* AdditionalProviders.swift */,
 				DBE468E7C5ADEB92577645F2 /* AddAccountView.swift */,
-				5DCBFB2527C10B1F831B1CD8 /* AppIcon.icon */,
+				5DCBFB2527C10B1F831B1CD8 /* reset.icon */,
 				DD9EA35D2BC3622A1F9346A4 /* AppStore.swift */,
 				E56A8D973908F22ACF39FDD3 /* Assets.xcassets */,
 				7E6C4F8E3B98131AA7CCACE2 /* ChatGPTProvider.swift */,
@@ -325,7 +325,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				F06C70DDCA2AAC891F3D999B /* AppIcon.icon in Resources */,
+				F06C70DDCA2AAC891F3D999B /* reset.icon in Resources */,
 				237E05B56E282DBF83011284 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -562,7 +562,7 @@
 		66DBE017DDC385E3BC113713 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = reset;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;
 				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 27;
@@ -591,7 +591,7 @@
 		9E756774299E16F168094450 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_APPICON_NAME = reset;
 				CODE_SIGN_ENTITLEMENTS = WhenReset/WhenReset.entitlements;
 				"CODE_SIGN_ENTITLEMENTS[sdk=macosx*]" = WhenReset/WhenResetMac.entitlements;
 				"CURRENT_PROJECT_VERSION[sdk=macosx*]" = 27;
