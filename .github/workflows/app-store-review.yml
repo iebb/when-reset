@@ -1,0 +1,93 @@
+name: App Store Review Submission
+
+# Submits a build that is already in App Store Connect. The release workflow can submit the
+# build it just uploaded; this one exists for the common case where the build was uploaded
+# earlier — by the daily cron, a testflight-* tag, or a previous manual run.
+on:
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: Marketing version to submit, for example 1.4
+        required: true
+        type: string
+      build_number:
+        description: Build number already uploaded for that version
+        required: true
+        type: string
+      platform:
+        description: Platform to submit
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - ios
+          - macos
+      release_notes:
+        description: "What's New text; leave empty to keep the existing App Store text"
+        required: false
+        default: ""
+        type: string
+      dry_run:
+        description: Validate and report without submitting to Apple
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-store-review
+  cancel-in-progress: false
+
+jobs:
+  submit:
+    name: Submit for review
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Prepare App Store Connect credential
+        id: credential
+        env:
+          PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          if [[ -z "$PRIVATE_KEY" || -z "$KEY_ID" || -z "$ISSUER_ID" ]]; then
+            echo "Required App Store Connect secrets are missing." >&2
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          umask 077
+          printf '%s' "$PRIVATE_KEY" > "$key_path"
+          echo "path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: Submit to App Store review
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_BUNDLE_ID: ad.neko.when
+          MARKETING_VERSION: ${{ inputs.marketing_version }}
+          BUILD_NUMBER: ${{ inputs.build_number }}
+          REVIEW_PLATFORMS: ${{ inputs.platform == 'both' && 'IOS,MAC_OS' || inputs.platform == 'macos' && 'MAC_OS' || 'IOS' }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+          REVIEW_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: |
+          ruby .github/scripts/submit-for-review.rb | tee "$RUNNER_TEMP/submit.log"
+          {
+            echo "### ${{ inputs.marketing_version }} (${{ inputs.build_number }}) · ${{ inputs.platform }}"
+            echo '```'
+            cat "$RUNNER_TEMP/submit.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove temporary credential
+        if: always() && steps.credential.outputs.path != ''
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+        run: rm -f "$ASC_KEY_PATH"
