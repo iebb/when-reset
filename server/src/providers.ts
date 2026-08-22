@@ -351,8 +351,16 @@ async function fetchOpenRouter(
   return {
     credentials,
     snapshot: result,
-    account_identity: parsed.creatorUserID ? `creator:${parsed.creatorUserID}` : undefined,
+    // OpenRouter budgets and usage are key-specific. Include the exact key only in the
+    // in-memory identity input; the Worker immediately converts this tuple to a keyed HMAC and
+    // never stores or logs the plaintext identity.
+    account_identity: parsed.creatorUserID
+      ? openRouterAccountIdentity(parsed.creatorUserID, credentials.access_token) : undefined,
   };
+}
+
+function openRouterAccountIdentity(creatorUserID: string, accessToken: string): string {
+  return `creator:${creatorUserID}|key:${accessToken}`;
 }
 
 function openRouterAPIBalance(value: unknown, now: number): {
@@ -742,34 +750,35 @@ async function verifyChatGPTIdentity(
   account: ProviderAccount,
   credentials: ProviderCredentials,
   now: number,
-): Promise<{ credentials: ProviderCredentials; identity: string }> {
+): Promise<{ credentials: ProviderCredentials; identity?: string }> {
   const refreshed = await refreshChatGPT(credentials, now);
   const headers = {
     authorization: `Bearer ${refreshed.access_token}`,
     "chatgpt-account-id": account.workspace_id,
     "user-agent": USER_AGENT,
   };
-  const tokenIdentity = chatGPTTokenIdentity(refreshed.id_token)
-    ?? chatGPTTokenIdentity(refreshed.access_token);
   let profileIdentity: string | null = null;
   try {
     profileIdentity = chatGPTProfileIdentity(
       await getJSON("https://chatgpt.com/backend-api/me", headers)
     );
   } catch (error) {
-    // Authentication failures are authoritative session checks. A temporary or unsupported
-    // profile endpoint must not interrupt quota history when the signed token still supplies
-    // the same stable user identity.
-    if (error instanceof ProviderFetchError && (error.status === 401 || error.status === 403)) {
+    // A Codex-scoped ChatGPT credential can fetch the account's quota while `/me` remains
+    // forbidden. Keep the quota request authoritative, but never use an unverified profile for a
+    // cross-device identity merge. A 401 still proves that the access token itself is expired.
+    if (error instanceof ProviderFetchError && error.status === 401) {
       throw error;
     }
-    if (!tokenIdentity) throw error;
+    return { credentials: refreshed };
   }
-  const identity = profileIdentity ?? tokenIdentity;
-  if (!identity) {
-    throw new ProviderFetchError("ChatGPT returned no stable account identity.");
-  }
-  return { credentials: refreshed, identity };
+  if (!profileIdentity) return { credentials: refreshed };
+  // ChatGPT quota is fetched in the explicit ChatGPT-Account-ID scope. A user may belong to
+  // multiple workspaces with independent limits, so the verified merge identity must contain
+  // both the provider user and the official account/workspace ID.
+  return {
+    credentials: refreshed,
+    identity: `${profileIdentity}|account:${account.workspace_id}`,
+  };
 }
 
 function chatGPTProfileIdentity(value: unknown): string | null {
@@ -782,15 +791,6 @@ function chatGPTProfileIdentity(value: unknown): string | null {
     ?? text(user?.id)
     ?? text(user?.user_id)
     ?? text(account?.user_id);
-  return id ? `user:${id}` : null;
-}
-
-function chatGPTTokenIdentity(token: string): string | null {
-  const claims = jwtClaims(token);
-  const auth = asRecord(claims?.["https://api.openai.com/auth"]);
-  const id = text(auth?.chatgpt_user_id)
-    ?? text(auth?.user_id)
-    ?? text(claims?.sub);
   return id ? `user:${id}` : null;
 }
 
@@ -1678,6 +1678,7 @@ export const providerTesting = {
   quotaFromUnknown,
   requestJSON,
   miniMaxWindow,
+  openRouterAccountIdentity,
   openRouterAPIBalance,
   openAIAPIBalance,
   deepSeekAPIBalance,

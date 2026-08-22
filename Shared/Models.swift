@@ -271,6 +271,15 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
     var selfHostedServerConsentRevision: Int64 = 0
     var remoteWorkerAccountID: String?
     var workerAccountReference: String?
+    /// Independent consent for credential-free, device-collected quota uploads.
+    /// This is deliberately separate from `monitorOnSelfHostedServer`, which authorizes
+    /// credential upload and Worker-side provider polling.
+    var uploadsDeviceUsageToWorker = false
+    var deviceUsageWorkerURL: String?
+    var deviceUsageConsentRevision: Int64 = 0
+    var deviceUsageNextSequence: Int64 = 1
+    var deviceUsageLastUploadedAt: Date?
+    var deviceUsageLastError: String?
 
     init(notifyAboutResets: Bool = true, notifyAtScheduledReset: Bool = true,
          showBankedResets: Bool = true, hiddenMetricIDs: Set<String> = [],
@@ -284,7 +293,13 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
          selfHostedServerConsentURL: String? = nil,
          selfHostedServerConsentRevision: Int64 = 0,
          remoteWorkerAccountID: String? = nil,
-         workerAccountReference: String? = nil) {
+         workerAccountReference: String? = nil,
+         uploadsDeviceUsageToWorker: Bool = false,
+         deviceUsageWorkerURL: String? = nil,
+         deviceUsageConsentRevision: Int64 = 0,
+         deviceUsageNextSequence: Int64 = 1,
+         deviceUsageLastUploadedAt: Date? = nil,
+         deviceUsageLastError: String? = nil) {
         self.notifyAboutResets = notifyAboutResets
         self.notifyAtScheduledReset = notifyAtScheduledReset
         self.showBankedResets = showBankedResets
@@ -301,6 +316,12 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         self.selfHostedServerConsentRevision = selfHostedServerConsentRevision
         self.remoteWorkerAccountID = remoteWorkerAccountID
         self.workerAccountReference = workerAccountReference
+        self.uploadsDeviceUsageToWorker = uploadsDeviceUsageToWorker
+        self.deviceUsageWorkerURL = deviceUsageWorkerURL
+        self.deviceUsageConsentRevision = max(0, deviceUsageConsentRevision)
+        self.deviceUsageNextSequence = max(1, deviceUsageNextSequence)
+        self.deviceUsageLastUploadedAt = deviceUsageLastUploadedAt
+        self.deviceUsageLastError = deviceUsageLastError
     }
 
     init(from decoder: Decoder) throws {
@@ -346,6 +367,38 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
             String.self,
             forKey: .workerAccountReference
         )
+        uploadsDeviceUsageToWorker = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .uploadsDeviceUsageToWorker
+        ) ?? false
+        deviceUsageWorkerURL = try values.decodeIfPresent(
+            String.self,
+            forKey: .deviceUsageWorkerURL
+        )
+        deviceUsageConsentRevision = max(0, try values.decodeIfPresent(
+            Int64.self,
+            forKey: .deviceUsageConsentRevision
+        ) ?? 0)
+        deviceUsageNextSequence = max(1, try values.decodeIfPresent(
+            Int64.self,
+            forKey: .deviceUsageNextSequence
+        ) ?? 1)
+        deviceUsageLastUploadedAt = try values.decodeIfPresent(
+            Date.self,
+            forKey: .deviceUsageLastUploadedAt
+        )
+        deviceUsageLastError = try values.decodeIfPresent(
+            String.self,
+            forKey: .deviceUsageLastError
+        )
+
+        // A copied or stale setting must never opt an account into a different Worker.
+        if !uploadsDeviceUsageToWorker {
+            deviceUsageWorkerURL = nil
+            deviceUsageNextSequence = 1
+            deviceUsageLastUploadedAt = nil
+            deviceUsageLastError = nil
+        }
     }
 
     func shows(_ window: UsageWindow) -> Bool { !hiddenMetricIDs.contains(window.metricID) }
@@ -371,6 +424,8 @@ struct AccountMonitorSettings: Codable, Hashable, Sendable {
         case missingQuotaHistoryBehaviors
         case monitorOnSelfHostedServer, selfHostedServerConsentURL
         case selfHostedServerConsentRevision, remoteWorkerAccountID, workerAccountReference
+        case uploadsDeviceUsageToWorker, deviceUsageWorkerURL, deviceUsageConsentRevision
+        case deviceUsageNextSequence, deviceUsageLastUploadedAt, deviceUsageLastError
     }
 }
 

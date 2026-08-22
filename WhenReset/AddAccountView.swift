@@ -33,6 +33,9 @@ struct AddAccountView: View {
     @State private var isAddingDemo = false
     @State private var showingRemoteWorkerAccounts = false
     @State private var remoteWorkerAccountsMissingLocally: [RemoteWorkerAccountCandidate] = []
+    @State private var isLoadingRemoteWorkerAccounts = true
+    @State private var remoteWorkerDiscoveryError: String?
+    @State private var didRequestDismiss = false
 
     init(relinkingAccount: MonitoredAccount? = nil) {
         self.relinkingAccount = relinkingAccount
@@ -65,7 +68,10 @@ struct AddAccountView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                if let link = store.deviceLink {
+                if let account = relinkingAccount,
+                   store.accountLinkProgress.applies(to: account.id) {
+                    workerRelinkStatusView(account)
+                } else if let link = store.deviceLink {
                     linkView(link)
                 } else if let claudeLink = store.claudeLink {
                     claudeCodeView(claudeLink)
@@ -104,7 +110,7 @@ struct AddAccountView: View {
     private var providerView: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                if relinkingAccount == nil, !remoteWorkerAccountsMissingLocally.isEmpty {
+                if relinkingAccount == nil, store.canAccessRemoteWorkerAccounts {
                     workerImportCard
                 }
 
@@ -176,7 +182,7 @@ struct AddAccountView: View {
 
     private var remoteWorkerImportRefreshID: String {
         let accountIDs = store.accounts.map(\.id.uuidString).sorted().joined(separator: ",")
-        return "\(store.pushServerSettings.mode.rawValue)|\(store.pushServerSettings.customServerURL)|\(accountIDs)"
+        return "\(store.pushServerSettings.mode.rawValue)|\(store.pushServerSettings.customServerURL)|\(store.canAccessRemoteWorkerAccounts)|\(store.pushServerStatus.title)|\(accountIDs)"
     }
 
     private var workerImportCard: some View {
@@ -191,20 +197,24 @@ struct AddAccountView: View {
                     .frame(width: 42, height: 42)
                     .background(Color.accentColor.opacity(0.11), in: .rect(cornerRadius: 13))
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(count == 1 ? "Import account from Worker" : "Import accounts from Worker")
+                    Text("Import from Worker")
                         .font(.headline)
                         .foregroundStyle(.primary)
-                    Text(count == 1
-                         ? "1 account on the linked Worker is not on this device."
-                         : "\(count) accounts on the linked Worker are not on this device.")
+                    Text(workerImportDescription(count: count))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 8)
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.tertiary)
+                if isLoadingRemoteWorkerAccounts {
+                    ProgressView()
+                } else {
+                    Image(systemName: remoteWorkerDiscoveryError == nil
+                          ? "chevron.right" : "exclamationmark.triangle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(remoteWorkerDiscoveryError == nil
+                                         ? Color.secondary : Color.orange)
+                }
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -220,10 +230,14 @@ struct AddAccountView: View {
 
     @MainActor
     private func loadRemoteWorkerAccountsMissingLocally() async {
-        guard relinkingAccount == nil, store.pushServerSettings.mode != .disabled else {
+        guard relinkingAccount == nil, store.canAccessRemoteWorkerAccounts else {
             remoteWorkerAccountsMissingLocally = []
+            remoteWorkerDiscoveryError = nil
+            isLoadingRemoteWorkerAccounts = false
             return
         }
+        isLoadingRemoteWorkerAccounts = true
+        remoteWorkerDiscoveryError = nil
         do {
             let candidates = try await store.remoteWorkerAccountsMissingLocally()
             guard !Task.isCancelled else { return }
@@ -231,7 +245,24 @@ struct AddAccountView: View {
         } catch {
             guard !Task.isCancelled else { return }
             remoteWorkerAccountsMissingLocally = []
+            remoteWorkerDiscoveryError = error.localizedDescription
         }
+        isLoadingRemoteWorkerAccounts = false
+    }
+
+    private func workerImportDescription(count: Int) -> String {
+        if isLoadingRemoteWorkerAccounts {
+            return "Checking the linked Worker for accounts…"
+        }
+        if let remoteWorkerDiscoveryError {
+            return "Couldn’t check the linked Worker: \(remoteWorkerDiscoveryError)"
+        }
+        if count == 0 {
+            return "No additional accounts found. Open to check Worker sessions or try again."
+        }
+        return count == 1
+            ? "1 account on the linked Worker is not on this device."
+            : "\(count) accounts on the linked Worker are not on this device."
     }
 
     private var demoCard: some View {
@@ -977,6 +1008,47 @@ struct AddAccountView: View {
         .background(Color(.systemGroupedBackground))
     }
 
+    private func workerRelinkStatusView(_ account: MonitoredAccount) -> some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                ProviderIcon(providerID: account.providerID)
+                    .frame(width: 64, height: 64)
+                if store.accountLinkProgress.isVerifyingWorker {
+                    ProgressView()
+                        .controlSize(.large)
+                    Text("Updating Worker sign-in…")
+                        .font(.title2.bold())
+                    Text("Provider authorization succeeded. When Reset is securely replacing the Worker credential and checking that quota refresh is active.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                } else {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.largeTitle)
+                        .foregroundStyle(.orange)
+                    Text("Worker sign-in update failed")
+                        .font(.title2.bold())
+                    Text(store.refreshFailures[account.id]?.message
+                         ?? "The provider accepted the sign-in, but the Worker could not confirm the replacement credential.")
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                    if store.accountLinkProgress.canRetryWithoutAuthorization {
+                        Button("Retry Worker update") {
+                            retryWorkerReplacement(for: account)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Button("Sign in again") {
+                        startDeviceLink(account.providerID)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
+            .padding(.top, 48)
+            .padding(.horizontal, 24)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+
     private func cancel() {
         completionTask?.cancel()
         store.cancelLink()
@@ -995,7 +1067,9 @@ struct AddAccountView: View {
                   let link = store.deviceLink,
                   link.providerID == provider else { return }
             openURL(link.verificationURL)
-            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+            if await store.completeDeviceLink(replacing: relinkingAccount) {
+                dismissAfterSuccess()
+            }
         }
     }
 
@@ -1010,8 +1084,29 @@ struct AddAccountView: View {
             await previousTask?.value
             guard !Task.isCancelled,
                   store.deviceLink?.providerID == provider else { return }
-            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+            if await store.completeDeviceLink(replacing: relinkingAccount) {
+                dismissAfterSuccess()
+            }
         }
+    }
+
+    private func retryWorkerReplacement(for account: MonitoredAccount) {
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            if await store.retryWorkerCredentialReplacement(for: account.id) {
+                dismissAfterSuccess()
+            }
+        }
+    }
+
+    @MainActor
+    private func dismissAfterSuccess() {
+        guard !didRequestDismiss else { return }
+        didRequestDismiss = true
+        dismiss()
     }
 }
 

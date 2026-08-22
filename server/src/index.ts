@@ -10,7 +10,16 @@ import {
   type ProviderID,
   type ProviderSnapshot,
 } from "./providers";
-import { renderLinkPage, renderLinkQRCode } from "./link-page";
+import { renderDashboardPage } from "./dashboard-page";
+import { renderLinkQRCode } from "./link-page";
+import {
+  generateAuthenticationOptions,
+  generateRegistrationOptions,
+  verifyAuthenticationResponse,
+  verifyRegistrationResponse,
+  type AuthenticationResponseJSON,
+  type RegistrationResponseJSON,
+} from "@simplewebauthn/server";
 
 const MAX_REGISTRATION_BODY_BYTES = 2_048;
 const MAX_DEVICE_TOKEN_BODY_BYTES = 1_024;
@@ -18,8 +27,23 @@ const MAX_ACCOUNT_BODY_BYTES = 64 * 1_024;
 const MAX_ACCOUNT_POLICY_BODY_BYTES = 2_048;
 const MAX_HISTORY_UPLOAD_BODY_BYTES = 512 * 1_024;
 const MAX_HISTORY_UPLOAD_ROWS = 250;
+const MAX_DEVICE_SNAPSHOT_BODY_BYTES = 32 * 1_024;
+const MAX_DEVICE_SNAPSHOT_WINDOWS = 32;
+const MAX_DEVICE_SNAPSHOT_RESET_CREDITS = 32;
 const MAX_REMOTE_ACCOUNT_IMPORT_BODY_BYTES = 16 * 1_024;
 const MAX_REMOTE_ACCOUNT_IMPORTS = 50;
+const DASHBOARD_SESSION_TTL_SECONDS = 12 * 60 * 60;
+const DASHBOARD_KEY_GRANT_TTL_SECONDS = 10 * 60;
+const WEBAUTHN_CHALLENGE_TTL_SECONDS = 5 * 60;
+const MAX_WEBAUTHN_BODY_BYTES = 32 * 1_024;
+const MAX_ACTIVE_WEBAUTHN_CHALLENGES = 100;
+const DASHBOARD_COOKIE_NAME = "__Host-when_reset_dashboard";
+const DASHBOARD_ACCOUNT_LIMIT = 500;
+const DASHBOARD_DEVICE_LIMIT = 200;
+const DASHBOARD_HISTORY_LIMIT = 1_000;
+const DASHBOARD_SNAPSHOT_LOAD_BATCH_SIZE = 25;
+const MAX_DASHBOARD_SNAPSHOT_BYTES = 128 * 1_024;
+const MAX_DASHBOARD_ACCOUNT_SOURCE_ROWS = 10_000;
 const LINK_SESSION_TTL_SECONDS = 5 * 60;
 const ACTIVE_DEVICE_DAYS = 45;
 const DEFAULT_HISTORY_RETENTION_DAYS = 35;
@@ -33,6 +57,7 @@ const QUEUE_BATCH_SIZE = 100;
 const HISTORY_PAGE_SIZE = 1_000;
 const MIN_MONITOR_INTERVAL_SECONDS = 5 * 60;
 const MAX_MONITOR_INTERVAL_SECONDS = 8 * 60 * 60;
+const MAX_DEVICE_SNAPSHOT_CLOCK_SKEW_SECONDS = 5 * 60;
 const APNS_TOKEN_REFRESH_SECONDS = 50 * 60;
 const APNS_PRODUCTION_HOST = "https://api.push.apple.com";
 const APNS_DEVELOPMENT_HOST = "https://api.sandbox.push.apple.com";
@@ -141,6 +166,8 @@ type MonitoredAccountRow = ProviderAccount & {
 };
 
 type AccountSyncRow = {
+  source_device_id: string;
+  source_account_id: string;
   provider_id: ProviderID;
   workspace_id: string;
   profile_name: string | null;
@@ -177,6 +204,7 @@ type RemoteAccountCandidateRow = {
   last_refresh_at: number | null;
   last_success_at: number | null;
   last_error: string | null;
+  consent_revision: number;
 };
 
 type RemoteAccountCandidate = RemoteAccountCandidateRow & {
@@ -186,6 +214,117 @@ type RemoteAccountCandidate = RemoteAccountCandidateRow & {
 };
 
 type WorkerSessionStatus = "active" | "expired" | "error" | "unchecked";
+type DashboardAccountStatus = WorkerSessionStatus | "stale";
+
+type DashboardSessionRow = {
+  token_hash: string;
+  expires_at: number;
+};
+
+type DashboardSessionAuthorizationRow = {
+  auth_method: "access_key" | "passkey";
+  key_verified_until: number | null;
+  passkey_rp_id: string | null;
+};
+
+type DashboardPasskeyRow = {
+  credential_id: string;
+  user_handle: string;
+  public_key: ArrayBuffer;
+  counter: number;
+  transports_json: string;
+};
+
+type DashboardWebAuthnChallengeRow = {
+  transaction_id: string;
+  purpose: "authentication" | "registration";
+  challenge: string;
+  origin: string;
+  rp_id: string;
+  session_token_hash: string | null;
+  expires_at: number;
+};
+
+type DashboardAccountRow = {
+  source_kind: "worker" | "device";
+  device_id: string;
+  account_id: string;
+  provider_id: ProviderID;
+  workspace_id: string;
+  display_name: string | null;
+  plan: string | null;
+  plan_expires_at: number | null;
+  trial_expires_at: number | null;
+  refresh_interval_seconds: number;
+  history_retention_days: number;
+  next_refresh_at: number | null;
+  last_refresh_at: number | null;
+  last_success_at: number | null;
+  last_error: string | null;
+  dashboard_account_reference: string | null;
+};
+
+type DashboardAccountSource = DashboardAccountRow;
+
+type DashboardAccountGroup = {
+  id: string;
+  representative: DashboardAccountRow;
+  rows: DashboardAccountSource[];
+};
+
+type DashboardHistoryRow = {
+  metric_id: string;
+  metric_title: string;
+  kind: string | null;
+  window_minutes: number | null;
+  remaining_percent: number;
+  recorded_at: number;
+  resets_at: number;
+  plan: string | null;
+};
+
+type DashboardWindow = {
+  title: string;
+  kind: string | null;
+  window_minutes: number | null;
+  remaining_percent: number;
+  resets_at: number;
+};
+
+type DashboardResetCredit = {
+  status: string | null;
+  granted_at: number | null;
+  expires_at: number | null;
+};
+
+type DashboardBalance = {
+  title: string;
+  currency_code: string;
+  spent: number;
+  limit: number | null;
+  remaining: number | null;
+  period_start: number | null;
+  period_end: number | null;
+  access_expires_at: number | null;
+  is_unlimited: boolean;
+  kind: "budget" | "wallet";
+  unit_label: string | null;
+};
+
+type DashboardSnapshot = {
+  fetched_at: number;
+  windows: DashboardWindow[];
+  available_reset_count: number;
+  reset_credits: DashboardResetCredit[];
+  reset_credits_authoritative: boolean;
+  api_balance?: DashboardBalance;
+};
+
+type DashboardSnapshotSelection = {
+  source: "worker" | "device";
+  snapshot: DashboardSnapshot;
+  row: DashboardAccountRow;
+};
 
 type RemoteAccountImport = {
   remote_account_id: string;
@@ -195,10 +334,22 @@ type RemoteAccountImport = {
 type CredentialTargetRow = ProviderAccount & {
   device_id: string;
   account_id: string;
+  consent_revision: number;
   refresh_interval_seconds: number;
+  credential_fingerprint: string | null;
   credential_revision: number;
   latest_snapshot: string | null;
   history_retention_days: number;
+};
+
+type RemoteCredentialReplacementAuthorization = {
+  subscriberDeviceID: string;
+  localAccountID: string;
+};
+
+type StoredProviderSnapshot = ProviderSnapshot & {
+  account_reference_verified?: boolean;
+  account_reference_scope?: "provider_account_v2";
 };
 
 type MonitorRunRow = {
@@ -246,6 +397,7 @@ type HistoryUpload = {
 
 type HistoryUploadRow = {
   row_tag: string;
+  history_source?: "worker" | "device";
   provider_id: ProviderID;
   metric_id: string;
   metric_title: string;
@@ -256,6 +408,37 @@ type HistoryUploadRow = {
   resets_at: number;
   seconds_until_reset: number;
   plan: string | null;
+};
+
+type DeviceSnapshotSourceUpload = {
+  provider_id: ProviderID;
+  display_name: string | null;
+  refresh_interval_seconds: number;
+  history_retention_days: number;
+  consent_revision: number;
+};
+
+type DeviceSnapshotSourceRow = {
+  device_id: string;
+  account_id: string;
+  provider_id: ProviderID;
+  display_name: string | null;
+  plan: string | null;
+  refresh_interval_seconds: number;
+  history_retention_days: number;
+  next_sequence: number;
+  last_payload_hash: string | null;
+  latest_snapshot: string | null;
+  last_observed_at: number | null;
+  last_upload_at: number | null;
+  consent_revision: number;
+};
+
+type DeviceSnapshotUpload = {
+  consent_revision: number;
+  sequence: number;
+  observed_at: number;
+  snapshot: ProviderSnapshot;
 };
 
 type APNSResult = {
@@ -277,7 +460,8 @@ export default {
       console.error(JSON.stringify({ event: "request_failed", error: safeError(error) }));
       const pathname = new URL(request.url).pathname;
       if (["/", "/link", "/link/"].includes(pathname)
-          || pathname.startsWith("/v1/link-sessions")) {
+          || pathname.startsWith("/v1/link-sessions")
+          || pathname.startsWith("/v1/dashboard")) {
         return linkJSON({ error: "internal_error" }, 500);
       }
       return json({ error: "internal_error" }, 500);
@@ -296,18 +480,158 @@ export default {
 async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && ["/", "/link", "/link/"].includes(url.pathname)) {
-    return linkPageResponse(url);
+    return dashboardPageResponse(url);
   }
 
   if (request.method === "GET" && url.pathname === "/healthz") {
     return json({ ok: true, mode: "self_hosted", topic: APNS_TOPIC });
   }
 
+  if (url.pathname === "/v1/dashboard/session") {
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    if (request.method === "POST") {
+      if (!(await registrationAccessAllowed(request, env))) {
+        return linkJSON({ error: "unauthorized" }, 401);
+      }
+      return createDashboardSession(env);
+    }
+    if (request.method === "DELETE") return deleteDashboardSession(request, env);
+    return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "POST, DELETE" });
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/dashboard/auth-methods") {
+    return dashboardAuthMethods(env, url);
+  }
+
+  if (url.pathname === "/v1/dashboard/passkeys/authentication/options") {
+    if (request.method !== "POST") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "POST" });
+    }
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    return createPasskeyAuthenticationOptions(request, env, url);
+  }
+
+  if (url.pathname === "/v1/dashboard/passkeys/authentication/verify") {
+    if (request.method !== "POST") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "POST" });
+    }
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    return verifyPasskeyAuthentication(request, env, url);
+  }
+
+  if (url.pathname === "/v1/dashboard/passkeys/reverify") {
+    if (request.method !== "POST") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "POST" });
+    }
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    return reverifyDashboardAccessKey(request, env);
+  }
+
+  if (url.pathname === "/v1/dashboard/passkeys/registration/options") {
+    if (request.method !== "POST") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "POST" });
+    }
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    return createPasskeyRegistrationOptions(request, env, url);
+  }
+
+  if (url.pathname === "/v1/dashboard/passkeys/registration/verify") {
+    if (request.method !== "POST") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "POST" });
+    }
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    return verifyPasskeyRegistration(request, env, url);
+  }
+
+  if (url.pathname === "/v1/dashboard/passkeys") {
+    if (request.method === "GET") return dashboardPasskeySummary(request, env, url);
+    if (request.method === "DELETE") {
+      if (!strictSameOriginRequest(request, url.origin)) {
+        return linkJSON({ error: "forbidden_origin" }, 403);
+      }
+      return deleteDashboardPasskeys(request, env, url);
+    }
+    return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "GET, DELETE" });
+  }
+
+  if (request.method === "GET" && url.pathname === "/v1/dashboard") {
+    if (!(await authorizeDashboardSession(request, env))) {
+      return linkJSON({ error: "unauthorized" }, 401);
+    }
+    return dashboardOverview(env);
+  }
+
+  if (url.pathname === "/v1/dashboard/devices") {
+    if (request.method !== "GET") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "GET" });
+    }
+    const authorization = await dashboardSessionAuthorization(request, env);
+    if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+    return dashboardDevices(env, authorization);
+  }
+
+  const dashboardDeviceActionMatch = /^\/v1\/dashboard\/devices\/([A-Za-z0-9_-]{43})$/
+    .exec(url.pathname);
+  if (dashboardDeviceActionMatch) {
+    if (request.method !== "PATCH" && request.method !== "DELETE") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "PATCH, DELETE" });
+    }
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    return request.method === "PATCH"
+      ? updateDashboardDevice(request, env, dashboardDeviceActionMatch[1])
+      : deleteDashboardDevice(request, env, dashboardDeviceActionMatch[1]);
+  }
+
+  const dashboardAccountActionMatch = /^\/v1\/dashboard\/accounts\/([A-Za-z0-9_-]{43})$/
+    .exec(url.pathname);
+  if (dashboardAccountActionMatch) {
+    if (request.method !== "DELETE") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "DELETE" });
+    }
+    if (!strictSameOriginRequest(request, url.origin)) {
+      return linkJSON({ error: "forbidden_origin" }, 403);
+    }
+    return deleteDashboardAccount(request, env, dashboardAccountActionMatch[1], url);
+  }
+
+  const dashboardHistoryMatch = /^\/v1\/dashboard\/accounts\/([A-Za-z0-9_-]{43})\/history$/
+    .exec(url.pathname);
+  if (dashboardHistoryMatch) {
+    if (request.method !== "GET") {
+      return linkJSON({ error: "method_not_allowed" }, 405, { Allow: "GET" });
+    }
+    if (!(await authorizeDashboardSession(request, env))) {
+      return linkJSON({ error: "unauthorized" }, 401);
+    }
+    return dashboardAccountHistory(env, dashboardHistoryMatch[1], url);
+  }
+  if (url.pathname.startsWith("/v1/dashboard")) {
+    return linkJSON({ error: "not_found" }, 404);
+  }
+
   if (request.method === "POST" && url.pathname === "/v1/link-sessions") {
     if (!sameOriginRequest(request, url.origin)) {
       return linkJSON({ error: "forbidden_origin" }, 403);
     }
-    if (!(await registrationAccessAllowed(request, env))) {
+    const hasServerKey = request.headers.has("x-when-reset-server-key");
+    const keyAllowed = hasServerKey && await registrationAccessAllowed(request, env);
+    const sessionAllowed = !hasServerKey && strictSameOriginRequest(request, url.origin)
+      && await authorizeDashboardSession(request, env);
+    if (!keyAllowed && !sessionAllowed) {
       return linkJSON({ error: "unauthorized" }, 401);
     }
     return createLinkSession(env, url);
@@ -358,7 +682,7 @@ async function route(request: Request, env: Env): Promise<Response> {
     return json({ error: "method_not_allowed" }, 405, { Allow: "GET, POST" });
   }
 
-  const accountMatch = /^\/v1\/devices\/([0-9a-f-]{36})\/accounts\/([0-9a-f-]{36})(?:\/(sync|history|settings))?$/.exec(
+  const accountMatch = /^\/v1\/devices\/([0-9a-f-]{36})\/accounts\/([0-9a-f-]{36})(?:\/(sync|history|settings|snapshots))?$/.exec(
     url.pathname
   );
   if (accountMatch) {
@@ -394,6 +718,27 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
     if (request.method === "PATCH" && accountMatch[3] === "settings") {
       return updateMonitoredAccountPolicy(request, env, deviceID, accountID);
+    }
+    if (accountMatch[3] === "snapshots") {
+      if (request.method === "PUT") {
+        return enableDeviceSnapshotSource(request, env, deviceID, accountID);
+      }
+      if (request.method === "POST") {
+        return uploadDeviceSnapshot(request, env, deviceID, accountID);
+      }
+      if (request.method === "DELETE") {
+        const consentRevision = parseDeleteConsentRevision(url);
+        if (consentRevision === null) {
+          return json({ error: "invalid_consent_revision" }, 400, {
+            "cache-control": "no-store",
+          });
+        }
+        return disableDeviceSnapshotSource(env, deviceID, accountID, consentRevision);
+      }
+      return json({ error: "method_not_allowed" }, 405, {
+        Allow: "PUT, POST, DELETE",
+        "cache-control": "no-store",
+      });
     }
     return json({ error: "method_not_allowed" }, 405);
   }
@@ -461,12 +806,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   });
 }
 
-function linkPageResponse(url: URL): Response {
+function dashboardPageResponse(url: URL): Response {
   if (url.protocol !== "https:") {
     return linkJSON({ error: "https_required" }, 400);
   }
   const nonce = randomBase64URL(16);
-  return new Response(renderLinkPage(url.origin, url.host, nonce), {
+  return new Response(renderDashboardPage(url.origin, url.host, nonce), {
     status: 200,
     headers: linkSecurityHeaders({
       "content-type": "text/html; charset=utf-8",
@@ -475,12 +820,1493 @@ function linkPageResponse(url: URL): Response {
         `script-src 'nonce-${nonce}'`,
         `style-src 'nonce-${nonce}'`,
         "connect-src 'self'",
+        "img-src 'self' data:",
         "form-action 'self'",
         "base-uri 'none'",
+        "object-src 'none'",
         "frame-ancestors 'none'",
       ].join("; "),
     }),
   });
+}
+
+async function createDashboardSession(env: Env): Promise<Response> {
+  const now = Math.floor(Date.now() / 1_000);
+  await pruneDashboardSessions(env, now);
+  const token = randomBase64URL(32);
+  const tokenHash = await dashboardSessionHash(env, token);
+  const expiresAt = now + DASHBOARD_SESSION_TTL_SECONDS;
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO dashboard_sessions (token_hash, created_at, expires_at)
+       VALUES (?, ?, ?)`
+    ).bind(tokenHash, now, expiresAt),
+    env.DB.prepare(
+      `INSERT INTO dashboard_session_authorizations (
+         token_hash, auth_method, key_verified_until, passkey_rp_id
+       ) VALUES (?, 'access_key', ?, NULL)`
+    ).bind(tokenHash, now + DASHBOARD_KEY_GRANT_TTL_SECONDS),
+  ]);
+  console.log(JSON.stringify({ event: "dashboard_session_created" }));
+  return new Response(null, {
+    status: 204,
+    headers: linkSecurityHeaders({
+      "set-cookie": dashboardSessionCookie(token, DASHBOARD_SESSION_TTL_SECONDS),
+    }),
+  });
+}
+
+async function deleteDashboardSession(request: Request, env: Env): Promise<Response> {
+  const token = dashboardCookieToken(request);
+  if (token) {
+    const tokenHash = await dashboardSessionHash(env, token);
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM dashboard_session_authorizations WHERE token_hash = ?")
+        .bind(tokenHash),
+      env.DB.prepare("DELETE FROM dashboard_sessions WHERE token_hash = ?").bind(tokenHash),
+    ]);
+  }
+  console.log(JSON.stringify({ event: "dashboard_session_deleted" }));
+  return new Response(null, {
+    status: 204,
+    headers: linkSecurityHeaders({
+      "set-cookie": dashboardSessionCookie("", 0),
+    }),
+  });
+}
+
+async function authorizeDashboardSession(request: Request, env: Env): Promise<boolean> {
+  const token = dashboardCookieToken(request);
+  if (!token) return false;
+  const now = Math.floor(Date.now() / 1_000);
+  const tokenHash = await dashboardSessionHash(env, token);
+  const session = await env.DB.prepare(
+    `SELECT s.token_hash, s.expires_at
+     FROM dashboard_sessions AS s
+     INNER JOIN dashboard_session_authorizations AS a ON a.token_hash = s.token_hash
+     WHERE s.token_hash = ? AND s.expires_at > ?`
+  ).bind(tokenHash, now).first<DashboardSessionRow>();
+  if (session) return true;
+  await env.DB.prepare("DELETE FROM dashboard_sessions WHERE token_hash = ?")
+    .bind(tokenHash).run();
+  return false;
+}
+
+async function dashboardSessionAuthorization(
+  request: Request,
+  env: Env,
+): Promise<(DashboardSessionAuthorizationRow & { token_hash: string }) | null> {
+  const token = dashboardCookieToken(request);
+  if (!token) return null;
+  const now = Math.floor(Date.now() / 1_000);
+  const tokenHash = await dashboardSessionHash(env, token);
+  const row = await env.DB.prepare(
+    `SELECT a.auth_method, a.key_verified_until, a.passkey_rp_id
+     FROM dashboard_sessions AS s
+     JOIN dashboard_session_authorizations AS a ON a.token_hash = s.token_hash
+     WHERE s.token_hash = ? AND s.expires_at > ?`
+  ).bind(tokenHash, now).first<DashboardSessionAuthorizationRow>();
+  return row ? { ...row, token_hash: tokenHash } : null;
+}
+
+function dashboardManagementAllowed(
+  authorization: DashboardSessionAuthorizationRow | null,
+  now = Math.floor(Date.now() / 1_000),
+): boolean {
+  return authorization !== null
+    && authorization.key_verified_until !== null
+    && authorization.key_verified_until >= now;
+}
+
+// Passkey enrollment is already protected by the HttpOnly dashboard session and the
+// user-verification ceremony itself. Do not force the user to type the recovery key again just
+// to add a second device credential. Destructive account/Worker-data actions continue to use the
+// stronger dashboardManagementAllowed step-up below.
+function dashboardPasskeyManagementAllowed(
+  authorization: DashboardSessionAuthorizationRow | null,
+): boolean {
+  return authorization !== null;
+}
+
+function dashboardCookieToken(request: Request): string | null {
+  const cookie = request.headers.get("cookie");
+  if (!cookie) return null;
+  for (const part of cookie.split(";")) {
+    const item = part.trim();
+    const separator = item.indexOf("=");
+    if (separator <= 0 || item.slice(0, separator) !== DASHBOARD_COOKIE_NAME) continue;
+    const token = item.slice(separator + 1);
+    return /^[A-Za-z0-9_-]{43}$/.test(token) ? token : null;
+  }
+  return null;
+}
+
+function dashboardSessionCookie(token: string, maximumAge: number): string {
+  return `${DASHBOARD_COOKIE_NAME}=${token}; Path=/; Max-Age=${maximumAge}; HttpOnly; Secure; SameSite=Strict`;
+}
+
+async function dashboardSessionHash(
+  env: Pick<Env, "REGISTRATION_ACCESS_KEY">,
+  token: string,
+): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(registrationAccessKey(env)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`when-reset:dashboard-session:v1:${token}`),
+  );
+  return base64URL(new Uint8Array(signature));
+}
+
+async function dashboardAccessKeyGeneration(env: Env): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(registrationAccessKey(env)),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode("when-reset:dashboard-passkey-generation:v1"),
+  );
+  return base64URL(new Uint8Array(signature));
+}
+
+async function dashboardAuthMethods(env: Env, url: URL): Promise<Response> {
+  const generation = await dashboardAccessKeyGeneration(env);
+  const row = await env.DB.prepare(
+    `SELECT 1 AS enabled FROM dashboard_passkeys
+     WHERE rp_id = ? AND access_key_generation = ? LIMIT 1`
+  ).bind(url.hostname, generation).first<{ enabled: number }>();
+  return linkJSON({ passkey_enabled: row?.enabled === 1 });
+}
+
+async function dashboardPasskeySummary(request: Request, env: Env, url: URL): Promise<Response> {
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  const generation = await dashboardAccessKeyGeneration(env);
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM dashboard_passkeys
+     WHERE rp_id = ? AND access_key_generation = ?`
+  ).bind(url.hostname, generation).first<{ count: number }>();
+  return linkJSON({
+    count: Math.max(0, Number(row?.count ?? 0)),
+    can_manage: dashboardPasskeyManagementAllowed(authorization),
+  });
+}
+
+async function reverifyDashboardAccessKey(request: Request, env: Env): Promise<Response> {
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  if (!(await registrationAccessAllowed(request, env))) {
+    return linkJSON({ error: "unauthorized" }, 401);
+  }
+  const now = Math.floor(Date.now() / 1_000);
+  await env.DB.prepare(
+    `UPDATE dashboard_session_authorizations SET key_verified_until = ?
+     WHERE token_hash = ?`
+  ).bind(now + DASHBOARD_KEY_GRANT_TTL_SECONDS, authorization.token_hash).run();
+  console.log(JSON.stringify({ event: "dashboard_access_key_reverified" }));
+  return new Response(null, { status: 204, headers: linkSecurityHeaders() });
+}
+
+async function createPasskeyRegistrationOptions(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  if (!(await hasEmptyJSONBody(request))) return linkJSON({ error: "invalid_request" }, 400);
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  if (!dashboardPasskeyManagementAllowed(authorization)) {
+    return linkJSON({ error: "access_key_verification_required" }, 403);
+  }
+  const identity = await dashboardWebAuthnIdentity(env, url.hostname);
+  const generation = await dashboardAccessKeyGeneration(env);
+  await env.DB.prepare(
+    `DELETE FROM dashboard_passkeys
+     WHERE rp_id = ? AND access_key_generation <> ?`
+  ).bind(url.hostname, generation).run();
+  const options = await generateRegistrationOptions({
+    rpName: "When Reset",
+    rpID: url.hostname,
+    userID: new Uint8Array(base64URLBytes(identity.user_handle)),
+    userName: "When Reset operator",
+    userDisplayName: "When Reset operator",
+    timeout: WEBAUTHN_CHALLENGE_TTL_SECONDS * 1_000,
+    attestationType: "none",
+    supportedAlgorithmIDs: [-7],
+    authenticatorSelection: {
+      residentKey: "required",
+      requireResidentKey: true,
+      userVerification: "required",
+    },
+  });
+  const transactionID = await storeWebAuthnChallenge(env, {
+    purpose: "registration",
+    challenge: options.challenge,
+    origin: url.origin,
+    rpID: url.hostname,
+    sessionTokenHash: authorization.token_hash,
+  });
+  if (!transactionID) return linkJSON({ error: "too_many_requests" }, 429);
+  return linkJSON({ transaction_id: transactionID, options });
+}
+
+async function verifyPasskeyRegistration(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  const body = await parsePasskeyVerificationBody(request, "registration");
+  if (!body) return linkJSON({ error: "invalid_request" }, 400);
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  if (!dashboardPasskeyManagementAllowed(authorization)) {
+    return linkJSON({ error: "access_key_verification_required" }, 403);
+  }
+  const transaction = await consumeWebAuthnChallenge(
+    env, body.transaction_id, "registration", url, authorization.token_hash,
+  );
+  if (!transaction) return passkeyVerificationFailed();
+  try {
+    if (!webAuthnClientDataIsTopLevel(body.credential.response.clientDataJSON)) {
+      return passkeyVerificationFailed();
+    }
+    const verification = await verifyRegistrationResponse({
+      response: body.credential,
+      expectedChallenge: transaction.challenge,
+      expectedOrigin: transaction.origin,
+      expectedRPID: transaction.rp_id,
+      requireUserPresence: true,
+      requireUserVerification: true,
+      supportedAlgorithmIDs: [-7],
+    });
+    if (!verification.verified || !verification.registrationInfo.userVerified) {
+      return passkeyVerificationFailed();
+    }
+    const identity = await dashboardWebAuthnIdentity(env, url.hostname);
+    const credential = verification.registrationInfo.credential;
+    const publicKey = new Uint8Array(credential.publicKey).buffer;
+    const now = Math.floor(Date.now() / 1_000);
+    await env.DB.prepare(
+      `INSERT INTO dashboard_passkeys (
+         credential_id, user_handle, rp_id, public_key, counter, transports_json,
+         access_key_generation, created_at, last_used_at
+       ) VALUES (?, ?, ?, ?, ?, '[]', ?, ?, NULL)`
+    ).bind(
+      credential.id,
+      identity.user_handle,
+      url.hostname,
+      publicKey,
+      credential.counter,
+      await dashboardAccessKeyGeneration(env),
+      now,
+    ).run();
+    console.log(JSON.stringify({ event: "dashboard_passkey_registered" }));
+    return new Response(null, { status: 204, headers: linkSecurityHeaders() });
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: "dashboard_passkey_registration_rejected",
+      error: safeError(error),
+    }));
+    return passkeyVerificationFailed();
+  }
+}
+
+async function createPasskeyAuthenticationOptions(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  if (!(await hasEmptyJSONBody(request))) return linkJSON({ error: "invalid_request" }, 400);
+  const generation = await dashboardAccessKeyGeneration(env);
+  const existing = await env.DB.prepare(
+    `SELECT 1 AS enabled FROM dashboard_passkeys
+     WHERE rp_id = ? AND access_key_generation = ? LIMIT 1`
+  ).bind(url.hostname, generation).first<{ enabled: number }>();
+  if (!existing) return linkJSON({ error: "passkey_unavailable" }, 404);
+  const options = await generateAuthenticationOptions({
+    rpID: url.hostname,
+    timeout: WEBAUTHN_CHALLENGE_TTL_SECONDS * 1_000,
+    userVerification: "required",
+  });
+  delete options.allowCredentials;
+  const transactionID = await storeWebAuthnChallenge(env, {
+    purpose: "authentication",
+    challenge: options.challenge,
+    origin: url.origin,
+    rpID: url.hostname,
+    sessionTokenHash: null,
+  });
+  if (!transactionID) return linkJSON({ error: "too_many_requests" }, 429);
+  return linkJSON({ transaction_id: transactionID, options });
+}
+
+async function verifyPasskeyAuthentication(
+  request: Request,
+  env: Env,
+  url: URL,
+): Promise<Response> {
+  const body = await parsePasskeyVerificationBody(request, "authentication");
+  if (!body) return linkJSON({ error: "invalid_request" }, 400);
+  const transaction = await consumeWebAuthnChallenge(
+    env, body.transaction_id, "authentication", url, null,
+  );
+  if (!transaction) return passkeyVerificationFailed();
+  try {
+    if (!webAuthnClientDataIsTopLevel(body.credential.response.clientDataJSON)) {
+      return passkeyVerificationFailed();
+    }
+    const generation = await dashboardAccessKeyGeneration(env);
+    const passkey = await env.DB.prepare(
+      `SELECT credential_id, user_handle, public_key, counter, transports_json
+       FROM dashboard_passkeys
+       WHERE credential_id = ? AND rp_id = ? AND access_key_generation = ?`
+    ).bind(body.credential.id, url.hostname, generation).first<DashboardPasskeyRow>();
+    if (!passkey || body.credential.response.userHandle !== passkey.user_handle) {
+      return passkeyVerificationFailed();
+    }
+    const verification = await verifyAuthenticationResponse({
+      response: body.credential,
+      expectedChallenge: transaction.challenge,
+      expectedOrigin: transaction.origin,
+      expectedRPID: transaction.rp_id,
+      credential: {
+        id: passkey.credential_id,
+        publicKey: new Uint8Array(passkey.public_key),
+        counter: passkey.counter,
+      },
+      requireUserVerification: true,
+    });
+    if (!verification.verified || !verification.authenticationInfo.userVerified) {
+      return passkeyVerificationFailed();
+    }
+    const newCounter = verification.authenticationInfo.newCounter;
+    const now = Math.floor(Date.now() / 1_000);
+    const counterUpdate = await env.DB.prepare(
+      `UPDATE dashboard_passkeys SET counter = ?, last_used_at = ?
+       WHERE credential_id = ? AND access_key_generation = ? AND counter = ?`
+    ).bind(newCounter, now, passkey.credential_id, generation, passkey.counter).run();
+    if ((counterUpdate.meta.changes ?? 0) !== 1) return passkeyVerificationFailed();
+    const token = randomBase64URL(32);
+    const tokenHash = await dashboardSessionHash(env, token);
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO dashboard_sessions (token_hash, created_at, expires_at) VALUES (?, ?, ?)`
+      ).bind(tokenHash, now, now + DASHBOARD_SESSION_TTL_SECONDS),
+      env.DB.prepare(
+        `INSERT INTO dashboard_session_authorizations (
+           token_hash, auth_method, key_verified_until, passkey_rp_id
+         ) VALUES (?, 'passkey', NULL, ?)`
+      ).bind(tokenHash, url.hostname),
+    ]);
+    console.log(JSON.stringify({ event: "dashboard_passkey_authenticated" }));
+    return new Response(null, {
+      status: 204,
+      headers: linkSecurityHeaders({
+        "set-cookie": dashboardSessionCookie(token, DASHBOARD_SESSION_TTL_SECONDS),
+      }),
+    });
+  } catch {
+    return passkeyVerificationFailed();
+  }
+}
+
+async function deleteDashboardPasskeys(request: Request, env: Env, url: URL): Promise<Response> {
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  if (!dashboardPasskeyManagementAllowed(authorization)) {
+    return linkJSON({ error: "access_key_verification_required" }, 403);
+  }
+  await env.DB.batch([
+    env.DB.prepare(
+      `DELETE FROM dashboard_sessions WHERE token_hash IN (
+         SELECT token_hash FROM dashboard_session_authorizations
+         WHERE auth_method = 'passkey' AND passkey_rp_id = ?
+       ) OR token_hash = ?`
+    ).bind(url.hostname, authorization.token_hash),
+    env.DB.prepare(
+      `DELETE FROM dashboard_session_authorizations
+       WHERE auth_method = 'passkey' AND passkey_rp_id = ?`
+    ).bind(url.hostname),
+    env.DB.prepare("DELETE FROM dashboard_passkeys WHERE rp_id = ?").bind(url.hostname),
+    env.DB.prepare("DELETE FROM dashboard_webauthn_challenges WHERE rp_id = ?")
+      .bind(url.hostname),
+  ]);
+  console.log(JSON.stringify({ event: "dashboard_passkeys_deleted" }));
+  return new Response(null, {
+    status: 204,
+    headers: linkSecurityHeaders({ "set-cookie": dashboardSessionCookie("", 0) }),
+  });
+}
+
+async function dashboardWebAuthnIdentity(
+  env: Env,
+  rpID: string,
+): Promise<{ user_handle: string }> {
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO dashboard_webauthn_identities (rp_id, user_handle, created_at)
+     VALUES (?, ?, ?)`
+  ).bind(rpID, randomBase64URL(32), Math.floor(Date.now() / 1_000)).run();
+  const identity = await env.DB.prepare(
+    "SELECT user_handle FROM dashboard_webauthn_identities WHERE rp_id = ?"
+  ).bind(rpID).first<{ user_handle: string }>();
+  if (!identity) throw new Error("Could not create WebAuthn identity");
+  return identity;
+}
+
+async function storeWebAuthnChallenge(
+  env: Env,
+  value: {
+    purpose: "authentication" | "registration";
+    challenge: string;
+    origin: string;
+    rpID: string;
+    sessionTokenHash: string | null;
+  },
+): Promise<string | null> {
+  const now = Math.floor(Date.now() / 1_000);
+  await pruneWebAuthnChallenges(env, now);
+  const transactionID = randomBase64URL(32);
+  const result = await env.DB.prepare(
+    `INSERT INTO dashboard_webauthn_challenges (
+       transaction_id, purpose, challenge, origin, rp_id, session_token_hash,
+       created_at, expires_at, consumed_at
+     ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, NULL
+       WHERE (SELECT COUNT(*) FROM dashboard_webauthn_challenges
+              WHERE consumed_at IS NULL AND expires_at > ?) < ?`
+  ).bind(
+    transactionID,
+    value.purpose,
+    value.challenge,
+    value.origin,
+    value.rpID,
+    value.sessionTokenHash,
+    now,
+    now + WEBAUTHN_CHALLENGE_TTL_SECONDS,
+    now,
+    MAX_ACTIVE_WEBAUTHN_CHALLENGES,
+  ).run();
+  return (result.meta.changes ?? 0) === 1 ? transactionID : null;
+}
+
+async function consumeWebAuthnChallenge(
+  env: Env,
+  transactionID: string,
+  purpose: "authentication" | "registration",
+  url: URL,
+  sessionTokenHash: string | null,
+): Promise<DashboardWebAuthnChallengeRow | null> {
+  const now = Math.floor(Date.now() / 1_000);
+  const row = await env.DB.prepare(
+    `SELECT transaction_id, purpose, challenge, origin, rp_id, session_token_hash, expires_at
+     FROM dashboard_webauthn_challenges WHERE transaction_id = ?`
+  ).bind(transactionID).first<DashboardWebAuthnChallengeRow>();
+  if (!row) return null;
+  const result = await env.DB.prepare(
+    `UPDATE dashboard_webauthn_challenges SET consumed_at = ?
+     WHERE transaction_id = ? AND purpose = ? AND origin = ? AND rp_id = ?
+       AND session_token_hash IS ? AND consumed_at IS NULL AND expires_at > ?`
+  ).bind(
+    now,
+    transactionID,
+    purpose,
+    url.origin,
+    url.hostname,
+    sessionTokenHash,
+    now,
+  ).run();
+  return (result.meta.changes ?? 0) === 1 ? row : null;
+}
+
+async function pruneWebAuthnChallenges(env: Env, now: number): Promise<void> {
+  await env.DB.prepare(
+    "DELETE FROM dashboard_webauthn_challenges WHERE expires_at <= ? OR consumed_at IS NOT NULL"
+  ).bind(now).run();
+}
+
+function passkeyVerificationFailed(): Response {
+  return linkJSON({ error: "passkey_verification_failed" }, 401);
+}
+
+async function dashboardOverview(env: Env): Promise<Response> {
+  const now = Math.floor(Date.now() / 1_000);
+  const [groups, deviceSummary, runSummary, resetSummary] = await Promise.all([
+    loadDashboardAccountGroups(env),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN last_seen_at >= ? THEN 1 ELSE 0 END) AS active,
+              SUM(CASE WHEN push_disabled_at IS NOT NULL THEN 1 ELSE 0 END) AS push_disabled,
+              SUM(CASE WHEN apns_environment = 'production' THEN 1 ELSE 0 END) AS production,
+              SUM(CASE WHEN apns_environment = 'development' THEN 1 ELSE 0 END) AS development
+       FROM devices`
+    ).bind(now - ACTIVE_DEVICE_DAYS * 86_400).first<{
+      total: number;
+      active: number | null;
+      push_disabled: number | null;
+      production: number | null;
+      development: number | null;
+    }>(),
+    env.DB.prepare(
+      `SELECT SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+              SUM(CASE WHEN status IN ('running', 'fetched') THEN 1 ELSE 0 END) AS running,
+              SUM(CASE WHEN status = 'failed' AND created_at >= ? THEN 1 ELSE 0 END) AS failed_24h,
+              SUM(CASE WHEN status = 'succeeded' AND created_at >= ? THEN 1 ELSE 0 END) AS succeeded_24h,
+              MAX(completed_at) AS last_completed_at
+       FROM monitor_runs`
+    ).bind(now - 86_400, now - 86_400).first<{
+      pending: number | null;
+      running: number | null;
+      failed_24h: number | null;
+      succeeded_24h: number | null;
+      last_completed_at: number | null;
+    }>(),
+    env.DB.prepare(
+      `SELECT MIN(reset_at) AS nearest_reset_at
+       FROM (
+         SELECT CAST(json_extract(quota.value, '$.resets_at') AS INTEGER) AS reset_at
+         FROM monitored_accounts
+         INNER JOIN account_monitoring_consent
+           ON account_monitoring_consent.device_id = monitored_accounts.device_id
+          AND account_monitoring_consent.account_id = monitored_accounts.account_id
+          AND account_monitoring_consent.enabled = 1
+         INNER JOIN json_each(
+           CASE
+             WHEN json_valid(monitored_accounts.latest_snapshot)
+              AND json_extract(monitored_accounts.latest_snapshot, '$.provider_id')
+                  = monitored_accounts.provider_id
+             THEN COALESCE(json_extract(monitored_accounts.latest_snapshot, '$.windows'), '[]')
+             ELSE '[]'
+           END
+         ) AS quota
+         UNION ALL
+         SELECT CAST(json_extract(quota.value, '$.resets_at') AS INTEGER) AS reset_at
+         FROM device_snapshot_sources
+         INNER JOIN device_snapshot_consent
+           ON device_snapshot_consent.device_id = device_snapshot_sources.device_id
+          AND device_snapshot_consent.account_id = device_snapshot_sources.account_id
+          AND device_snapshot_consent.enabled = 1
+         INNER JOIN json_each(
+           CASE
+             WHEN json_valid(device_snapshot_sources.latest_snapshot)
+              AND json_extract(device_snapshot_sources.latest_snapshot, '$.provider_id')
+                  = device_snapshot_sources.provider_id
+             THEN COALESCE(
+               json_extract(device_snapshot_sources.latest_snapshot, '$.windows'), '[]'
+             )
+             ELSE '[]'
+           END
+         ) AS quota
+       )
+       WHERE reset_at > ?`
+    ).bind(now).first<{ nearest_reset_at: number | null }>(),
+  ]);
+
+  let healthy = 0;
+  let attention = 0;
+  let unchecked = 0;
+  let lastSuccessAt: number | null = null;
+  for (const group of groups.groups) {
+    const row = group.representative;
+    const session = dashboardAccountSession(row, now);
+    if (session.status === "active") healthy += 1;
+    else if (session.status === "unchecked") unchecked += 1;
+    else attention += 1;
+    if (row.last_success_at !== null) {
+      lastSuccessAt = lastSuccessAt === null
+        ? row.last_success_at : Math.max(lastSuccessAt, row.last_success_at);
+    }
+  }
+
+  const displayedGroups = groups.groups.slice(0, DASHBOARD_ACCOUNT_LIMIT);
+  const snapshots = await loadDashboardSnapshots(env, displayedGroups);
+  const accounts = displayedGroups.map((group) => {
+    const selected = snapshots.get(group.id) ?? null;
+    const row = selected?.row ?? group.representative;
+    const session = dashboardAccountSession(row, now);
+    return {
+      id: group.id,
+      provider_id: row.provider_id,
+      provider_name: providerDisplayName(row.provider_id),
+      display_name: safeDashboardText(row.display_name, 128)
+        ?? providerDisplayName(row.provider_id),
+      plan: safeDashboardText(row.plan, 200),
+      plan_expires_at: safeDashboardTimestamp(row.plan_expires_at),
+      trial_expires_at: safeDashboardTimestamp(row.trial_expires_at),
+      status: session.status,
+      last_checked_at: session.checkedAt,
+      last_success_at: safeDashboardTimestamp(row.last_success_at),
+      next_refresh_at: safeDashboardTimestamp(row.next_refresh_at),
+      refresh_interval_seconds: row.source_kind === "device"
+          && row.refresh_interval_seconds === 0 ? 0 : boundedDashboardInteger(
+        row.refresh_interval_seconds, MIN_MONITOR_INTERVAL_SECONDS, MAX_MONITOR_INTERVAL_SECONDS
+      ),
+      history_retention_days: boundedDashboardInteger(
+        row.history_retention_days, MIN_HISTORY_RETENTION_DAYS, MAX_HISTORY_RETENTION_DAYS
+      ),
+      source: selected?.source ?? row.source_kind,
+      source_count: new Set(
+        group.rows.map((source) => `${source.device_id}\u0000${source.account_id}`)
+      ).size,
+      snapshot: selected?.snapshot ?? null,
+    };
+  });
+
+  return dashboardJSON({
+    version: 1,
+    generated_at: now,
+    summary: {
+      accounts: groups.groups.length,
+      shown_accounts: accounts.length,
+      healthy,
+      attention,
+      unchecked,
+      last_success_at: lastSuccessAt,
+      nearest_reset_at: safeDashboardTimestamp(resetSummary?.nearest_reset_at),
+      truncated: groups.incomplete || groups.groups.length > accounts.length,
+    },
+    devices: {
+      total: deviceSummary?.total ?? 0,
+      active: deviceSummary?.active ?? 0,
+      push_disabled: deviceSummary?.push_disabled ?? 0,
+      production: deviceSummary?.production ?? 0,
+      development: deviceSummary?.development ?? 0,
+    },
+    runs: {
+      pending: runSummary?.pending ?? 0,
+      running: runSummary?.running ?? 0,
+      failed_24h: runSummary?.failed_24h ?? 0,
+      succeeded_24h: runSummary?.succeeded_24h ?? 0,
+      last_completed_at: runSummary?.last_completed_at ?? null,
+    },
+    accounts,
+  }, "overview");
+}
+
+type DashboardAccountDeleteMode = "preserve" | "purge";
+
+async function deleteDashboardAccount(
+  request: Request,
+  env: Env,
+  dashboardID: string,
+  url: URL,
+): Promise<Response> {
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  if (!dashboardManagementAllowed(authorization)) {
+    return linkJSON({ error: "access_key_verification_required" }, 403);
+  }
+  const modeValue = url.searchParams.get("mode") ?? "preserve";
+  if (modeValue !== "preserve" && modeValue !== "purge") {
+    return linkJSON({ error: "invalid_delete_mode" }, 400);
+  }
+  const mode = modeValue as DashboardAccountDeleteMode;
+  const loaded = await loadDashboardAccountGroups(env);
+  if (loaded.incomplete) {
+    return linkJSON({ error: "account_index_incomplete" }, 503);
+  }
+  const group = loaded.groups.find((candidate) => candidate.id === dashboardID);
+  if (!group) return linkJSON({ error: "account_not_found" }, 404);
+
+  const now = Math.floor(Date.now() / 1_000);
+  const statements: D1PreparedStatement[] = [];
+  const seen = new Set<string>();
+  for (const source of group.rows) {
+    const sourceKey = `${source.source_kind}\u0000${source.device_id}\u0000${source.account_id}`;
+    if (seen.has(sourceKey)) continue;
+    seen.add(sourceKey);
+    if (source.source_kind === "worker") {
+      if (mode === "preserve") {
+        statements.push(
+          env.DB.prepare(
+            `INSERT INTO dashboard_account_archives (
+               device_id, account_id, provider_id, workspace_id, display_name, plan,
+               plan_expires_at, trial_expires_at, missing_quotas, latest_snapshot,
+               last_refresh_at, last_success_at, refresh_interval_seconds,
+               history_retention_days, archived_at
+             )
+             SELECT device_id, account_id, provider_id, workspace_id, display_name, plan,
+                    plan_expires_at, trial_expires_at, missing_quotas, latest_snapshot,
+                    last_refresh_at, last_success_at, refresh_interval_seconds,
+                    history_retention_days, ?
+             FROM monitored_accounts
+             WHERE device_id = ? AND account_id = ?
+               AND EXISTS (
+                 SELECT 1 FROM account_monitoring_consent
+                 WHERE device_id = ? AND account_id = ? AND enabled = 1
+               )
+             ON CONFLICT(device_id, account_id) DO UPDATE SET
+               provider_id = excluded.provider_id,
+               workspace_id = excluded.workspace_id,
+               display_name = excluded.display_name,
+               plan = excluded.plan,
+               plan_expires_at = excluded.plan_expires_at,
+               trial_expires_at = excluded.trial_expires_at,
+               missing_quotas = excluded.missing_quotas,
+               latest_snapshot = excluded.latest_snapshot,
+               last_refresh_at = excluded.last_refresh_at,
+               last_success_at = excluded.last_success_at,
+               refresh_interval_seconds = excluded.refresh_interval_seconds,
+               history_retention_days = excluded.history_retention_days,
+               archived_at = excluded.archived_at`
+          ).bind(
+            now, source.device_id, source.account_id, source.device_id, source.account_id,
+          ),
+          env.DB.prepare(
+            `INSERT OR IGNORE INTO dashboard_account_archive_history (
+               device_id, account_id, provider_id, metric_id, metric_title, kind,
+               window_minutes, remaining_percent, recorded_at, resets_at,
+               seconds_until_reset, plan
+             )
+             SELECT device_id, account_id, provider_id, metric_id, metric_title, kind,
+                    window_minutes, remaining_percent, recorded_at, resets_at,
+                    seconds_until_reset, plan
+             FROM usage_history
+             WHERE device_id = ? AND account_id = ?`
+          ).bind(source.device_id, source.account_id),
+        );
+      } else {
+        statements.push(
+          env.DB.prepare(
+            `DELETE FROM dashboard_account_archives
+             WHERE device_id = ? AND account_id = ?`
+          ).bind(source.device_id, source.account_id),
+          env.DB.prepare(
+            `DELETE FROM dashboard_account_archive_history
+             WHERE device_id = ? AND account_id = ?`
+          ).bind(source.device_id, source.account_id),
+        );
+      }
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM usage_history WHERE device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id),
+        env.DB.prepare(
+          `DELETE FROM monitored_accounts WHERE device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id),
+        env.DB.prepare(
+          `DELETE FROM account_monitoring_consent WHERE device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id),
+      );
+    } else if (mode === "purge") {
+      statements.push(
+        env.DB.prepare(
+          `DELETE FROM device_snapshot_history WHERE device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id),
+        env.DB.prepare(
+          `DELETE FROM device_snapshot_sources WHERE device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id),
+        env.DB.prepare(
+          `DELETE FROM device_snapshot_consent WHERE device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id),
+      );
+    } else {
+      statements.push(
+        env.DB.prepare(
+          `UPDATE device_snapshot_consent SET enabled = 0, updated_at = ?
+           WHERE device_id = ? AND account_id = ?`
+        ).bind(now, source.device_id, source.account_id),
+      );
+    }
+  }
+  if (statements.length === 0) return linkJSON({ error: "account_not_found" }, 404);
+  // A single group can contain several physical copies. Keep the operation bounded
+  // to the already bounded dashboard group and let D1 execute the changes atomically.
+  await env.DB.batch(statements);
+  console.log(JSON.stringify({
+    event: mode === "preserve" ? "dashboard_account_detached" : "dashboard_account_deleted",
+    sources: seen.size,
+  }));
+  return linkJSON({
+    ok: true,
+    mode,
+    retained_data: mode === "preserve",
+  }, 200, { "cache-control": "no-store" });
+}
+
+type DashboardDeviceRow = {
+  device_id: string;
+  secret_hash: string;
+  apns_environment: string;
+  created_at: number;
+  last_seen_at: number;
+  last_push_at: number | null;
+  push_disabled_at: number | null;
+  monitored_accounts: number | null;
+  published_accounts: number | null;
+  subscriptions: number | null;
+};
+
+// Device rows are addressed by an HMAC handle so the dashboard never receives, renders, or
+// echoes a real device identifier. The same key already anonymizes account rows.
+async function dashboardDeviceID(key: CryptoKey, deviceID: string): Promise<string> {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`when-reset:dashboard-device:v1:${deviceID}`),
+  );
+  return base64URL(new Uint8Array(signature));
+}
+
+// A short, stable, unambiguous nickname so a person can tell two linked devices apart without
+// the Worker ever exposing the device identifier itself.
+function dashboardDeviceLabel(handle: string): string {
+  const alphabet = "23456789ABCDEFGHJKMNPQRSTVWXYZ";
+  let label = "";
+  for (let index = 0; index < 4; index += 1) {
+    const code = handle.charCodeAt(index) + index * 7;
+    label += alphabet[code % alphabet.length];
+  }
+  return label;
+}
+
+async function loadDashboardDeviceRows(env: Env): Promise<DashboardDeviceRow[]> {
+  const result = await env.DB.prepare(
+    `SELECT devices.device_id, devices.secret_hash, devices.apns_environment,
+            devices.created_at, devices.last_seen_at, devices.last_push_at,
+            devices.push_disabled_at,
+            (SELECT COUNT(*) FROM monitored_accounts
+              INNER JOIN account_monitoring_consent
+                ON account_monitoring_consent.device_id = monitored_accounts.device_id
+               AND account_monitoring_consent.account_id = monitored_accounts.account_id
+               AND account_monitoring_consent.enabled = 1
+              WHERE monitored_accounts.device_id = devices.device_id) AS monitored_accounts,
+            (SELECT COUNT(*) FROM device_snapshot_sources
+              INNER JOIN device_snapshot_consent
+                ON device_snapshot_consent.device_id = device_snapshot_sources.device_id
+               AND device_snapshot_consent.account_id = device_snapshot_sources.account_id
+               AND device_snapshot_consent.enabled = 1
+              WHERE device_snapshot_sources.device_id = devices.device_id) AS published_accounts,
+            (SELECT COUNT(*) FROM remote_account_subscriptions
+              WHERE remote_account_subscriptions.subscriber_device_id = devices.device_id)
+              AS subscriptions
+     FROM devices
+     ORDER BY devices.last_seen_at DESC, devices.device_id
+     LIMIT ?`
+  ).bind(DASHBOARD_DEVICE_LIMIT + 1).all<DashboardDeviceRow>();
+  return result.results;
+}
+
+async function dashboardDevices(env: Env, authorization: DashboardSessionAuthorizationRow):
+  Promise<Response> {
+  const now = Math.floor(Date.now() / 1_000);
+  const rows = await loadDashboardDeviceRows(env);
+  const truncated = rows.length > DASHBOARD_DEVICE_LIMIT;
+  const shown = rows.slice(0, DASHBOARD_DEVICE_LIMIT);
+  const key = await credentialFingerprintKey(env);
+  const activeSince = now - ACTIVE_DEVICE_DAYS * 86_400;
+  const devices = await Promise.all(shown.map(async (row) => {
+    const handle = await dashboardDeviceID(key, row.device_id);
+    return {
+      id: handle,
+      label: dashboardDeviceLabel(handle),
+      environment: row.apns_environment === "development" ? "development" : "production",
+      created_at: safeDashboardTimestamp(row.created_at),
+      last_seen_at: safeDashboardTimestamp(row.last_seen_at),
+      last_push_at: safeDashboardTimestamp(row.last_push_at),
+      push_disabled_at: safeDashboardTimestamp(row.push_disabled_at),
+      push_enabled: row.push_disabled_at === null,
+      active: row.last_seen_at >= activeSince,
+      retired: row.push_disabled_at !== null && row.last_seen_at < activeSince,
+      monitored_accounts: Math.max(0, Number(row.monitored_accounts ?? 0)),
+      published_accounts: Math.max(0, Number(row.published_accounts ?? 0)),
+      subscriptions: Math.max(0, Number(row.subscriptions ?? 0)),
+    };
+  }));
+  return dashboardJSON({
+    version: 1,
+    generated_at: now,
+    can_manage: dashboardManagementAllowed(authorization, now),
+    truncated,
+    devices,
+  }, "devices");
+}
+
+async function resolveDashboardDevice(
+  env: Env,
+  handle: string,
+): Promise<DashboardDeviceRow | null> {
+  const key = await credentialFingerprintKey(env);
+  for (const row of await loadDashboardDeviceRows(env)) {
+    if (timingSafeEqualStrings(await dashboardDeviceID(key, row.device_id), handle)) return row;
+  }
+  return null;
+}
+
+async function updateDashboardDevice(
+  request: Request,
+  env: Env,
+  handle: string,
+): Promise<Response> {
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  if (!dashboardManagementAllowed(authorization)) {
+    return linkJSON({ error: "access_key_verification_required" }, 403);
+  }
+  const body = await boundedRequestJSON(request, MAX_DEVICE_TOKEN_BODY_BYTES);
+  if (!isRecord(body) || typeof body.push_enabled !== "boolean"
+      || Object.keys(body).length !== 1) {
+    return linkJSON({ error: "invalid_device_update" }, 400);
+  }
+  const device = await resolveDashboardDevice(env, handle);
+  if (!device) return linkJSON({ error: "device_not_found" }, 404);
+  const now = Math.floor(Date.now() / 1_000);
+  // Re-pinning the row to its secret hash keeps a concurrent re-registration from being
+  // silently overwritten by a stale dashboard view.
+  const result = await env.DB.prepare(
+    `UPDATE devices SET push_disabled_at = ?
+     WHERE device_id = ? AND secret_hash = ?`
+  ).bind(body.push_enabled ? null : now, device.device_id, device.secret_hash).run();
+  if ((result.meta.changes ?? 0) !== 1) {
+    return linkJSON({ error: "device_not_found" }, 404);
+  }
+  console.log(JSON.stringify({
+    event: body.push_enabled ? "dashboard_device_push_enabled" : "dashboard_device_push_disabled",
+  }));
+  return linkJSON({ ok: true, push_enabled: body.push_enabled });
+}
+
+async function deleteDashboardDevice(
+  request: Request,
+  env: Env,
+  handle: string,
+): Promise<Response> {
+  const authorization = await dashboardSessionAuthorization(request, env);
+  if (!authorization) return linkJSON({ error: "unauthorized" }, 401);
+  if (!dashboardManagementAllowed(authorization)) {
+    return linkJSON({ error: "access_key_verification_required" }, 403);
+  }
+  const device = await resolveDashboardDevice(env, handle);
+  if (!device) return linkJSON({ error: "device_not_found" }, 404);
+  const now = Math.floor(Date.now() / 1_000);
+  // The batch reports the number of rows the delete touched, which grows with the device's
+  // cascaded child rows. Confirm the registration is actually gone instead of trusting the count.
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await tombstoneAndDeleteDeviceBySecretHash(
+      env, device.device_id, device.secret_hash, now
+    );
+    const live = await env.DB.prepare(
+      "SELECT 1 AS live FROM devices WHERE device_id = ? AND secret_hash = ?"
+    ).bind(device.device_id, device.secret_hash).first<{ live: number }>();
+    if (!live) {
+      console.log(JSON.stringify({ event: "dashboard_device_unlinked" }));
+      return linkJSON({ ok: true });
+    }
+  }
+  return linkJSON({ error: "device_unlink_failed" }, 503);
+}
+
+async function dashboardAccountHistory(
+  env: Env,
+  dashboardID: string,
+  url: URL,
+): Promise<Response> {
+  const rangeValues = url.searchParams.getAll("range");
+  if (rangeValues.length > 1) return linkJSON({ error: "invalid_range" }, 400);
+  const range = rangeValues[0] ?? "7d";
+  const rangeSeconds = range === "24h" ? 86_400
+    : range === "7d" ? 7 * 86_400
+    : range === "30d" ? 30 * 86_400
+    : null;
+  if (rangeSeconds === null) return linkJSON({ error: "invalid_range" }, 400);
+
+  const loaded = await loadDashboardAccountGroups(env);
+  if (loaded.incomplete) {
+    return linkJSON({ error: "account_index_incomplete" }, 503);
+  }
+  const group = loaded.groups.find((candidate) => candidate.id === dashboardID);
+  if (!group) return linkJSON({ error: "account_not_found" }, 404);
+  const now = Math.floor(Date.now() / 1_000);
+  const since = now - rangeSeconds;
+  const sources = JSON.stringify(group.rows.map((source) => [
+    source.source_kind, source.device_id, source.account_id,
+  ]));
+  const historyResult = await env.DB.prepare(
+    `WITH requested_sources AS (
+       SELECT json_extract(value, '$[0]') AS source_kind,
+              json_extract(value, '$[1]') AS device_id,
+              json_extract(value, '$[2]') AS account_id
+       FROM json_each(?)
+     ), source_history AS (
+       SELECT usage_history.device_id, usage_history.account_id,
+              usage_history.metric_id, usage_history.metric_title,
+              usage_history.kind, usage_history.window_minutes,
+              usage_history.remaining_percent, usage_history.recorded_at,
+              usage_history.resets_at, usage_history.plan
+       FROM usage_history
+       INNER JOIN requested_sources
+         ON requested_sources.source_kind = 'worker'
+        AND requested_sources.device_id = usage_history.device_id
+        AND requested_sources.account_id = usage_history.account_id
+       UNION ALL
+       SELECT device_snapshot_history.device_id, device_snapshot_history.account_id,
+              device_snapshot_history.metric_id, device_snapshot_history.metric_title,
+              device_snapshot_history.kind, device_snapshot_history.window_minutes,
+              device_snapshot_history.remaining_percent,
+              device_snapshot_history.recorded_at,
+              device_snapshot_history.resets_at, device_snapshot_history.plan
+       FROM device_snapshot_history
+       INNER JOIN requested_sources
+         ON requested_sources.source_kind = 'device'
+        AND requested_sources.device_id = device_snapshot_history.device_id
+        AND requested_sources.account_id = device_snapshot_history.account_id
+     ), ranked_history AS (
+       SELECT source_history.metric_id, source_history.metric_title,
+              source_history.kind, source_history.window_minutes,
+              source_history.remaining_percent, source_history.recorded_at,
+              source_history.resets_at, source_history.plan,
+              ROW_NUMBER() OVER (
+                PARTITION BY source_history.metric_id, source_history.recorded_at
+                ORDER BY source_history.device_id, source_history.account_id
+              ) AS duplicate_rank
+       FROM source_history
+       WHERE source_history.recorded_at >= ?
+     )
+     SELECT metric_id, metric_title, kind, window_minutes, remaining_percent,
+            recorded_at, resets_at, plan
+     FROM ranked_history
+     WHERE duplicate_rank = 1
+     ORDER BY recorded_at DESC, metric_id LIMIT ?`
+  ).bind(sources, since, DASHBOARD_HISTORY_LIMIT + 1).all<DashboardHistoryRow>();
+
+  const rawRows = historyResult.results;
+  const truncated = rawRows.length > DASHBOARD_HISTORY_LIMIT;
+  const deduplicated = new Map<string, DashboardHistoryRow>();
+  for (const row of rawRows.slice(0, DASHBOARD_HISTORY_LIMIT)) {
+    if (!Number.isFinite(row.recorded_at) || !Number.isFinite(row.remaining_percent)
+        || !Number.isFinite(row.resets_at)) continue;
+    const metricID = safeDashboardText(row.metric_id, 512);
+    if (!metricID) continue;
+    const key = `${metricID}\u0000${Math.floor(row.recorded_at)}`;
+    if (!deduplicated.has(key)) deduplicated.set(key, row);
+  }
+
+  const seriesByMetric = new Map<string, {
+    id: string;
+    title: string;
+    kind: string | null;
+    window_minutes: number | null;
+    points: Array<{
+      recorded_at: number;
+      remaining_percent: number;
+      resets_at: number;
+      plan: string | null;
+    }>;
+  }>();
+  for (const row of deduplicated.values()) {
+    const metricID = row.metric_id;
+    let series = seriesByMetric.get(metricID);
+    if (!series) {
+      series = {
+        id: await dashboardSeriesID(env, dashboardID, metricID),
+        title: safeDashboardText(row.metric_title, 256) ?? "Quota",
+        kind: dashboardWindowKind(row.kind),
+        window_minutes: dashboardWindowMinutes(row.window_minutes),
+        points: [],
+      };
+      seriesByMetric.set(metricID, series);
+    }
+    series.points.push({
+      recorded_at: Math.floor(row.recorded_at),
+      remaining_percent: clampDashboardPercent(row.remaining_percent),
+      resets_at: Math.floor(row.resets_at),
+      plan: safeDashboardText(row.plan, 200),
+    });
+  }
+  const series = [...seriesByMetric.values()]
+    .map((item) => ({ ...item, points: item.points.sort((a, b) => a.recorded_at - b.recorded_at) }))
+    .sort((a, b) => a.title.localeCompare(b.title));
+  const row = group.representative;
+  return dashboardJSON({
+    account: {
+      id: dashboardID,
+      provider_id: row.provider_id,
+      provider_name: providerDisplayName(row.provider_id),
+      display_name: safeDashboardText(row.display_name, 128)
+        ?? providerDisplayName(row.provider_id),
+      plan: safeDashboardText(row.plan, 200),
+    },
+    range,
+    from: since,
+    to: now,
+    series,
+    truncated,
+  }, "history");
+}
+
+async function loadDashboardAccountGroups(env: Env): Promise<{
+  groups: DashboardAccountGroup[];
+  incomplete: boolean;
+}> {
+  const grouped = new Map<string, DashboardAccountGroup>();
+  const dashboardKey = await credentialFingerprintKey(env);
+  const [workerResult, deviceResult] = await Promise.all([
+    env.DB.prepare(
+      `SELECT 'worker' AS source_kind,
+              monitored_accounts.device_id, monitored_accounts.account_id,
+              monitored_accounts.provider_id, monitored_accounts.workspace_id,
+              monitored_accounts.display_name, monitored_accounts.plan,
+              monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
+              monitored_accounts.refresh_interval_seconds,
+              monitored_accounts.history_retention_days, monitored_accounts.next_refresh_at,
+              monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
+              monitored_accounts.last_error,
+              CASE WHEN json_valid(monitored_accounts.latest_snapshot)
+                  AND json_extract(monitored_accounts.latest_snapshot,
+                    '$.account_reference_verified') = 1
+                  AND json_extract(monitored_accounts.latest_snapshot,
+                    '$.account_reference_scope') = 'provider_account_v2'
+                THEN json_extract(monitored_accounts.latest_snapshot, '$.account_reference')
+                ELSE NULL
+              END AS dashboard_account_reference
+       FROM monitored_accounts
+       INNER JOIN account_monitoring_consent
+         ON account_monitoring_consent.device_id = monitored_accounts.device_id
+        AND account_monitoring_consent.account_id = monitored_accounts.account_id
+        AND account_monitoring_consent.enabled = 1
+       ORDER BY monitored_accounts.device_id, monitored_accounts.account_id
+       LIMIT ?`
+    ).bind(MAX_DASHBOARD_ACCOUNT_SOURCE_ROWS + 1).all<DashboardAccountRow>(),
+    env.DB.prepare(
+      `SELECT 'device' AS source_kind,
+              device_snapshot_sources.device_id, device_snapshot_sources.account_id,
+              device_snapshot_sources.provider_id, '' AS workspace_id,
+              device_snapshot_sources.display_name, device_snapshot_sources.plan,
+              NULL AS plan_expires_at, NULL AS trial_expires_at,
+              device_snapshot_sources.refresh_interval_seconds,
+              device_snapshot_sources.history_retention_days,
+              CASE WHEN device_snapshot_sources.refresh_interval_seconds = 0
+                THEN NULL
+                ELSE MIN(device_snapshot_sources.last_observed_at,
+                         device_snapshot_sources.last_upload_at)
+                  + device_snapshot_sources.refresh_interval_seconds
+              END AS next_refresh_at,
+              MIN(device_snapshot_sources.last_observed_at,
+                  device_snapshot_sources.last_upload_at) AS last_refresh_at,
+              MIN(device_snapshot_sources.last_observed_at,
+                  device_snapshot_sources.last_upload_at) AS last_success_at,
+              NULL AS last_error,
+              CASE WHEN json_valid(monitored_accounts_for_identity.latest_snapshot)
+                  AND json_extract(monitored_accounts_for_identity.latest_snapshot,
+                    '$.account_reference_verified') = 1
+                  AND json_extract(monitored_accounts_for_identity.latest_snapshot,
+                    '$.account_reference_scope') = 'provider_account_v2'
+                THEN json_extract(monitored_accounts_for_identity.latest_snapshot,
+                  '$.account_reference')
+                ELSE NULL
+              END AS dashboard_account_reference
+       FROM device_snapshot_sources
+       INNER JOIN device_snapshot_consent
+         ON device_snapshot_consent.device_id = device_snapshot_sources.device_id
+        AND device_snapshot_consent.account_id = device_snapshot_sources.account_id
+        AND device_snapshot_consent.enabled = 1
+       LEFT JOIN monitored_accounts AS monitored_accounts_for_identity
+         ON monitored_accounts_for_identity.device_id = device_snapshot_sources.device_id
+        AND monitored_accounts_for_identity.account_id = device_snapshot_sources.account_id
+        AND monitored_accounts_for_identity.provider_id = device_snapshot_sources.provider_id
+       ORDER BY device_snapshot_sources.device_id, device_snapshot_sources.account_id
+       LIMIT ?`
+    ).bind(MAX_DASHBOARD_ACCOUNT_SOURCE_ROWS + 1).all<DashboardAccountRow>(),
+  ]);
+  const combined = [...workerResult.results, ...deviceResult.results].sort((left, right) =>
+    left.device_id.localeCompare(right.device_id)
+      || left.account_id.localeCompare(right.account_id)
+      || left.source_kind.localeCompare(right.source_kind)
+  );
+  const incomplete = combined.length > MAX_DASHBOARD_ACCOUNT_SOURCE_ROWS;
+  const rows = combined.slice(0, MAX_DASHBOARD_ACCOUNT_SOURCE_ROWS);
+  for (let offset = 0; offset < rows.length; offset += 50) {
+    const identified = await Promise.all(rows.slice(offset, offset + 50).map(async (row) => ({
+      row,
+      id: isProviderID(row.provider_id) ? await dashboardAccountID(dashboardKey, row) : null,
+    })));
+    for (const { row, id } of identified) {
+      if (!id) continue;
+      const source = row;
+      const existing = grouped.get(id);
+      if (!existing) {
+        grouped.set(id, { id, representative: row, rows: [source] });
+        continue;
+      }
+      existing.rows.push(source);
+      const rowFreshness = dashboardAccountFreshness(row);
+      const existingFreshness = dashboardAccountFreshness(existing.representative);
+      if (rowFreshness > existingFreshness
+          || (rowFreshness === existingFreshness && row.source_kind === "device")) {
+        existing.representative = row;
+      }
+    }
+  }
+  const groups = [...grouped.values()].sort((a, b) => {
+    const freshness = dashboardAccountFreshness(b.representative)
+      - dashboardAccountFreshness(a.representative);
+    if (freshness !== 0) return freshness;
+    return providerDisplayName(a.representative.provider_id)
+      .localeCompare(providerDisplayName(b.representative.provider_id));
+  });
+  return { groups, incomplete };
+}
+
+async function loadDashboardSnapshots(
+  env: Env,
+  groups: DashboardAccountGroup[],
+): Promise<Map<string, DashboardSnapshotSelection | null>> {
+  const snapshots = new Map<string, DashboardSnapshotSelection | null>();
+  for (let offset = 0; offset < groups.length; offset += DASHBOARD_SNAPSHOT_LOAD_BATCH_SIZE) {
+    const batch = groups.slice(offset, offset + DASHBOARD_SNAPSHOT_LOAD_BATCH_SIZE);
+    const requested = batch.flatMap((group, groupPosition) => {
+      const preferred = group.representative;
+      const fallbacks = group.rows.filter((source) =>
+        source.source_kind !== preferred.source_kind
+          || source.device_id !== preferred.device_id
+          || source.account_id !== preferred.account_id
+      );
+      return [preferred, ...fallbacks].map((source) => [
+        groupPosition,
+        source.source_kind,
+        source.device_id,
+        source.account_id,
+      ]);
+    });
+    const sources = JSON.stringify(requested);
+    const result = await env.DB.prepare(
+      `WITH requested_sources AS (
+       SELECT CAST(key AS INTEGER) AS source_position,
+                CAST(json_extract(value, '$[0]') AS INTEGER) AS group_position,
+                json_extract(value, '$[1]') AS source_kind,
+                json_extract(value, '$[2]') AS device_id,
+                json_extract(value, '$[3]') AS account_id
+         FROM json_each(?)
+       )
+       SELECT requested_sources.source_position, requested_sources.group_position,
+              requested_sources.source_kind,
+              COALESCE(monitored_accounts.provider_id,
+                       device_snapshot_sources.provider_id) AS provider_id,
+              CASE WHEN requested_sources.source_kind = 'worker'
+                  AND length(CAST(monitored_accounts.latest_snapshot AS BLOB)) <= ?
+                THEN monitored_accounts.latest_snapshot
+                WHEN requested_sources.source_kind = 'device'
+                  AND length(CAST(device_snapshot_sources.latest_snapshot AS BLOB)) <= ?
+                THEN device_snapshot_sources.latest_snapshot
+                ELSE NULL
+              END AS latest_snapshot
+       FROM requested_sources
+       LEFT JOIN monitored_accounts
+         ON requested_sources.source_kind = 'worker'
+        AND monitored_accounts.device_id = requested_sources.device_id
+        AND monitored_accounts.account_id = requested_sources.account_id
+       LEFT JOIN device_snapshot_sources
+         ON requested_sources.source_kind = 'device'
+        AND device_snapshot_sources.device_id = requested_sources.device_id
+        AND device_snapshot_sources.account_id = requested_sources.account_id`
+    ).bind(
+      sources, MAX_DASHBOARD_SNAPSHOT_BYTES, MAX_DASHBOARD_SNAPSHOT_BYTES
+    ).all<{
+      source_position: number;
+      group_position: number;
+      source_kind: "worker" | "device";
+      provider_id: string;
+      latest_snapshot: string | null;
+    }>();
+    const candidates = result.results.sort((left, right) =>
+      Number(left.group_position) - Number(right.group_position)
+        || Number(left.source_position) - Number(right.source_position)
+    );
+    for (const row of candidates) {
+      const position = Number(row.group_position);
+      const group = Number.isSafeInteger(position) ? batch[position] : undefined;
+      if (!group || !isProviderID(row.provider_id)
+          || row.provider_id !== group.representative.provider_id) continue;
+      const snapshot = sanitizeDashboardSnapshot(row.latest_snapshot, row.provider_id);
+      if (snapshot && !snapshots.get(group.id)) {
+        const selectedRow = group.rows.find((source) =>
+          source.source_kind === row.source_kind
+            && source.device_id === requested[Number(row.source_position)]?.[2]
+            && source.account_id === requested[Number(row.source_position)]?.[3]
+        ) ?? group.representative;
+        snapshots.set(group.id, { source: row.source_kind, snapshot, row: selectedRow });
+      }
+      else if (!snapshots.has(group.id)) snapshots.set(group.id, null);
+    }
+  }
+  return snapshots;
+}
+
+function dashboardAccountFreshness(row: DashboardAccountRow): number {
+  return row.last_success_at ?? row.last_refresh_at ?? 0;
+}
+
+async function dashboardAccountID(key: CryptoKey, row: DashboardAccountRow): Promise<string> {
+  let accountReference = typeof row.dashboard_account_reference === "string"
+    && /^[A-Za-z0-9_-]{43}$/.test(row.dashboard_account_reference)
+    ? row.dashboard_account_reference : null;
+  if (!accountReference) {
+    accountReference = await sourceAccountReferenceWithKey(
+      key,
+      row.provider_id,
+      row.device_id,
+      row.account_id,
+    );
+  }
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(`when-reset:dashboard-account:v1:${accountReference}`),
+  );
+  return base64URL(new Uint8Array(signature));
+}
+
+async function dashboardSeriesID(
+  env: Env,
+  dashboardID: string,
+  metricID: string,
+): Promise<string> {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await credentialFingerprintKey(env),
+    new TextEncoder().encode(`when-reset:dashboard-series:v1:${dashboardID}:${metricID}`),
+  );
+  return base64URL(new Uint8Array(signature));
+}
+
+function dashboardAccountSession(
+  row: DashboardAccountRow,
+  now: number,
+): { status: DashboardAccountStatus; checkedAt: number | null } {
+  const session = workerSession(row);
+  if (row.source_kind === "device") {
+    if (row.last_success_at === null) return { status: "unchecked", checkedAt: null };
+    if (row.refresh_interval_seconds === 0) {
+      return { status: "active", checkedAt: row.last_success_at };
+    }
+    const staleAfter = Math.max(30 * 60, row.refresh_interval_seconds * 3);
+    return now - row.last_success_at > staleAfter
+      ? { status: "stale", checkedAt: row.last_success_at }
+      : { status: "active", checkedAt: row.last_success_at };
+  }
+  if (session.status !== "active" || row.last_success_at === null) return session;
+  const staleAfter = Math.max(30 * 60, row.refresh_interval_seconds * 3);
+  return now - row.last_success_at > staleAfter
+    ? { status: "stale", checkedAt: session.checkedAt }
+    : session;
+}
+
+function sanitizeDashboardSnapshot(
+  snapshotJSON: string | null,
+  providerID: ProviderID,
+): DashboardSnapshot | null {
+  if (!snapshotJSON) return null;
+  let value: unknown;
+  try { value = JSON.parse(snapshotJSON) as unknown; }
+  catch { return null; }
+  if (!isRecord(value) || value.provider_id !== providerID) return null;
+  const fetchedAt = safeDashboardTimestamp(value.fetched_at);
+  if (fetchedAt === null || !Array.isArray(value.windows)) return null;
+  const windows: DashboardWindow[] = [];
+  for (const raw of value.windows.slice(0, 50)) {
+    if (!isRecord(raw)) continue;
+    const title = safeDashboardText(raw.title, 200);
+    const remaining = typeof raw.remaining_percent === "number" ? raw.remaining_percent : null;
+    const resetsAt = safeDashboardTimestamp(raw.resets_at);
+    if (!title || remaining === null || !Number.isFinite(remaining) || resetsAt === null) continue;
+    windows.push({
+      title,
+      kind: dashboardWindowKind(raw.kind),
+      window_minutes: dashboardWindowMinutes(raw.window_minutes),
+      remaining_percent: clampDashboardPercent(remaining),
+      resets_at: resetsAt,
+    });
+  }
+  const availableResetCount = typeof value.available_reset_count === "number"
+    && Number.isSafeInteger(value.available_reset_count)
+    ? Math.max(0, Math.min(1_000, value.available_reset_count)) : 0;
+  const resetCredits: DashboardResetCredit[] = [];
+  if (Array.isArray(value.reset_credits)) {
+    for (const raw of value.reset_credits.slice(0, 50)) {
+      if (!isRecord(raw)) continue;
+      resetCredits.push({
+        status: safeDashboardText(raw.status, 64),
+        granted_at: safeDashboardTimestamp(raw.granted_at),
+        expires_at: safeDashboardTimestamp(raw.expires_at),
+      });
+    }
+  }
+  const result: DashboardSnapshot = {
+    fetched_at: fetchedAt,
+    windows,
+    available_reset_count: availableResetCount,
+    reset_credits: resetCredits,
+    reset_credits_authoritative: value.reset_credits_authoritative !== false,
+  };
+  const balance = sanitizeDashboardBalance(value.api_balance);
+  if (balance) result.api_balance = balance;
+  return result;
+}
+
+function sanitizeDashboardBalance(value: unknown): DashboardBalance | null {
+  if (!isRecord(value)) return null;
+  const title = safeDashboardText(value.title, 200);
+  const currencyCode = safeDashboardText(value.currency_code, 8);
+  const spent = dashboardFiniteNumber(value.spent);
+  if (!title || !currencyCode || spent === null) return null;
+  return {
+    title,
+    currency_code: currencyCode.toUpperCase(),
+    spent,
+    limit: dashboardNullableNumber(value.limit),
+    remaining: dashboardNullableNumber(value.remaining),
+    period_start: safeDashboardTimestamp(value.period_start),
+    period_end: safeDashboardTimestamp(value.period_end),
+    access_expires_at: safeDashboardTimestamp(value.access_expires_at),
+    is_unlimited: value.is_unlimited === true,
+    kind: value.kind === "wallet" ? "wallet" : "budget",
+    unit_label: safeDashboardText(value.unit_label, 64),
+  };
+}
+
+function safeDashboardText(value: unknown, maximum: number): string | null {
+  if (typeof value !== "string" || value.length > maximum) return null;
+  return value.trim() || null;
+}
+
+function safeDashboardTimestamp(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value) : null;
+}
+
+function dashboardFiniteNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function dashboardNullableNumber(value: unknown): number | null {
+  return value === null || value === undefined ? null : dashboardFiniteNumber(value);
+}
+
+function boundedDashboardInteger(value: number, minimum: number, maximum: number): number {
+  return Number.isSafeInteger(value) ? Math.max(minimum, Math.min(maximum, value)) : minimum;
+}
+
+function clampDashboardPercent(value: number): number {
+  return Math.max(0, Math.min(100, value));
+}
+
+function dashboardWindowKind(value: unknown): string | null {
+  return value === "fiveHour" || value === "weekly" || value === "additional"
+    ? value : null;
+}
+
+function dashboardWindowMinutes(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    && value <= 525_600 ? value : null;
 }
 
 async function createLinkSession(env: Env, url: URL): Promise<Response> {
@@ -655,6 +2481,10 @@ async function claimLinkSession(
 function sameOriginRequest(request: Request, origin: string): boolean {
   const supplied = request.headers.get("origin");
   return supplied === null || supplied === origin;
+}
+
+function strictSameOriginRequest(request: Request, origin: string): boolean {
+  return request.headers.get("origin") === origin;
 }
 
 async function unregisterDevice(env: Env, deviceID: string, secret: string): Promise<Response> {
@@ -852,11 +2682,15 @@ async function importRemoteAccounts(
             monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
             monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
             monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
-            monitored_accounts.last_error
+            monitored_accounts.last_error, account_monitoring_consent.consent_revision
      FROM remote_account_subscriptions
      INNER JOIN monitored_accounts
        ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
       AND monitored_accounts.account_id = remote_account_subscriptions.source_account_id
+     INNER JOIN account_monitoring_consent
+       ON account_monitoring_consent.device_id = monitored_accounts.device_id
+      AND account_monitoring_consent.account_id = monitored_accounts.account_id
+      AND account_monitoring_consent.enabled = 1
      WHERE remote_account_subscriptions.subscriber_device_id = ?
        AND remote_account_subscriptions.local_account_id = ?
        AND monitored_accounts.credential_fingerprint IS NOT NULL`
@@ -874,10 +2708,7 @@ async function importRemoteAccounts(
       return json({ error: "remote_account_conflict" }, 409);
     }
     return json({
-      account: {
-        ...remoteAccountPayload(existing),
-        local_account_id: imported.local_account_id,
-      },
+      account: remoteAccountImportPayload(existing, imported.local_account_id, 1),
     }, 200, { "cache-control": "no-store" });
   }
   const candidates = await loadRemoteAccountCandidates(env, subscriberDeviceID);
@@ -885,11 +2716,71 @@ async function importRemoteAccounts(
     (candidate) => candidate.remote_account_id === imported.remote_account_id
   );
   if (!source) return json({ error: "remote_account_not_found" }, 404);
+  const sourceSubscription = await env.DB.prepare(
+    `SELECT local_account_id FROM remote_account_subscriptions
+     WHERE subscriber_device_id = ? AND source_device_id = ? AND source_account_id = ?`
+  ).bind(subscriberDeviceID, source.device_id, source.account_id).first<{
+    local_account_id: string;
+  }>();
   const direct = await env.DB.prepare(
     "SELECT account_id FROM monitored_accounts WHERE device_id = ? AND account_id = ?"
   ).bind(subscriberDeviceID, imported.local_account_id).first<{ account_id: string }>();
-  if (direct) return json({ error: "local_account_conflict" }, 409);
+  if (direct) {
+    if (source.device_id === subscriberDeviceID
+        && source.account_id === imported.local_account_id) {
+      return json({
+        account: remoteAccountImportPayload(
+          source, imported.local_account_id, source.consent_revision
+        ),
+      }, 200, { "cache-control": "no-store" });
+    }
+    return json({ error: "local_account_conflict" }, 409);
+  }
   const now = Math.floor(Date.now() / 1_000);
+  const rebound = sourceSubscription ? await env.DB.prepare(
+    `UPDATE remote_account_subscriptions
+     SET local_account_id = ?, created_at = ?
+     WHERE subscriber_device_id = ?
+       AND source_device_id = ? AND source_account_id = ?
+       AND local_account_id = ?
+       AND local_account_id <> ?
+       AND NOT EXISTS (
+         SELECT 1 FROM monitored_accounts
+         WHERE monitored_accounts.device_id = ?
+           AND monitored_accounts.account_id = ?
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM remote_account_subscriptions AS local_subscription
+         WHERE local_subscription.subscriber_device_id = ?
+           AND local_subscription.local_account_id = ?
+       )
+       AND EXISTS (
+         SELECT 1 FROM monitored_accounts
+         INNER JOIN account_monitoring_consent
+           ON account_monitoring_consent.device_id = monitored_accounts.device_id
+          AND account_monitoring_consent.account_id = monitored_accounts.account_id
+          AND account_monitoring_consent.enabled = 1
+         WHERE monitored_accounts.device_id = ?
+           AND monitored_accounts.account_id = ?
+           AND monitored_accounts.credential_fingerprint IS NOT NULL
+       )`
+  ).bind(
+    imported.local_account_id, now, subscriberDeviceID,
+    source.device_id, source.account_id, sourceSubscription.local_account_id,
+    imported.local_account_id,
+    subscriberDeviceID, imported.local_account_id,
+    subscriberDeviceID, imported.local_account_id,
+    source.device_id, source.account_id,
+  ).run() : null;
+  if ((rebound?.meta.changes ?? 0) === 1) {
+    console.log(JSON.stringify({
+      event: "remote_account_rebound",
+      provider: source.provider_id,
+    }));
+    return json({
+      account: remoteAccountImportPayload(source, imported.local_account_id, 1),
+    }, 200, { "cache-control": "no-store" });
+  }
   const result = await env.DB.prepare(
     `INSERT INTO remote_account_subscriptions (
        subscriber_device_id, local_account_id, source_device_id, source_account_id, created_at
@@ -902,13 +2793,23 @@ async function importRemoteAccounts(
         AND account_monitoring_consent.account_id = monitored_accounts.account_id
         AND account_monitoring_consent.enabled = 1
        WHERE monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?
+         AND monitored_accounts.credential_fingerprint IS NOT NULL
+     )
+       AND NOT EXISTS (
+         SELECT 1 FROM monitored_accounts AS local_account
+         WHERE local_account.device_id = ? AND local_account.account_id = ?
      )
      ON CONFLICT DO NOTHING`
   ).bind(
     subscriberDeviceID, imported.local_account_id, source.device_id, source.account_id, now,
     source.device_id, source.account_id,
+    subscriberDeviceID, imported.local_account_id,
   ).run();
   if ((result.meta.changes ?? 0) !== 1) {
+    const directConflict = await env.DB.prepare(
+      "SELECT account_id FROM monitored_accounts WHERE device_id = ? AND account_id = ?"
+    ).bind(subscriberDeviceID, imported.local_account_id).first<{ account_id: string }>();
+    if (directConflict) return json({ error: "local_account_conflict" }, 409);
     const existing = await env.DB.prepare(
       `SELECT source_device_id, source_account_id
        FROM remote_account_subscriptions
@@ -922,18 +2823,12 @@ async function importRemoteAccounts(
       return json({ error: "remote_account_conflict" }, 409);
     }
     return json({
-      account: {
-        ...remoteAccountPayload(source),
-        local_account_id: imported.local_account_id,
-      },
+      account: remoteAccountImportPayload(source, imported.local_account_id, 1),
     }, 200, { "cache-control": "no-store" });
   }
   console.log(JSON.stringify({ event: "remote_account_imported", provider: source.provider_id }));
   return json({
-    account: {
-      ...remoteAccountPayload(source),
-      local_account_id: imported.local_account_id,
-    },
+    account: remoteAccountImportPayload(source, imported.local_account_id, 1),
   }, 201, { "cache-control": "no-store" });
 }
 
@@ -941,7 +2836,7 @@ async function loadRemoteAccountCandidates(
   env: Env,
   subscriberDeviceID: string,
 ): Promise<RemoteAccountCandidate[]> {
-  const [result, localResult, subscribedResult] = await Promise.all([env.DB.prepare(
+  const result = await env.DB.prepare(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.display_name, monitored_accounts.profile_name,
@@ -949,71 +2844,30 @@ async function loadRemoteAccountCandidates(
             monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
             monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
             monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
-            monitored_accounts.last_error
+            monitored_accounts.last_error, account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
       AND account_monitoring_consent.account_id = monitored_accounts.account_id
       AND account_monitoring_consent.enabled = 1
-     WHERE monitored_accounts.device_id <> ?
-       AND monitored_accounts.credential_fingerprint IS NOT NULL
-       AND monitored_accounts.latest_snapshot IS NOT NULL
-       AND NOT EXISTS (
-         SELECT 1 FROM remote_account_subscriptions
-         WHERE remote_account_subscriptions.subscriber_device_id = ?
-           AND remote_account_subscriptions.source_device_id = monitored_accounts.device_id
-           AND remote_account_subscriptions.source_account_id = monitored_accounts.account_id
-       )
-     ORDER BY (monitored_accounts.last_error IS NOT NULL),
+     LEFT JOIN remote_account_subscriptions AS existing_subscription
+       ON existing_subscription.subscriber_device_id = ?
+      AND existing_subscription.source_device_id = monitored_accounts.device_id
+      AND existing_subscription.source_account_id = monitored_accounts.account_id
+     WHERE monitored_accounts.credential_fingerprint IS NOT NULL
+     ORDER BY (existing_subscription.local_account_id IS NULL),
+              (monitored_accounts.device_id <> ?),
+              (monitored_accounts.last_error IS NOT NULL),
               monitored_accounts.last_success_at DESC,
               monitored_accounts.device_id, monitored_accounts.account_id
      LIMIT ?`
   ).bind(subscriberDeviceID, subscriberDeviceID, MAX_REMOTE_ACCOUNT_IMPORTS * 8)
-    .all<RemoteAccountCandidateRow>(), env.DB.prepare(
-    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
-            monitored_accounts.provider_id, monitored_accounts.workspace_id,
-            monitored_accounts.display_name, monitored_accounts.profile_name,
-            monitored_accounts.email, monitored_accounts.plan,
-            monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
-            monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
-            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
-            monitored_accounts.last_error
-     FROM monitored_accounts
-     INNER JOIN account_monitoring_consent
-       ON account_monitoring_consent.device_id = monitored_accounts.device_id
-      AND account_monitoring_consent.account_id = monitored_accounts.account_id
-      AND account_monitoring_consent.enabled = 1
-     WHERE monitored_accounts.device_id = ?
-       AND monitored_accounts.credential_fingerprint IS NOT NULL`
-  ).bind(subscriberDeviceID).all<RemoteAccountCandidateRow>(), env.DB.prepare(
-    `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
-            monitored_accounts.provider_id, monitored_accounts.workspace_id,
-            monitored_accounts.display_name, monitored_accounts.profile_name,
-            monitored_accounts.email, monitored_accounts.plan,
-            monitored_accounts.plan_expires_at, monitored_accounts.trial_expires_at,
-            monitored_accounts.credential_fingerprint, monitored_accounts.latest_snapshot,
-            monitored_accounts.last_refresh_at, monitored_accounts.last_success_at,
-            monitored_accounts.last_error
-     FROM remote_account_subscriptions
-     INNER JOIN monitored_accounts
-       ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
-      AND monitored_accounts.account_id = remote_account_subscriptions.source_account_id
-     INNER JOIN account_monitoring_consent
-       ON account_monitoring_consent.device_id = monitored_accounts.device_id
-      AND account_monitoring_consent.account_id = monitored_accounts.account_id
-      AND account_monitoring_consent.enabled = 1
-     WHERE remote_account_subscriptions.subscriber_device_id = ?
-       AND monitored_accounts.credential_fingerprint IS NOT NULL`
-  ).bind(subscriberDeviceID).all<RemoteAccountCandidateRow>()]);
-  const localReferences = new Set<string>();
-  for (const row of [...localResult.results, ...subscribedResult.results]) {
-    localReferences.add(await accountReferenceForRow(env, row));
-  }
+    .all<RemoteAccountCandidateRow>();
   const seen = new Set<string>();
   const candidates: RemoteAccountCandidate[] = [];
   for (const row of result.results) {
     const accountReference = await accountReferenceForRow(env, row);
-    if (localReferences.has(accountReference) || seen.has(accountReference)) continue;
+    if (seen.has(accountReference)) continue;
     seen.add(accountReference);
     candidates.push({
       ...row,
@@ -1055,24 +2909,62 @@ function remoteAccountPayload(candidate: RemoteAccountCandidate): Record<string,
   };
 }
 
+function remoteAccountImportPayload(
+  candidate: RemoteAccountCandidate,
+  localAccountID: string,
+  consentRevision: number,
+): Record<string, unknown> {
+  return {
+    ...remoteAccountPayload(candidate),
+    local_account_id: localAccountID,
+    consent_revision: consentRevision,
+  };
+}
+
 async function syncedAccountReference(accountID: string): Promise<string> {
   return hashSecret(`when-reset:synced-account:v1:${accountID.toLowerCase()}`);
 }
 
 async function accountReferenceForRow(
   env: Env,
-  row: { provider_id: ProviderID; workspace_id: string; latest_snapshot: string | null },
+  row: {
+    provider_id: ProviderID;
+    latest_snapshot: string | null;
+    device_id?: string;
+    account_id?: string;
+    source_device_id?: string;
+    source_account_id?: string;
+  },
 ): Promise<string> {
-  if (row.latest_snapshot) {
-    try {
-      const snapshot = JSON.parse(row.latest_snapshot) as ProviderSnapshot;
-      if (typeof snapshot.account_reference === "string"
-          && /^[A-Za-z0-9_-]{43}$/.test(snapshot.account_reference)) {
-        return snapshot.account_reference;
-      }
-    } catch { /* Fall back to the uploaded provider account identifier. */ }
+  const verifiedReference = verifiedSnapshotAccountReference(row.latest_snapshot);
+  if (verifiedReference) return verifiedReference;
+  const sourceDeviceID = row.source_device_id ?? row.device_id;
+  const sourceAccountID = row.source_account_id ?? row.account_id;
+  if (!sourceDeviceID || !sourceAccountID) {
+    throw new Error("Missing source identity for account reference");
   }
-  return providerIdentityReference(env, row.provider_id, `workspace:${row.workspace_id}`);
+  return sourceAccountReferenceWithKey(
+    await credentialFingerprintKey(env),
+    row.provider_id,
+    sourceDeviceID,
+    sourceAccountID,
+  );
+}
+
+async function sourceAccountReferenceWithKey(
+  key: CryptoKey,
+  providerID: ProviderID,
+  deviceID: string,
+  accountID: string,
+): Promise<string> {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    new TextEncoder().encode(
+      `when-reset:provider-account-source:v1:${providerID}:${deviceID}:${accountID}`
+    ),
+  );
+  return base64URL(new Uint8Array(signature));
 }
 
 async function providerIdentityReference(
@@ -1096,6 +2988,12 @@ function workerSession(row: {
   const checkedAt = row.last_refresh_at ?? row.last_success_at;
   if (row.last_error) {
     const normalized = row.last_error.toLowerCase();
+    if (normalized === "provider_session_expired") {
+      return { status: "expired", checkedAt };
+    }
+    if (normalized === "provider_request_forbidden") {
+      return { status: "error", checkedAt };
+    }
     const expired = /http\s*(401|403)|refresh token is missing|authorization expired|session expired|invalid[_ -]?grant|unauthori[sz]ed|revoked/.test(normalized);
     return { status: expired ? "expired" : "error", checkedAt };
   }
@@ -1280,6 +3178,540 @@ async function parseHistoryUpload(
   return { history };
 }
 
+async function parseDeviceSnapshotSourceUpload(
+  request: Request,
+): Promise<DeviceSnapshotSourceUpload | null> {
+  const value = await boundedRequestJSON(request, MAX_DEVICE_SNAPSHOT_BODY_BYTES);
+  if (!isExactObject(value, [
+    "provider_id", "display_name", "refresh_interval_seconds",
+    "history_retention_days", "consent_revision",
+  ]) || !isProviderID(value.provider_id)) return null;
+  const displayName = optionalBoundedString(value.display_name, 128);
+  const interval = value.refresh_interval_seconds;
+  const retention = value.history_retention_days;
+  const consentRevision = parseUploadConsentRevision(value.consent_revision);
+  if (displayName === undefined
+      || typeof interval !== "number" || !Number.isSafeInteger(interval)
+      || (interval !== 0
+        && (interval < MIN_MONITOR_INTERVAL_SECONDS || interval > MAX_MONITOR_INTERVAL_SECONDS))
+      || typeof retention !== "number" || !Number.isSafeInteger(retention)
+      || retention < MIN_HISTORY_RETENTION_DAYS || retention > MAX_HISTORY_RETENTION_DAYS
+      || consentRevision === null) return null;
+  return {
+    provider_id: value.provider_id,
+    display_name: displayName,
+    refresh_interval_seconds: interval,
+    history_retention_days: retention,
+    consent_revision: consentRevision,
+  };
+}
+
+async function parseDeviceSnapshotUpload(
+  request: Request,
+  providerID: ProviderID,
+): Promise<DeviceSnapshotUpload | null> {
+  const value = await boundedRequestJSON(request, MAX_DEVICE_SNAPSHOT_BODY_BYTES);
+  if (!isExactObject(value, ["consent_revision", "sequence", "observed_at", "snapshot"])
+      || typeof value.sequence !== "number" || !Number.isSafeInteger(value.sequence)
+      || value.sequence <= 0 || value.sequence >= Number.MAX_SAFE_INTEGER) return null;
+  const consentRevision = parseUploadConsentRevision(value.consent_revision);
+  const observedAt = safeDeviceTimestamp(value.observed_at);
+  if (consentRevision === null || observedAt === null) return null;
+  const snapshot = parseDeviceSnapshotProjection(
+    value.snapshot,
+    providerID,
+    observedAt,
+    value.sequence,
+  );
+  return snapshot ? {
+    consent_revision: consentRevision,
+    sequence: value.sequence,
+    observed_at: observedAt,
+    snapshot,
+  } : null;
+}
+
+function parseDeviceSnapshotProjection(
+  value: unknown,
+  providerID: ProviderID,
+  observedAt: number,
+  sequence: number,
+): ProviderSnapshot | null {
+  if (!isExactObject(value, [
+    "provider_id", "plan", "windows", "available_reset_count", "reset_credits",
+    "reset_credits_authoritative", "api_balance",
+  ], ["api_balance"]) || value.provider_id !== providerID
+      || !Array.isArray(value.windows)
+      || value.windows.length > MAX_DEVICE_SNAPSHOT_WINDOWS
+      || !Array.isArray(value.reset_credits)
+      || value.reset_credits.length > MAX_DEVICE_SNAPSHOT_RESET_CREDITS
+      || typeof value.reset_credits_authoritative !== "boolean") return null;
+  const plan = optionalBoundedString(value.plan, 200);
+  const resetCount = value.available_reset_count;
+  if (plan === undefined || typeof resetCount !== "number"
+      || !Number.isSafeInteger(resetCount) || resetCount < 0 || resetCount > 1_000) return null;
+
+  const windows: ProviderSnapshot["windows"] = [];
+  const positions = new Set<number>();
+  const metricIDs = new Set<string>();
+  for (const raw of value.windows) {
+    if (!isExactObject(raw, [
+      "position", "metric_id", "title", "kind", "window_minutes",
+      "remaining_percent", "resets_at",
+    ], ["kind", "window_minutes"])) return null;
+    const position = raw.position;
+    const metricID = requiredBoundedString(raw.metric_id, 512, false);
+    const title = requiredBoundedString(raw.title, 256, false);
+    const kind = raw.kind ?? null;
+    const windowMinutes = raw.window_minutes ?? null;
+    const remaining = raw.remaining_percent;
+    const resetsAt = safeDeviceTimestamp(raw.resets_at);
+    if (typeof position !== "number" || !Number.isSafeInteger(position)
+        || position < 0 || position >= MAX_DEVICE_SNAPSHOT_WINDOWS
+        || positions.has(position) || metricID === null || metricIDs.has(metricID)
+        || title === null
+        || (kind !== null && kind !== "fiveHour" && kind !== "weekly"
+          && kind !== "additional")
+        || (windowMinutes !== null && (typeof windowMinutes !== "number"
+          || !Number.isSafeInteger(windowMinutes) || windowMinutes <= 0
+          || windowMinutes > 10 * 365 * 24 * 60))
+        || typeof remaining !== "number" || !Number.isFinite(remaining)
+        || remaining < 0 || remaining > 100 || resetsAt === null
+        || resetsAt < observedAt - MAX_DEVICE_SNAPSHOT_CLOCK_SKEW_SECONDS
+        || resetsAt > observedAt + 10 * 365 * 86_400) return null;
+    positions.add(position);
+    metricIDs.add(metricID);
+    windows.push({
+      position,
+      metric_id: metricID,
+      title,
+      kind,
+      window_minutes: windowMinutes,
+      remaining_percent: remaining,
+      resets_at: resetsAt,
+    });
+  }
+
+  const resetCredits: ProviderSnapshot["reset_credits"] = [];
+  for (const [index, raw] of value.reset_credits.entries()) {
+    if (!isExactObject(
+      raw,
+      ["expires_at", "status", "granted_at"],
+      ["expires_at", "status", "granted_at"],
+    )) return null;
+    const expiresAt = nullableDeviceTimestamp(raw.expires_at);
+    const grantedAt = nullableDeviceTimestamp(raw.granted_at);
+    const status = optionalBoundedString(raw.status, 64);
+    if (expiresAt === undefined || grantedAt === undefined || status === undefined
+        || (expiresAt !== null && expiresAt > observedAt + 10 * 365 * 86_400)
+        || (grantedAt !== null && grantedAt > observedAt + MAX_DEVICE_SNAPSHOT_CLOCK_SKEW_SECONDS)
+        || (grantedAt !== null && expiresAt !== null && grantedAt > expiresAt)) return null;
+    resetCredits.push({
+      // Provider identifiers are intentionally not accepted. The server creates a harmless,
+      // source-local identifier solely so existing snapshot consumers can key the row.
+      id: `device:${sequence}:${index}`,
+      expires_at: expiresAt,
+      status,
+      granted_at: grantedAt,
+    });
+  }
+
+  const apiBalance = value.api_balance === undefined
+    ? undefined : parseDeviceAPIBalance(value.api_balance, observedAt);
+  if (value.api_balance !== undefined && apiBalance === null) return null;
+  return {
+    provider_id: providerID,
+    plan,
+    fetched_at: observedAt,
+    windows,
+    available_reset_count: resetCount,
+    reset_credits: resetCredits,
+    reset_credits_authoritative: value.reset_credits_authoritative,
+    ...(apiBalance ? { api_balance: apiBalance } : {}),
+  };
+}
+
+function parseDeviceAPIBalance(
+  value: unknown,
+  observedAt: number,
+): NonNullable<ProviderSnapshot["api_balance"]> | null {
+  if (!isExactObject(value, [
+    "title", "currency_code", "spent", "limit", "remaining", "period_start", "period_end",
+    "access_expires_at", "is_unlimited", "kind", "unit_label",
+  ], [
+    "limit", "remaining", "period_start", "period_end", "access_expires_at", "kind",
+    "unit_label",
+  ])) return null;
+  const title = requiredBoundedString(value.title, 200, false);
+  const currencyCode = requiredBoundedString(value.currency_code, 8, false);
+  const spent = boundedDeviceNumber(value.spent);
+  const limit = nullableDeviceNumber(value.limit);
+  const remaining = nullableDeviceNumber(value.remaining);
+  const periodStart = nullableDeviceTimestamp(value.period_start);
+  const periodEnd = nullableDeviceTimestamp(value.period_end);
+  const accessExpiresAt = nullableDeviceTimestamp(value.access_expires_at);
+  const kind = value.kind === undefined || value.kind === null ? undefined
+    : value.kind === "budget" || value.kind === "wallet" ? value.kind : null;
+  const unitLabel = optionalBoundedString(value.unit_label, 64);
+  if (title === null || currencyCode === null || !/^[A-Za-z0-9]{3,8}$/.test(currencyCode)
+      || spent === null || limit === undefined || remaining === undefined
+      || periodStart === undefined || periodEnd === undefined || accessExpiresAt === undefined
+      || typeof value.is_unlimited !== "boolean" || kind === null || unitLabel === undefined) {
+    return null;
+  }
+  const maximumFuture = observedAt + 10 * 365 * 86_400;
+  if ((periodStart !== null && periodStart > maximumFuture)
+      || (periodEnd !== null && periodEnd > maximumFuture)
+      || (accessExpiresAt !== null && accessExpiresAt > maximumFuture)
+      || (periodStart !== null && periodEnd !== null && periodStart > periodEnd)) return null;
+  return {
+    title,
+    currency_code: currencyCode.toUpperCase(),
+    spent,
+    limit,
+    remaining,
+    period_start: periodStart,
+    period_end: periodEnd,
+    access_expires_at: accessExpiresAt,
+    is_unlimited: value.is_unlimited,
+    ...(kind === undefined ? {} : { kind }),
+    ...(unitLabel === null ? {} : { unit_label: unitLabel }),
+  };
+}
+
+function safeDeviceTimestamp(value: unknown): number | null {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  const timestamp = Math.floor(value);
+  return Number.isSafeInteger(timestamp) && timestamp >= 0 && timestamp <= 10_000_000_000
+    ? timestamp : null;
+}
+
+function nullableDeviceTimestamp(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  return safeDeviceTimestamp(value) ?? undefined;
+}
+
+function boundedDeviceNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && Math.abs(value) <= 1e15
+    ? value : null;
+}
+
+function nullableDeviceNumber(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  return boundedDeviceNumber(value) ?? undefined;
+}
+
+async function enableDeviceSnapshotSource(
+  request: Request,
+  env: Env,
+  deviceID: string,
+  accountID: string,
+): Promise<Response> {
+  const upload = await parseDeviceSnapshotSourceUpload(request);
+  if (!upload) {
+    return json({ error: "invalid_snapshot_source" }, 400, { "cache-control": "no-store" });
+  }
+  const [existing, occupied] = await Promise.all([
+    env.DB.prepare(
+      `SELECT device_snapshot_sources.provider_id, device_snapshot_sources.next_sequence
+       FROM device_snapshot_sources
+       WHERE device_id = ? AND account_id = ?`
+    ).bind(deviceID, accountID).first<{ provider_id: ProviderID; next_sequence: number }>(),
+    env.DB.prepare(
+      `SELECT 1 AS occupied
+       FROM remote_account_subscriptions
+       WHERE subscriber_device_id = ? AND local_account_id = ?`
+    ).bind(deviceID, accountID).first<{ occupied: number }>(),
+  ]);
+  if (occupied) {
+    return json({ error: "local_account_conflict" }, 409, { "cache-control": "no-store" });
+  }
+  if (existing && existing.provider_id !== upload.provider_id) {
+    return json({ error: "provider_account_mismatch" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
+  const now = Math.floor(Date.now() / 1_000);
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO device_snapshot_consent (
+         device_id, account_id, consent_revision, enabled, updated_at
+       ) VALUES (?, ?, ?, 1, ?)
+       ON CONFLICT(device_id, account_id) DO UPDATE SET
+         consent_revision = excluded.consent_revision,
+         enabled = 1,
+         updated_at = excluded.updated_at
+       WHERE excluded.consent_revision > device_snapshot_consent.consent_revision
+          OR (excluded.consent_revision = device_snapshot_consent.consent_revision
+              AND device_snapshot_consent.enabled = 1)`
+    ).bind(deviceID, accountID, upload.consent_revision, now),
+    env.DB.prepare(
+      `INSERT INTO device_snapshot_sources (
+         device_id, account_id, provider_id, display_name,
+         refresh_interval_seconds, history_retention_days,
+         next_sequence, created_at, updated_at
+       )
+       SELECT ?, ?, ?, ?, ?, ?, 1, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM device_snapshot_consent
+         WHERE device_id = ? AND account_id = ?
+           AND consent_revision = ? AND enabled = 1
+       )
+         AND NOT EXISTS (
+           SELECT 1 FROM remote_account_subscriptions
+           WHERE subscriber_device_id = ? AND local_account_id = ?
+         )
+       ON CONFLICT(device_id, account_id) DO UPDATE SET
+         display_name = excluded.display_name,
+         refresh_interval_seconds = excluded.refresh_interval_seconds,
+         history_retention_days = excluded.history_retention_days,
+         updated_at = excluded.updated_at
+       WHERE device_snapshot_sources.provider_id = excluded.provider_id`
+    ).bind(
+      deviceID, accountID, upload.provider_id, upload.display_name,
+      upload.refresh_interval_seconds, upload.history_retention_days, now, now,
+      deviceID, accountID, upload.consent_revision,
+      deviceID, accountID,
+    ),
+  ]);
+  const consentChanges = results[0]?.meta.changes ?? 0;
+  const sourceChanges = results[1]?.meta.changes ?? 0;
+  if (consentChanges === 0) {
+    return json({ error: "consent_revision_conflict" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
+  if (sourceChanges !== 1) {
+    const conflict = await env.DB.prepare(
+      `SELECT 1 AS occupied
+       FROM remote_account_subscriptions
+       WHERE subscriber_device_id = ? AND local_account_id = ?`
+    ).bind(deviceID, accountID).first<{ occupied: number }>();
+    if (conflict) {
+      return json({ error: "local_account_conflict" }, 409, {
+        "cache-control": "no-store",
+      });
+    }
+    throw new Error("Could not atomically enable device snapshot source");
+  }
+  const source = await loadDeviceSnapshotSource(env, deviceID, accountID);
+  if (!source) throw new Error("Could not load device snapshot source");
+  console.log(JSON.stringify({
+    event: existing ? "device_snapshot_source_updated" : "device_snapshot_source_enabled",
+    provider: source.provider_id,
+  }));
+  return json({
+    ok: true,
+    consent_revision: source.consent_revision,
+    next_sequence: source.next_sequence,
+  }, existing ? 200 : 201, { "cache-control": "no-store" });
+}
+
+async function uploadDeviceSnapshot(
+  request: Request,
+  env: Env,
+  deviceID: string,
+  accountID: string,
+): Promise<Response> {
+  const source = await loadDeviceSnapshotSource(env, deviceID, accountID);
+  if (!source) {
+    return json({ error: "account_not_found" }, 404, { "cache-control": "no-store" });
+  }
+  const upload = await parseDeviceSnapshotUpload(request, source.provider_id);
+  if (!upload) {
+    return json({ error: "invalid_device_snapshot" }, 400, {
+      "cache-control": "no-store",
+    });
+  }
+  if (upload.consent_revision !== source.consent_revision) {
+    return json({ error: "consent_revision_conflict" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
+  const now = Math.floor(Date.now() / 1_000);
+  const cutoff = now - source.history_retention_days * 86_400;
+  if (upload.observed_at < cutoff
+      || upload.observed_at > now + MAX_DEVICE_SNAPSHOT_CLOCK_SKEW_SECONDS) {
+    return json({ error: "snapshot_outside_time_window" }, 400, {
+      "cache-control": "no-store",
+    });
+  }
+  const payloadHash = await hashSecret(JSON.stringify({
+    consent_revision: upload.consent_revision,
+    sequence: upload.sequence,
+    observed_at: upload.observed_at,
+    snapshot: upload.snapshot,
+  }));
+  if (upload.sequence === source.next_sequence - 1
+      && payloadHash === source.last_payload_hash) {
+    return json({ accepted: true, sequence: upload.sequence }, 200, {
+      "cache-control": "no-store",
+    });
+  }
+  if (upload.sequence !== source.next_sequence) {
+    return json({ error: "snapshot_replay" }, 409, { "cache-control": "no-store" });
+  }
+  if (source.last_observed_at !== null && upload.observed_at < source.last_observed_at) {
+    return json({ error: "snapshot_stale" }, 409, { "cache-control": "no-store" });
+  }
+
+  const guard = `EXISTS (
+    SELECT 1 FROM device_snapshot_sources
+    INNER JOIN device_snapshot_consent
+      ON device_snapshot_consent.device_id = device_snapshot_sources.device_id
+     AND device_snapshot_consent.account_id = device_snapshot_sources.account_id
+    WHERE device_snapshot_sources.device_id = ?
+      AND device_snapshot_sources.account_id = ?
+      AND device_snapshot_sources.provider_id = ?
+      AND device_snapshot_sources.next_sequence = ?
+      AND device_snapshot_consent.consent_revision = ?
+      AND device_snapshot_consent.enabled = 1
+  )`;
+  const statements: D1PreparedStatement[] = upload.snapshot.windows.map((window) =>
+    env.DB.prepare(
+      `INSERT INTO device_snapshot_history (
+         device_id, account_id, row_tag, provider_id, metric_id, metric_title,
+         kind, window_minutes, remaining_percent, recorded_at, resets_at,
+         seconds_until_reset, plan
+       ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE ${guard}
+       ON CONFLICT(device_id, account_id, metric_id, recorded_at) DO UPDATE SET
+         row_tag = excluded.row_tag,
+         metric_title = excluded.metric_title,
+         kind = excluded.kind,
+         window_minutes = excluded.window_minutes,
+         remaining_percent = excluded.remaining_percent,
+         resets_at = excluded.resets_at,
+         seconds_until_reset = excluded.seconds_until_reset,
+         plan = excluded.plan`
+    ).bind(
+      deviceID, accountID, historyRowTag(accountID, window.metric_id, upload.observed_at),
+      source.provider_id, window.metric_id, window.title, window.kind,
+      window.window_minutes, window.remaining_percent, upload.observed_at, window.resets_at,
+      Math.max(0, window.resets_at - upload.observed_at), upload.snapshot.plan,
+      deviceID, accountID, source.provider_id, upload.sequence, upload.consent_revision,
+    )
+  );
+  statements.push(
+    env.DB.prepare(
+      `DELETE FROM device_snapshot_history
+       WHERE device_id = ? AND account_id = ? AND recorded_at < ?
+         AND ${guard}`
+    ).bind(
+      deviceID, accountID, cutoff,
+      deviceID, accountID, source.provider_id, upload.sequence, upload.consent_revision,
+    ),
+  );
+  const updateIndex = statements.length;
+  statements.push(
+    env.DB.prepare(
+      `UPDATE device_snapshot_sources SET
+         plan = ?, next_sequence = ?, last_payload_hash = ?, latest_snapshot = ?,
+         last_observed_at = ?, last_upload_at = ?, updated_at = ?
+       WHERE device_id = ? AND account_id = ? AND provider_id = ? AND next_sequence = ?
+         AND EXISTS (
+           SELECT 1 FROM device_snapshot_consent
+           WHERE device_id = ? AND account_id = ?
+             AND consent_revision = ? AND enabled = 1
+         )`
+    ).bind(
+      upload.snapshot.plan, upload.sequence + 1, payloadHash,
+      JSON.stringify(upload.snapshot), upload.observed_at, now, now,
+      deviceID, accountID, source.provider_id, upload.sequence,
+      deviceID, accountID, upload.consent_revision,
+    ),
+  );
+  const results = await env.DB.batch(statements);
+  if ((results[updateIndex]?.meta.changes ?? 0) !== 1) {
+    const current = await loadDeviceSnapshotSource(env, deviceID, accountID);
+    if (!current || current.consent_revision !== upload.consent_revision) {
+      return json({ error: "consent_revision_conflict" }, 409, {
+        "cache-control": "no-store",
+      });
+    }
+    if (current.next_sequence === upload.sequence + 1
+        && current.last_payload_hash === payloadHash) {
+      return json({ accepted: true, sequence: upload.sequence }, 200, {
+        "cache-control": "no-store",
+      });
+    }
+    return json({ error: "snapshot_replay" }, 409, { "cache-control": "no-store" });
+  }
+  console.log(JSON.stringify({
+    event: "device_snapshot_uploaded",
+    provider: source.provider_id,
+    windows: upload.snapshot.windows.length,
+  }));
+  return json({ accepted: true, sequence: upload.sequence }, 200, {
+    "cache-control": "no-store",
+  });
+}
+
+async function disableDeviceSnapshotSource(
+  env: Env,
+  deviceID: string,
+  accountID: string,
+  consentRevision: number,
+): Promise<Response> {
+  const now = Math.floor(Date.now() / 1_000);
+  const results = await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO device_snapshot_consent (
+         device_id, account_id, consent_revision, enabled, updated_at
+       ) VALUES (?, ?, ?, 0, ?)
+       ON CONFLICT(device_id, account_id) DO UPDATE SET
+         consent_revision = excluded.consent_revision,
+         enabled = 0,
+         updated_at = excluded.updated_at
+       WHERE excluded.consent_revision > device_snapshot_consent.consent_revision
+          OR (excluded.consent_revision = device_snapshot_consent.consent_revision
+              AND device_snapshot_consent.enabled = 0)`
+    ).bind(deviceID, accountID, consentRevision, now),
+    env.DB.prepare(
+      `DELETE FROM device_snapshot_sources
+       WHERE device_id = ? AND account_id = ?
+         AND EXISTS (
+           SELECT 1 FROM device_snapshot_consent
+           WHERE device_id = ? AND account_id = ?
+             AND consent_revision = ? AND enabled = 0
+         )`
+    ).bind(deviceID, accountID, deviceID, accountID, consentRevision),
+  ]);
+  if ((results[0]?.meta.changes ?? 0) !== 1) {
+    return json({ error: "consent_revision_conflict" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
+  console.log(JSON.stringify({ event: "device_snapshot_source_disabled" }));
+  return new Response(null, { status: 204, headers: { "cache-control": "no-store" } });
+}
+
+async function loadDeviceSnapshotSource(
+  env: Env,
+  deviceID: string,
+  accountID: string,
+): Promise<DeviceSnapshotSourceRow | null> {
+  return env.DB.prepare(
+    `SELECT device_snapshot_sources.device_id, device_snapshot_sources.account_id,
+            device_snapshot_sources.provider_id, device_snapshot_sources.display_name,
+            device_snapshot_sources.plan, device_snapshot_sources.refresh_interval_seconds,
+            device_snapshot_sources.history_retention_days,
+            device_snapshot_sources.next_sequence,
+            device_snapshot_sources.last_payload_hash,
+            device_snapshot_sources.latest_snapshot,
+            device_snapshot_sources.last_observed_at,
+            device_snapshot_sources.last_upload_at,
+            device_snapshot_consent.consent_revision
+     FROM device_snapshot_sources
+     INNER JOIN device_snapshot_consent
+       ON device_snapshot_consent.device_id = device_snapshot_sources.device_id
+      AND device_snapshot_consent.account_id = device_snapshot_sources.account_id
+      AND device_snapshot_consent.enabled = 1
+     WHERE device_snapshot_sources.device_id = ?
+       AND device_snapshot_sources.account_id = ?`
+  ).bind(deviceID, accountID).first<DeviceSnapshotSourceRow>();
+}
+
 async function upsertMonitoredAccount(
   env: Env,
   deviceID: string,
@@ -1292,8 +3724,10 @@ async function upsertMonitoredAccount(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
+            monitored_accounts.credential_fingerprint,
             monitored_accounts.credential_revision, monitored_accounts.latest_snapshot,
-            monitored_accounts.history_retention_days
+            monitored_accounts.history_retention_days,
+            account_monitoring_consent.consent_revision
      FROM remote_account_subscriptions
      INNER JOIN monitored_accounts
        ON monitored_accounts.device_id = remote_account_subscriptions.source_device_id
@@ -1339,6 +3773,17 @@ async function upsertMonitoredAccount(
     });
   }
   const now = Math.floor(Date.now() / 1_000);
+  const archived = await env.DB.prepare(
+    `SELECT provider_id, workspace_id, latest_snapshot, last_refresh_at, last_success_at
+     FROM dashboard_account_archives
+     WHERE device_id = ? AND account_id = ?`
+  ).bind(deviceID, accountID).first<{
+    provider_id: ProviderID;
+    workspace_id: string;
+    latest_snapshot: string | null;
+    last_refresh_at: number | null;
+    last_success_at: number | null;
+  }>();
   const encrypted = await encryptCredentials(
     env, deviceID, accountID, upload.provider_id, upload.credentials
   );
@@ -1374,6 +3819,10 @@ async function upsertMonitoredAccount(
          SELECT 1 FROM account_monitoring_consent
          WHERE device_id = ? AND account_id = ? AND consent_revision = ? AND enabled = 1
        )
+         AND NOT EXISTS (
+           SELECT 1 FROM remote_account_subscriptions
+           WHERE subscriber_device_id = ? AND local_account_id = ?
+         )
        ON CONFLICT(device_id, account_id) DO UPDATE SET
          provider_id = excluded.provider_id,
          workspace_id = excluded.workspace_id,
@@ -1420,6 +3869,7 @@ async function upsertMonitoredAccount(
       encrypted, fingerprint, upload.consent_revision,
       upload.refresh_interval_seconds, upload.history_retention_days, now, now, now,
       deviceID, accountID, upload.consent_revision,
+      deviceID, accountID,
     ),
   ]);
   const consentChanges = results[0]?.meta.changes ?? 0;
@@ -1427,8 +3877,59 @@ async function upsertMonitoredAccount(
   if (consentChanges === 0 && accountChanges === 0) {
     return json({ error: "consent_revision_conflict" }, 409, { "cache-control": "no-store" });
   }
+  if (consentChanges === 1 && accountChanges === 0) {
+    return json({ error: "remote_account_is_read_only" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   if (consentChanges !== 1 || accountChanges !== 1) {
     throw new Error("Could not atomically save monitored account consent");
+  }
+  if (archived) {
+    if (archived.provider_id === upload.provider_id
+        && archived.workspace_id === upload.workspace_id) {
+      await env.DB.batch([
+        env.DB.prepare(
+          `INSERT OR IGNORE INTO usage_history (
+             device_id, account_id, provider_id, metric_id, metric_title, kind,
+             window_minutes, remaining_percent, recorded_at, resets_at,
+             seconds_until_reset, plan
+           )
+           SELECT device_id, account_id, provider_id, metric_id, metric_title, kind,
+                  window_minutes, remaining_percent, recorded_at, resets_at,
+                  seconds_until_reset, plan
+           FROM dashboard_account_archive_history
+           WHERE device_id = ? AND account_id = ?`
+        ).bind(deviceID, accountID),
+        env.DB.prepare(
+          `UPDATE monitored_accounts SET
+             latest_snapshot = COALESCE(latest_snapshot, (SELECT latest_snapshot
+               FROM dashboard_account_archives WHERE device_id = ? AND account_id = ?)),
+             last_refresh_at = COALESCE(last_refresh_at, (SELECT last_refresh_at
+               FROM dashboard_account_archives WHERE device_id = ? AND account_id = ?)),
+             last_success_at = COALESCE(last_success_at, (SELECT last_success_at
+               FROM dashboard_account_archives WHERE device_id = ? AND account_id = ?))
+           WHERE device_id = ? AND account_id = ?`
+        ).bind(
+          deviceID, accountID, deviceID, accountID, deviceID, accountID, deviceID, accountID,
+        ),
+        env.DB.prepare(
+          `DELETE FROM dashboard_account_archives WHERE device_id = ? AND account_id = ?`
+        ).bind(deviceID, accountID),
+      ]);
+    } else {
+      // A local UUID reused for another provider/workspace must never inherit
+      // the previous account's retained history.
+      await env.DB.batch([
+        env.DB.prepare(
+          `DELETE FROM dashboard_account_archive_history
+           WHERE device_id = ? AND account_id = ?`
+        ).bind(deviceID, accountID),
+        env.DB.prepare(
+          `DELETE FROM dashboard_account_archives WHERE device_id = ? AND account_id = ?`
+        ).bind(deviceID, accountID),
+      ]);
+    }
   }
   const row = await loadAccountSyncRow(env, deviceID, accountID);
   if (!row) throw new Error("Could not save monitored account");
@@ -1451,6 +3952,14 @@ async function replaceAccountCredential(
       "cache-control": "no-store",
     });
   }
+  const remoteAuthorization: RemoteCredentialReplacementAuthorization | null =
+    requiresWorkspaceMatch ? null : { subscriberDeviceID, localAccountID };
+  const expectedUploadRevision = remoteAuthorization ? 1 : source.consent_revision;
+  if (upload.consent_revision !== expectedUploadRevision) {
+    return json({ error: "consent_revision_conflict" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   const now = Math.floor(Date.now() / 1_000);
   let result: ProviderFetchResult;
   try {
@@ -1460,32 +3969,37 @@ async function replaceAccountCredential(
       source.provider_id,
       result.account_identity ?? `workspace:${source.workspace_id}`,
     );
+    (result.snapshot as StoredProviderSnapshot).account_reference_verified =
+      result.account_identity !== undefined;
+    if (result.account_identity !== undefined) {
+      (result.snapshot as StoredProviderSnapshot).account_reference_scope =
+        "provider_account_v2";
+    }
   } catch (error) {
     console.warn(JSON.stringify({
       event: "remote_account_credential_check_failed",
       provider: source.provider_id,
       error: safeError(error),
     }));
-    return providerCredentialErrorResponse(error);
+    return providerCredentialErrorResponse(error, source.provider_id);
   }
-  const previousReference = explicitSnapshotAccountReference(source.latest_snapshot);
+  // Legacy rows used a workspace-derived opaque reference before providers returned a verified
+  // identity. That fallback must be allowed to migrate once; only an identity previously
+  // verified by the provider is authoritative enough to reject a replacement credential.
+  const previousReference = verifiedSnapshotAccountReference(source.latest_snapshot);
   if (previousReference && previousReference !== result.snapshot.account_reference) {
     return json({ error: "provider_account_mismatch" }, 409, {
       "cache-control": "no-store",
     });
   }
-  await env.DB.prepare(
-    `UPDATE monitored_accounts SET display_name = ?, profile_name = ?, email = ?,
-       plan_expires_at = ?, trial_expires_at = ?, missing_quotas = ?,
-       refresh_interval_seconds = ?, history_retention_days = ?, updated_at = ?
-     WHERE device_id = ? AND account_id = ?`
-  ).bind(
-    upload.display_name, upload.profile_name, upload.email,
-    upload.plan_expires_at, upload.trial_expires_at, JSON.stringify(upload.missing_quotas),
-    upload.refresh_interval_seconds, upload.history_retention_days, now,
-    source.device_id, source.account_id,
-  ).run();
-  await applyVerifiedCredentialResult(env, source, result);
+  const applied = await applyVerifiedCredentialResult(
+    env, source, result, upload, remoteAuthorization
+  );
+  if (!applied) {
+    return json({ error: "consent_revision_conflict" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   const mergedAccounts = 1 + await propagateVerifiedCredentialToSameAccount(
     env,
     source,
@@ -1501,19 +4015,40 @@ async function replaceAccountCredential(
   return accountSyncResponse(env, row, [], 200, null);
 }
 
-function providerCredentialErrorResponse(error: unknown): Response {
-  const providerError = error instanceof ProviderFetchError ? error : null;
-  const status = providerError?.status === 401 || providerError?.status === 403 ? 401 : 502;
-  return json({ error: status === 401 ? "provider_session_expired" : "provider_check_failed" }, status, {
+type ProviderCredentialFailureCode =
+  "provider_session_expired" | "provider_request_forbidden" | "provider_check_failed";
+
+function providerCredentialFailureCode(
+  error: unknown,
+  providerID: ProviderID,
+): ProviderCredentialFailureCode {
+  if (!(error instanceof ProviderFetchError)) return "provider_check_failed";
+  if (error.status === 401) return "provider_session_expired";
+  if (error.status === 403) {
+    return providerID === "chatgpt"
+      ? "provider_request_forbidden"
+      : "provider_session_expired";
+  }
+  return "provider_check_failed";
+}
+
+function providerCredentialErrorResponse(error: unknown, providerID: ProviderID): Response {
+  const code = providerCredentialFailureCode(error, providerID);
+  const status = code === "provider_session_expired"
+    ? 401
+    : code === "provider_request_forbidden" ? 403 : 502;
+  return json({ error: code }, status, {
     "cache-control": "no-store",
   });
 }
 
-function explicitSnapshotAccountReference(snapshotJSON: string | null): string | null {
+function verifiedSnapshotAccountReference(snapshotJSON: string | null): string | null {
   if (!snapshotJSON) return null;
   try {
-    const snapshot = JSON.parse(snapshotJSON) as ProviderSnapshot;
-    return typeof snapshot.account_reference === "string"
+    const snapshot = JSON.parse(snapshotJSON) as StoredProviderSnapshot;
+    return snapshot.account_reference_verified === true
+        && snapshot.account_reference_scope === "provider_account_v2"
+        && typeof snapshot.account_reference === "string"
         && /^[A-Za-z0-9_-]{43}$/.test(snapshot.account_reference)
       ? snapshot.account_reference : null;
   } catch {
@@ -1530,8 +4065,10 @@ async function loadCredentialTarget(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
+            monitored_accounts.credential_fingerprint,
             monitored_accounts.credential_revision, monitored_accounts.latest_snapshot,
-            monitored_accounts.history_retention_days
+            monitored_accounts.history_retention_days,
+            account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
@@ -1544,7 +4081,7 @@ async function loadCredentialTarget(
 async function loadSameAccountCredentialTargets(
   env: Env,
   providerID: ProviderID,
-  workspaceID: string,
+  accountReference: string,
   excludedDeviceID: string,
   excludedAccountID: string,
 ): Promise<CredentialTargetRow[]> {
@@ -1552,19 +4089,25 @@ async function loadSameAccountCredentialTargets(
     `SELECT monitored_accounts.device_id, monitored_accounts.account_id,
             monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.plan, monitored_accounts.refresh_interval_seconds,
+            monitored_accounts.credential_fingerprint,
             monitored_accounts.credential_revision, monitored_accounts.latest_snapshot,
-            monitored_accounts.history_retention_days
+            monitored_accounts.history_retention_days,
+            account_monitoring_consent.consent_revision
      FROM monitored_accounts
      INNER JOIN account_monitoring_consent
        ON account_monitoring_consent.device_id = monitored_accounts.device_id
       AND account_monitoring_consent.account_id = monitored_accounts.account_id
       AND account_monitoring_consent.enabled = 1
-     WHERE monitored_accounts.provider_id = ? AND monitored_accounts.workspace_id = ?
+     WHERE monitored_accounts.provider_id = ?
+       AND json_extract(monitored_accounts.latest_snapshot, '$.account_reference') = ?
+       AND json_extract(monitored_accounts.latest_snapshot, '$.account_reference_verified') = 1
+       AND json_extract(monitored_accounts.latest_snapshot, '$.account_reference_scope') =
+         'provider_account_v2'
        AND NOT (monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?)
      ORDER BY monitored_accounts.device_id, monitored_accounts.account_id
      LIMIT ?`
   ).bind(
-    providerID, workspaceID, excludedDeviceID, excludedAccountID, MAX_REMOTE_ACCOUNT_IMPORTS
+    providerID, accountReference, excludedDeviceID, excludedAccountID, MAX_REMOTE_ACCOUNT_IMPORTS
   ).all<CredentialTargetRow>();
   return result.results;
 }
@@ -1573,7 +4116,9 @@ async function applyVerifiedCredentialResult(
   env: Env,
   target: CredentialTargetRow,
   result: ProviderFetchResult,
-): Promise<void> {
+  replacementUpload: AccountUpload | null = null,
+  remoteAuthorization: RemoteCredentialReplacementAuthorization | null = null,
+): Promise<boolean> {
   const appliedAt = result.snapshot.fetched_at;
   const effectivePlan = result.snapshot.plan ?? target.plan;
   const snapshot: ProviderSnapshot = { ...result.snapshot, plan: effectivePlan };
@@ -1585,28 +4130,89 @@ async function applyVerifiedCredentialResult(
   const encrypted = await encryptCredentials(
     env, target.device_id, target.account_id, target.provider_id, result.credentials
   );
-  const statements: D1PreparedStatement[] = [
+  const incomingReference = verifiedSnapshotAccountReference(JSON.stringify(snapshot));
+  const remoteAuthorizationSQL = remoteAuthorization ? `
+         AND EXISTS (
+           SELECT 1 FROM remote_account_subscriptions
+           WHERE subscriber_device_id = ? AND local_account_id = ?
+             AND source_device_id = monitored_accounts.device_id
+             AND source_account_id = monitored_accounts.account_id
+         )` : "";
+  const targetGuardBindings: Array<string | number | null> = [
+    target.provider_id,
+    target.workspace_id,
+    target.credential_revision,
+    target.credential_fingerprint,
+    incomingReference,
+    target.consent_revision,
+    ...(remoteAuthorization
+      ? [remoteAuthorization.subscriberDeviceID, remoteAuthorization.localAccountID]
+      : []),
+  ];
+  const capturedTargetSQL = `
+         monitored_accounts.provider_id = ?
+         AND monitored_accounts.workspace_id = ?
+         AND monitored_accounts.credential_revision = ?
+         AND monitored_accounts.credential_fingerprint IS ?
+         AND (
+           COALESCE(json_extract(
+             monitored_accounts.latest_snapshot, '$.account_reference_verified'
+           ), 0) <> 1
+           OR COALESCE(json_extract(
+             monitored_accounts.latest_snapshot, '$.account_reference_scope'
+           ), '') <> 'provider_account_v2'
+           OR json_extract(
+             monitored_accounts.latest_snapshot, '$.account_reference'
+           ) IS NULL
+           OR json_extract(
+             monitored_accounts.latest_snapshot, '$.account_reference'
+           ) = ?
+         )
+         AND
+         EXISTS (
+           SELECT 1 FROM account_monitoring_consent
+           WHERE device_id = monitored_accounts.device_id
+             AND account_id = monitored_accounts.account_id
+             AND consent_revision = ? AND enabled = 1
+         )${remoteAuthorizationSQL}`;
+  const statements: D1PreparedStatement[] = [];
+  if (replacementUpload) {
+    statements.push(env.DB.prepare(
+      `UPDATE monitored_accounts SET display_name = ?, profile_name = ?, email = ?,
+         plan_expires_at = ?, trial_expires_at = ?, missing_quotas = ?,
+         refresh_interval_seconds = ?, history_retention_days = ?, updated_at = ?
+       WHERE device_id = ? AND account_id = ? AND ${capturedTargetSQL}`
+    ).bind(
+      replacementUpload.display_name, replacementUpload.profile_name, replacementUpload.email,
+      replacementUpload.plan_expires_at, replacementUpload.trial_expires_at,
+      JSON.stringify(replacementUpload.missing_quotas),
+      replacementUpload.refresh_interval_seconds, replacementUpload.history_retention_days,
+      appliedAt, target.device_id, target.account_id, ...targetGuardBindings,
+    ));
+  }
+  statements.push(
     env.DB.prepare(
       `DELETE FROM monitor_run_targets
-       WHERE device_id = ? AND account_id = ? AND applied_at IS NULL`
-    ).bind(target.device_id, target.account_id),
-    env.DB.prepare(
-      `UPDATE monitored_accounts SET plan = ?, encrypted_credentials = ?,
-         credential_fingerprint = ?, latest_snapshot = ?, scheduled_monitor_at = NULL,
-         last_refresh_at = ?, last_success_at = ?, last_error = NULL,
-         consecutive_failures = 0, next_refresh_at = ?, updated_at = ?
-       WHERE device_id = ? AND account_id = ?`
-    ).bind(
-      effectivePlan, encrypted, fingerprint, JSON.stringify(snapshot),
-      appliedAt, appliedAt, appliedAt + target.refresh_interval_seconds, appliedAt,
-      target.device_id, target.account_id,
-    ),
-    ...snapshot.windows.map((window) => env.DB.prepare(
+       WHERE device_id = ? AND account_id = ? AND applied_at IS NULL
+         AND EXISTS (
+           SELECT 1 FROM monitored_accounts
+           WHERE monitored_accounts.device_id = monitor_run_targets.device_id
+             AND monitored_accounts.account_id = monitor_run_targets.account_id
+             AND ${capturedTargetSQL}
+         )`
+    ).bind(target.device_id, target.account_id, ...targetGuardBindings),
+  );
+  statements.push(...snapshot.windows.map((window) => env.DB.prepare(
       `INSERT INTO usage_history (
          device_id, account_id, row_tag, history_source,
          provider_id, metric_id, metric_title, kind, window_minutes,
          remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
-       ) VALUES (?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ) SELECT ?, ?, ?, 'worker', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+       WHERE EXISTS (
+         SELECT 1 FROM monitored_accounts
+         WHERE monitored_accounts.device_id = ? AND monitored_accounts.account_id = ?
+           AND ${capturedTargetSQL}
+       )
        ON CONFLICT(device_id, account_id, metric_id, recorded_at) DO UPDATE SET
          row_tag = excluded.row_tag,
          history_source = 'worker',
@@ -1621,10 +4227,36 @@ async function applyVerifiedCredentialResult(
       window.title, window.kind, window.window_minutes, window.remaining_percent,
       snapshot.fetched_at, window.resets_at,
       Math.max(0, window.resets_at - snapshot.fetched_at), effectivePlan,
+      target.device_id, target.account_id, ...targetGuardBindings,
     )),
-  ];
-  await env.DB.batch(statements);
-  await enqueueRemoteAccountRefreshHints(env, target.device_id, target.account_id);
+  );
+  // Keep the credential mutation last. Every earlier statement uses the same captured-row
+  // guard; D1 batches execute transactionally and without interleaving, so changing the
+  // fingerprint here cannot invalidate the history statements that belong to this winner.
+  const credentialUpdateIndex = statements.length;
+  statements.push(
+    env.DB.prepare(
+      `UPDATE monitored_accounts SET plan = ?, encrypted_credentials = ?,
+         credential_fingerprint = ?, latest_snapshot = ?, scheduled_monitor_at = NULL,
+         last_refresh_at = ?, last_success_at = ?, last_error = NULL,
+         consecutive_failures = 0, next_refresh_at = ?, updated_at = ?
+       WHERE device_id = ? AND account_id = ? AND ${capturedTargetSQL}`
+    ).bind(
+      effectivePlan, encrypted, fingerprint, JSON.stringify(snapshot),
+      appliedAt, appliedAt, appliedAt + target.refresh_interval_seconds, appliedAt,
+      target.device_id, target.account_id, ...targetGuardBindings,
+    ),
+  );
+  const results = await env.DB.batch(statements);
+  const applied = (results[credentialUpdateIndex]?.meta.changes ?? 0) === 1;
+  if (applied) {
+    if (remoteAuthorization) {
+      await enqueueAccountRefreshHints(env, target.device_id, target.account_id);
+    } else {
+      await enqueueRemoteAccountRefreshHints(env, target.device_id, target.account_id);
+    }
+  }
+  return applied;
 }
 
 async function disableMonitoredAccount(
@@ -1704,18 +4336,17 @@ async function uploadMonitoredAccountHistory(
     });
   }
 
-  const sourceReference = explicitSnapshotAccountReference(source.latest_snapshot);
+  const sourceReference = verifiedSnapshotAccountReference(source.latest_snapshot);
   const duplicates = sourceReference
     ? (await loadSameAccountCredentialTargets(
-        env,
-        source.provider_id,
-        source.workspace_id,
-        source.device_id,
-        source.account_id,
+      env,
+      source.provider_id,
+      sourceReference,
+      source.device_id,
+      source.account_id,
       )).filter((target) => {
         if (target.account_id !== source.account_id) return false;
-        const targetReference = explicitSnapshotAccountReference(target.latest_snapshot);
-        return targetReference === null || targetReference === sourceReference;
+        return verifiedSnapshotAccountReference(target.latest_snapshot) === sourceReference;
       })
     : [];
   const targets = [source, ...duplicates];
@@ -1806,13 +4437,19 @@ async function insertHistoryRows(
            device_id, account_id, row_tag, history_source,
            provider_id, metric_id, metric_title, kind, window_minutes,
            remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
-         ) VALUES (?, ?, ?, 'device', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE EXISTS (
+           SELECT 1 FROM account_monitoring_consent
+           WHERE device_id = ? AND account_id = ?
+             AND consent_revision = ? AND enabled = 1
+         )
          ON CONFLICT DO NOTHING`
       ).bind(
-        target.device_id, target.account_id, point.row_tag,
+        target.device_id, target.account_id, point.row_tag, point.history_source ?? "device",
         point.provider_id, point.metric_id, point.metric_title, point.kind,
         point.window_minutes, point.remaining_percent, point.recorded_at,
         point.resets_at, point.seconds_until_reset, point.plan,
+        target.device_id, target.account_id, target.consent_revision,
       )
     ));
     inserted += results.reduce((sum, result) => sum + (result.meta.changes ?? 0), 0);
@@ -1839,30 +4476,74 @@ async function syncMonitoredAccount(
     since,
     Math.floor(Date.now() / 1_000) - row.history_retention_days * 86_400,
   );
-  const query = cursor
-    ? `SELECT row_tag, history_source, provider_id, metric_id, metric_title,
+  const verifiedReference = verifiedSnapshotAccountReference(row.latest_snapshot);
+  const cursorSQL = cursor
+    ? `AND (usage_history.recorded_at > ?
+            OR (usage_history.recorded_at = ? AND usage_history.metric_id > ?))`
+    : "";
+  const query = verifiedReference
+    ? `WITH identity_sources AS (
+         SELECT monitored_accounts.device_id, monitored_accounts.account_id
+         FROM monitored_accounts
+         INNER JOIN account_monitoring_consent
+           ON account_monitoring_consent.device_id = monitored_accounts.device_id
+          AND account_monitoring_consent.account_id = monitored_accounts.account_id
+          AND account_monitoring_consent.enabled = 1
+         WHERE monitored_accounts.provider_id = ?
+           AND json_extract(monitored_accounts.latest_snapshot, '$.account_reference') = ?
+           AND json_extract(monitored_accounts.latest_snapshot,
+             '$.account_reference_verified') = 1
+           AND json_extract(monitored_accounts.latest_snapshot,
+             '$.account_reference_scope') = 'provider_account_v2'
+       ), ranked_history AS (
+         SELECT usage_history.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY usage_history.metric_id, usage_history.recorded_at
+                  ORDER BY CASE WHEN usage_history.device_id = ?
+                                  AND usage_history.account_id = ? THEN 0 ELSE 1 END,
+                           usage_history.device_id, usage_history.account_id
+                ) AS identity_position
+         FROM usage_history
+         INNER JOIN identity_sources
+           ON identity_sources.device_id = usage_history.device_id
+          AND identity_sources.account_id = usage_history.account_id
+         WHERE usage_history.recorded_at >= ? ${cursorSQL}
+       )
+       SELECT row_tag, history_source, provider_id, metric_id, metric_title,
               kind, window_minutes, remaining_percent,
               recorded_at, resets_at, seconds_until_reset, plan
-       FROM usage_history
-       WHERE device_id = ? AND account_id = ? AND recorded_at >= ?
-         AND (recorded_at > ? OR (recorded_at = ? AND metric_id > ?))
+       FROM ranked_history WHERE identity_position = 1
        ORDER BY recorded_at, metric_id LIMIT ?`
     : `SELECT row_tag, history_source, provider_id, metric_id, metric_title,
               kind, window_minutes, remaining_percent,
               recorded_at, resets_at, seconds_until_reset, plan
        FROM usage_history
        WHERE device_id = ? AND account_id = ? AND recorded_at >= ?
+         ${cursor ? "AND (recorded_at > ? OR (recorded_at = ? AND metric_id > ?))" : ""}
        ORDER BY recorded_at, metric_id LIMIT ?`;
-  const statement = cursor
-    ? env.DB.prepare(query).bind(row.source_device_id, row.source_account_id, effectiveSince,
-        cursor.recordedAt, cursor.recordedAt, cursor.metricID, HISTORY_PAGE_SIZE + 1)
-    : env.DB.prepare(query).bind(
-        row.source_device_id, row.source_account_id, effectiveSince, HISTORY_PAGE_SIZE + 1
-      );
+  const leadingBindings: unknown[] = verifiedReference
+    ? [
+        row.provider_id, verifiedReference,
+        row.source_device_id, row.source_account_id, effectiveSince,
+      ]
+    : [row.source_device_id, row.source_account_id, effectiveSince];
+  const cursorBindings: unknown[] = cursor
+    ? [cursor.recordedAt, cursor.recordedAt, cursor.metricID] : [];
+  const statement = env.DB.prepare(query).bind(
+    ...leadingBindings,
+    ...cursorBindings,
+    HISTORY_PAGE_SIZE + 1,
+  );
   const result = await statement.all<HistoryRow>();
   const rows = result.results;
   const hasMore = rows.length > HISTORY_PAGE_SIZE;
-  const history = rows.slice(0, HISTORY_PAGE_SIZE);
+  const history = rows.slice(0, HISTORY_PAGE_SIZE).map((point) => ({
+    ...point,
+    // Stored tags are scoped to their owning Worker row. Re-key them to the authenticated
+    // client's local account so a subscription or verified-identity union never exposes a
+    // source device's raw account UUID.
+    row_tag: historyRowTag(accountID, point.metric_id, point.recorded_at),
+  }));
   const last = history.at(-1);
   const nextCursor = hasMore && last
     ? encodeHistoryCursor(last.recorded_at, last.metric_id) : null;
@@ -1878,7 +4559,12 @@ async function accountSyncResponse(
 ): Promise<Response> {
   let snapshot: ProviderSnapshot | null = null;
   if (row.latest_snapshot) {
-    try { snapshot = JSON.parse(row.latest_snapshot) as ProviderSnapshot; }
+    try {
+      snapshot = sanitizePublicProviderSnapshot(
+        JSON.parse(row.latest_snapshot) as unknown,
+        row.provider_id,
+      );
+    }
     catch { snapshot = null; }
   }
   const session = workerSession(row);
@@ -1897,13 +4583,123 @@ async function accountSyncResponse(
   }, status, { "cache-control": "no-store" });
 }
 
+function sanitizePublicProviderSnapshot(
+  value: unknown,
+  providerID: ProviderID,
+): ProviderSnapshot | null {
+  if (!isRecord(value) || value.provider_id !== providerID) return null;
+  const plan = optionalBoundedString(value.plan, 200);
+  const fetchedAt = safeDashboardTimestamp(value.fetched_at);
+  if (plan === undefined || fetchedAt === null || !Array.isArray(value.windows)
+      || !Array.isArray(value.reset_credits)) return null;
+  const windows: ProviderSnapshot["windows"] = [];
+  for (const raw of value.windows.slice(0, 50)) {
+    if (!isRecord(raw)) continue;
+    const position = typeof raw.position === "number" && Number.isSafeInteger(raw.position)
+      && raw.position >= 0 && raw.position <= 1_000 ? raw.position : null;
+    const metricID = requiredBoundedString(raw.metric_id, 512, false);
+    const title = requiredBoundedString(raw.title, 256, false);
+    const kind = dashboardWindowKind(raw.kind);
+    const windowMinutes = dashboardWindowMinutes(raw.window_minutes);
+    const remaining = dashboardFiniteNumber(raw.remaining_percent);
+    const resetsAt = safeDashboardTimestamp(raw.resets_at);
+    if (position === null || metricID === null || title === null || remaining === null
+        || resetsAt === null) continue;
+    windows.push({
+      position,
+      metric_id: metricID,
+      title,
+      kind: kind as ProviderSnapshot["windows"][number]["kind"],
+      window_minutes: windowMinutes,
+      remaining_percent: clampDashboardPercent(remaining),
+      resets_at: resetsAt,
+    });
+  }
+  const resetCredits: ProviderSnapshot["reset_credits"] = [];
+  for (const raw of value.reset_credits.slice(0, 50)) {
+    if (!isRecord(raw)) continue;
+    const id = requiredBoundedString(raw.id, 512, false);
+    const status = optionalBoundedString(raw.status, 64);
+    const expiresAt = publicNullableTimestamp(raw.expires_at);
+    const grantedAt = publicNullableTimestamp(raw.granted_at);
+    if (id === null || status === undefined || expiresAt === undefined
+        || grantedAt === undefined) continue;
+    resetCredits.push({ id, status, expires_at: expiresAt, granted_at: grantedAt });
+  }
+  const rawCount = value.available_reset_count;
+  const availableResetCount = typeof rawCount === "number" && Number.isSafeInteger(rawCount)
+    ? Math.max(0, Math.min(1_000, rawCount)) : 0;
+  const result: ProviderSnapshot = {
+    provider_id: providerID,
+    plan,
+    fetched_at: fetchedAt,
+    windows,
+    available_reset_count: availableResetCount,
+    reset_credits: resetCredits,
+  };
+  if (typeof value.reset_credits_authoritative === "boolean") {
+    result.reset_credits_authoritative = value.reset_credits_authoritative;
+  }
+  const accountReference = typeof value.account_reference === "string"
+    && /^[A-Za-z0-9_-]{43}$/.test(value.account_reference)
+    ? value.account_reference : null;
+  if (accountReference) result.account_reference = accountReference;
+  const balance = sanitizePublicAPIBalance(value.api_balance);
+  if (balance) result.api_balance = balance;
+  return result;
+}
+
+function sanitizePublicAPIBalance(value: unknown): ProviderSnapshot["api_balance"] | null {
+  if (!isRecord(value)) return null;
+  const title = requiredBoundedString(value.title, 200, false);
+  const currencyCode = requiredBoundedString(value.currency_code, 8, false);
+  const spent = dashboardFiniteNumber(value.spent);
+  const limit = publicNullableNumber(value.limit);
+  const remaining = publicNullableNumber(value.remaining);
+  const periodStart = publicNullableTimestamp(value.period_start);
+  const periodEnd = publicNullableTimestamp(value.period_end);
+  const accessExpiresAt = publicNullableTimestamp(value.access_expires_at);
+  const unitLabel = optionalBoundedString(value.unit_label, 64);
+  const kind = value.kind === undefined ? undefined
+    : value.kind === "budget" || value.kind === "wallet" ? value.kind : null;
+  if (title === null || currencyCode === null || spent === null || limit === undefined
+      || remaining === undefined || periodStart === undefined || periodEnd === undefined
+      || accessExpiresAt === undefined || unitLabel === undefined || kind === null) return null;
+  return {
+    title,
+    currency_code: currencyCode,
+    spent,
+    limit,
+    remaining,
+    period_start: periodStart,
+    period_end: periodEnd,
+    access_expires_at: accessExpiresAt,
+    is_unlimited: value.is_unlimited === true,
+    ...(kind ? { kind } : {}),
+    ...(value.unit_label === undefined ? {} : { unit_label: unitLabel }),
+  };
+}
+
+function publicNullableNumber(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function publicNullableTimestamp(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.floor(value) : undefined;
+}
+
 async function loadAccountSyncRow(
   env: Env,
   deviceID: string,
   accountID: string,
 ): Promise<AccountSyncRow | null> {
   return env.DB.prepare(
-    `SELECT monitored_accounts.provider_id, monitored_accounts.workspace_id,
+    `SELECT monitored_accounts.device_id AS source_device_id,
+            monitored_accounts.account_id AS source_account_id,
+            monitored_accounts.provider_id, monitored_accounts.workspace_id,
             monitored_accounts.profile_name, monitored_accounts.email,
             monitored_accounts.plan, monitored_accounts.plan_expires_at,
             monitored_accounts.trial_expires_at,
@@ -1975,6 +4771,8 @@ async function runScheduledRefresh(env: Env, scheduledTime: number): Promise<voi
     enqueueDueAccounts(env, now),
     new Date(scheduledTime).getUTCMinutes() === 0 ? enqueueActiveDevices(env) : Promise.resolve(),
     pruneHistory(env, now),
+    pruneDeviceSnapshotHistory(env, now),
+    pruneDashboardSessions(env, now),
     pruneLinkSessions(env, now),
     pruneDeviceDeletionTombstones(env, now),
     pruneMonitorRuns(env, now),
@@ -2360,6 +5158,12 @@ async function refreshMonitorRun(
       source.provider_id,
       result.account_identity ?? `workspace:${source.workspace_id}`,
     );
+    (result.snapshot as StoredProviderSnapshot).account_reference_verified =
+      result.account_identity !== undefined;
+    if (result.account_identity !== undefined) {
+      (result.snapshot as StoredProviderSnapshot).account_reference_scope =
+        "provider_account_v2";
+    }
     const encryptedResult = await encryptRunCredentials(
       env, runID, source.provider_id, result.credentials
     );
@@ -2374,7 +5178,7 @@ async function refreshMonitorRun(
     }
   } catch (error) {
     const providerError = error instanceof ProviderFetchError ? error : null;
-    const errorText = monitorError(error);
+    const errorText = monitorError(error, source.provider_id);
     const retryAfterSeconds = providerError ? providerRetryDelaySeconds(providerError) : null;
     await env.DB.prepare(
       `UPDATE monitor_runs SET status = 'failed', result_error = ?, completed_at = ?,
@@ -2614,7 +5418,7 @@ async function applyMonitorResultToTarget(
   ];
   const results = await env.DB.batch(statements);
   if ((results[0]?.meta.changes ?? 0) === 1) {
-    await enqueueRemoteAccountRefreshHints(env, row.device_id, row.account_id);
+    await enqueueAccountRefreshHints(env, row.device_id, row.account_id);
     await propagateVerifiedCredentialToSameAccount(env, row, {
       credentials: targetCredentials,
       snapshot: effectiveSnapshot,
@@ -2628,20 +5432,20 @@ async function propagateVerifiedCredentialToSameAccount(
   result: ProviderFetchResult,
 ): Promise<number> {
   const reference = result.snapshot.account_reference;
-  if (!reference) return 0;
+  if (!result.account_identity || !reference) return 0;
   const targets = await loadSameAccountCredentialTargets(
     env,
     source.provider_id,
-    source.workspace_id,
+    reference,
     source.device_id,
     source.account_id,
   );
   let updated = 0;
   const updatedDeviceIDs = new Set<string>();
   for (const target of targets) {
-    const knownReference = explicitSnapshotAccountReference(target.latest_snapshot);
-    if (knownReference && knownReference !== reference) continue;
-    await applyVerifiedCredentialResult(env, target, result);
+    if (verifiedSnapshotAccountReference(target.latest_snapshot) !== reference) continue;
+    const applied = await applyVerifiedCredentialResult(env, target, result);
+    if (!applied) continue;
     updated += 1;
     updatedDeviceIDs.add(target.device_id);
   }
@@ -2656,8 +5460,8 @@ async function propagateVerifiedCredentialToSameAccount(
   return updated;
 }
 
-async function enqueueDeviceRefreshHints(env: Env, deviceIDs: Set<string>): Promise<void> {
-  if (deviceIDs.size === 0) return;
+async function enqueueDeviceRefreshHints(env: Env, deviceIDs: Set<string>): Promise<number> {
+  if (deviceIDs.size === 0) return 0;
   const ids = [...deviceIDs];
   const targets: Array<Omit<PushTarget, "kind">> = [];
   for (let offset = 0; offset < ids.length; offset += 40) {
@@ -2676,6 +5480,7 @@ async function enqueueDeviceRefreshHints(env: Env, deviceIDs: Set<string>): Prom
       }))
     );
   }
+  return targets.length;
 }
 
 function snapshotForCredentials(
@@ -2700,33 +5505,52 @@ function snapshotForCredentials(
   };
 }
 
+async function enqueueAccountRefreshHints(
+  env: Env,
+  sourceDeviceID: string,
+  sourceAccountID: string,
+): Promise<void> {
+  const deviceIDs = await remoteAccountSubscriberDeviceIDs(
+    env, sourceDeviceID, sourceAccountID
+  );
+  deviceIDs.add(sourceDeviceID);
+  const enqueued = await enqueueDeviceRefreshHints(env, deviceIDs);
+  if (enqueued > 0) {
+    console.log(JSON.stringify({
+      event: "account_refresh_hints_enqueued",
+      devices: enqueued,
+    }));
+  }
+}
+
 async function enqueueRemoteAccountRefreshHints(
   env: Env,
   sourceDeviceID: string,
   sourceAccountID: string,
 ): Promise<void> {
-  const result = await env.DB.prepare(
-    `SELECT DISTINCT devices.device_id, devices.apns_token, devices.apns_environment
-     FROM remote_account_subscriptions
-     INNER JOIN devices
-       ON devices.device_id = remote_account_subscriptions.subscriber_device_id
-     WHERE remote_account_subscriptions.source_device_id = ?
-       AND remote_account_subscriptions.source_account_id = ?
-       AND devices.push_disabled_at IS NULL`
-  ).bind(sourceDeviceID, sourceAccountID).all<Omit<PushTarget, "kind">>();
-  for (let offset = 0; offset < result.results.length; offset += QUEUE_BATCH_SIZE) {
-    await env.PUSH_QUEUE.sendBatch(
-      result.results.slice(offset, offset + QUEUE_BATCH_SIZE).map((row) => ({
-        body: { kind: "push" as const, ...row },
-      }))
-    );
-  }
-  if (result.results.length > 0) {
+  const deviceIDs = await remoteAccountSubscriberDeviceIDs(
+    env, sourceDeviceID, sourceAccountID
+  );
+  const enqueued = await enqueueDeviceRefreshHints(env, deviceIDs);
+  if (enqueued > 0) {
     console.log(JSON.stringify({
       event: "remote_account_refresh_hints_enqueued",
-      devices: result.results.length,
+      devices: enqueued,
     }));
   }
+}
+
+async function remoteAccountSubscriberDeviceIDs(
+  env: Env,
+  sourceDeviceID: string,
+  sourceAccountID: string,
+): Promise<Set<string>> {
+  const result = await env.DB.prepare(
+    `SELECT DISTINCT subscriber_device_id AS device_id
+     FROM remote_account_subscriptions
+     WHERE source_device_id = ? AND source_account_id = ?`
+  ).bind(sourceDeviceID, sourceAccountID).all<{ device_id: string }>();
+  return new Set(result.results.map((row) => row.device_id));
 }
 
 async function applyMonitorRunFailure(
@@ -2749,7 +5573,7 @@ async function applyMonitorRunFailure(
         row.refresh_interval_seconds,
         row.consecutive_failures,
       );
-      await env.DB.batch([
+      const results = await env.DB.batch([
         env.DB.prepare(
           `UPDATE monitored_accounts SET last_refresh_at = ?, last_error = ?,
              consecutive_failures = consecutive_failures + 1,
@@ -2772,6 +5596,9 @@ async function applyMonitorRunFailure(
            WHERE run_id = ? AND device_id = ? AND account_id = ?`
         ).bind(failedAt, runID, row.device_id, row.account_id),
       ]);
+      if ((results[0]?.meta.changes ?? 0) === 1) {
+        await enqueueAccountRefreshHints(env, row.device_id, row.account_id);
+      }
     }
   }
   await env.DB.prepare(
@@ -2843,8 +5670,25 @@ async function pruneHistory(env: Env, now: number): Promise<void> {
   ).bind(now).run();
 }
 
+async function pruneDeviceSnapshotHistory(env: Env, now: number): Promise<void> {
+  await env.DB.prepare(
+    `DELETE FROM device_snapshot_history
+     WHERE EXISTS (
+       SELECT 1 FROM device_snapshot_sources
+       WHERE device_snapshot_sources.device_id = device_snapshot_history.device_id
+         AND device_snapshot_sources.account_id = device_snapshot_history.account_id
+         AND device_snapshot_history.recorded_at
+           < ? - device_snapshot_sources.history_retention_days * 86400
+     )`
+  ).bind(now).run();
+}
+
 async function pruneLinkSessions(env: Env, now: number): Promise<void> {
   await env.DB.prepare("DELETE FROM link_sessions WHERE expires_at <= ?").bind(now).run();
+}
+
+async function pruneDashboardSessions(env: Env, now: number): Promise<void> {
+  await env.DB.prepare("DELETE FROM dashboard_sessions WHERE expires_at <= ?").bind(now).run();
 }
 
 async function pruneDeviceDeletionTombstones(env: Env, now: number): Promise<void> {
@@ -3042,6 +5886,166 @@ async function boundedRequestJSON(request: Request, maximumBytes: number): Promi
   }
   try { return JSON.parse(new TextDecoder().decode(bytes)) as unknown; }
   catch { return null; }
+}
+
+async function hasEmptyJSONBody(request: Request): Promise<boolean> {
+  // Fetch clients commonly send an explicit Content-Length: 0 with POST requests. A zero-byte
+  // body is the same empty JSON envelope accepted by the browser UI; do not try to JSON-decode the
+  // empty stream and turn a valid passkey-options request into `invalid_request`.
+  if (request.headers.get("content-length")?.trim() === "0") return true;
+  if (!request.body) return true;
+  const value = await boundedRequestJSON(request, 256);
+  return isRecord(value) && Object.keys(value).length === 0;
+}
+
+type PasskeyRegistrationVerificationBody = {
+  transaction_id: string;
+  credential: RegistrationResponseJSON;
+};
+
+type PasskeyAuthenticationVerificationBody = {
+  transaction_id: string;
+  credential: AuthenticationResponseJSON;
+};
+
+async function parsePasskeyVerificationBody(
+  request: Request,
+  purpose: "registration",
+): Promise<PasskeyRegistrationVerificationBody | null>;
+async function parsePasskeyVerificationBody(
+  request: Request,
+  purpose: "authentication",
+): Promise<PasskeyAuthenticationVerificationBody | null>;
+async function parsePasskeyVerificationBody(
+  request: Request,
+  purpose: "registration" | "authentication",
+): Promise<PasskeyRegistrationVerificationBody | PasskeyAuthenticationVerificationBody | null> {
+  const value = await boundedRequestJSON(request, MAX_WEBAUTHN_BODY_BYTES);
+  if (!isExactObject(value, ["transaction_id", "credential"])) return null;
+  if (typeof value.transaction_id !== "string"
+      || !/^[A-Za-z0-9_-]{43}$/.test(value.transaction_id)) return null;
+  const credential = purpose === "registration"
+    ? parseRegistrationCredential(value.credential)
+    : parseAuthenticationCredential(value.credential);
+  if (!credential) return null;
+  if (purpose === "registration") {
+    return {
+      transaction_id: value.transaction_id,
+      credential: credential as RegistrationResponseJSON,
+    };
+  }
+  return {
+    transaction_id: value.transaction_id,
+    credential: credential as AuthenticationResponseJSON,
+  };
+}
+
+function parseRegistrationCredential(value: unknown): RegistrationResponseJSON | null {
+  if (!isCredentialEnvelope(value)) return null;
+  if (!isExactObject(value.response, [
+    "clientDataJSON", "attestationObject", "authenticatorData", "transports",
+    "publicKeyAlgorithm", "publicKey",
+  ], ["authenticatorData", "transports", "publicKeyAlgorithm", "publicKey"])) return null;
+  if (!boundedBase64URL(value.response.clientDataJSON, 8_192)
+      || !boundedBase64URL(value.response.attestationObject, 24_576)) return null;
+  return {
+    id: value.id,
+    rawId: value.rawId,
+    type: "public-key",
+    clientExtensionResults: {},
+    response: {
+      clientDataJSON: value.response.clientDataJSON,
+      attestationObject: value.response.attestationObject,
+    },
+    ...(value.authenticatorAttachment === undefined || value.authenticatorAttachment === null
+      ? {}
+      : { authenticatorAttachment: value.authenticatorAttachment }),
+  };
+}
+
+function parseAuthenticationCredential(value: unknown): AuthenticationResponseJSON | null {
+  if (!isCredentialEnvelope(value)) return null;
+  if (!isExactObject(value.response, [
+    "clientDataJSON", "authenticatorData", "signature", "userHandle",
+  ], ["userHandle"])) return null;
+  if (!boundedBase64URL(value.response.clientDataJSON, 8_192)
+      || !boundedBase64URL(value.response.authenticatorData, 8_192)
+      || !boundedBase64URL(value.response.signature, 8_192)
+      || !boundedBase64URL(value.response.userHandle, 1_024)) return null;
+  return {
+    id: value.id,
+    rawId: value.rawId,
+    type: "public-key",
+    clientExtensionResults: {},
+    response: {
+      clientDataJSON: value.response.clientDataJSON,
+      authenticatorData: value.response.authenticatorData,
+      signature: value.response.signature,
+      userHandle: value.response.userHandle,
+    },
+    ...(value.authenticatorAttachment === undefined || value.authenticatorAttachment === null
+      ? {}
+      : { authenticatorAttachment: value.authenticatorAttachment }),
+  };
+}
+
+function isCredentialEnvelope(value: unknown): value is {
+  id: string;
+  rawId: string;
+  type: "public-key";
+  response: Record<string, unknown>;
+  authenticatorAttachment?: "platform" | "cross-platform" | null;
+} {
+  if (!isExactObject(value, [
+    "id", "rawId", "type", "response", "clientExtensionResults", "authenticatorAttachment",
+  ], ["authenticatorAttachment"])) return false;
+  return boundedBase64URL(value.id, 2_048)
+    && value.rawId === value.id
+    && value.type === "public-key"
+    && isRecord(value.response)
+    && isRecord(value.clientExtensionResults)
+    && (value.authenticatorAttachment === undefined
+      || value.authenticatorAttachment === null
+      || value.authenticatorAttachment === "platform"
+      || value.authenticatorAttachment === "cross-platform");
+}
+
+function isExactObject(
+  value: unknown,
+  keys: readonly string[],
+  optionalKeys: readonly string[] = [],
+): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const allowed = new Set(keys);
+  const optional = new Set(optionalKeys);
+  for (const key of Object.keys(value)) if (!allowed.has(key)) return false;
+  for (const key of keys) if (!optional.has(key) && !(key in value)) return false;
+  return true;
+}
+
+function boundedBase64URL(value: unknown, maximumLength: number): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= maximumLength
+    && /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function base64URLBytes(value: string): Uint8Array {
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/")
+    + "=".repeat((4 - value.length % 4) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function webAuthnClientDataIsTopLevel(encoded: string): boolean {
+  try {
+    const value = JSON.parse(new TextDecoder().decode(base64URLBytes(encoded))) as unknown;
+    return isRecord(value)
+      && value.crossOrigin !== true
+      && !("topOrigin" in value);
+  } catch {
+    return false;
+  }
 }
 
 async function encryptCredentials(
@@ -3383,7 +6387,9 @@ function decodeHistoryCursor(value: string | null): { recordedAt: number; metric
   } catch { return null; }
 }
 
-function monitorError(error: unknown): string {
+function monitorError(error: unknown, providerID: ProviderID): string {
+  const credentialFailure = providerCredentialFailureCode(error, providerID);
+  if (credentialFailure !== "provider_check_failed") return credentialFailure;
   if (error instanceof ProviderFetchError) return error.message.slice(0, 240);
   return "Server monitoring failed.";
 }
@@ -3396,12 +6402,17 @@ function bearerToken(request: Request): string | null {
 }
 
 async function registrationAccessAllowed(request: Request, env: Env): Promise<boolean> {
+  const configured = registrationAccessKey(env);
+  const candidate = request.headers.get("x-when-reset-server-key") ?? "";
+  return secretsMatch(candidate, await hashSecret(configured));
+}
+
+function registrationAccessKey(env: Pick<Env, "REGISTRATION_ACCESS_KEY">): string {
   const configured = env.REGISTRATION_ACCESS_KEY;
   if (typeof configured !== "string" || configured.length < 32) {
     throw new Error("Registration access key is not configured");
   }
-  const candidate = request.headers.get("x-when-reset-server-key") ?? "";
-  return secretsMatch(candidate, await hashSecret(configured));
+  return configured;
 }
 
 async function secretsMatch(candidate: string, storedHash: string): Promise<boolean> {
@@ -3412,6 +6423,12 @@ async function secretsMatch(candidate: string, storedHash: string): Promise<bool
     encoder.encode(candidateHash),
     encoder.encode(storedHash)
   );
+}
+
+function timingSafeEqualStrings(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+  const encoder = new TextEncoder();
+  return crypto.subtle.timingSafeEqual(encoder.encode(left), encoder.encode(right));
 }
 
 async function hashSecret(secret: string): Promise<string> {
@@ -3451,7 +6468,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function safeError(error: unknown): string {
-  return error instanceof Error ? error.message : "unknown_error";
+  if (error instanceof ProviderFetchError) return `ProviderFetchError:${error.status}`;
+  if (error instanceof Error) return error.name.slice(0, 80) || "Error";
+  return "unknown_error";
 }
 
 function json(body: unknown, status = 200, headers: HeadersInit = {}): Response {
@@ -3462,6 +6481,115 @@ function linkJSON(body: unknown, status = 200, headers: HeadersInit = {}): Respo
   return Response.json(body, { status, headers: linkSecurityHeaders(headers) });
 }
 
+type DashboardResponseKind = "overview" | "history" | "devices";
+
+function dashboardJSON(body: unknown, kind: DashboardResponseKind, status = 200): Response {
+  assertDashboardResponseSafe(body, kind);
+  return linkJSON(body, status);
+}
+
+function assertDashboardResponseSafe(value: unknown, kind: DashboardResponseKind): void {
+  if (kind === "devices") {
+    const deviceRoot = dashboardAllowedObject(
+      value,
+      ["version", "generated_at", "can_manage", "truncated", "devices"],
+      ["devices"],
+    );
+    for (const deviceValue of dashboardAllowedArray(deviceRoot.devices)) {
+      dashboardAllowedObject(deviceValue, [
+        "id", "label", "environment", "created_at", "last_seen_at", "last_push_at",
+        "push_disabled_at", "push_enabled", "active", "retired", "monitored_accounts",
+        "published_accounts", "subscriptions",
+      ]);
+    }
+    return;
+  }
+
+  const root = dashboardAllowedObject(
+    value,
+    kind === "overview"
+      ? ["version", "generated_at", "summary", "devices", "runs", "accounts"]
+      : ["account", "range", "from", "to", "series", "truncated"],
+    kind === "overview" ? ["summary", "devices", "runs", "accounts"] : ["account", "series"],
+  );
+  if (kind === "overview") {
+    dashboardAllowedObject(root.summary, [
+      "accounts", "shown_accounts", "healthy", "attention", "unchecked",
+      "last_success_at", "nearest_reset_at", "truncated",
+    ]);
+    dashboardAllowedObject(root.devices, [
+      "total", "active", "push_disabled", "production", "development",
+    ]);
+    dashboardAllowedObject(root.runs, [
+      "pending", "running", "failed_24h", "succeeded_24h", "last_completed_at",
+    ]);
+    for (const accountValue of dashboardAllowedArray(root.accounts)) {
+      const account = dashboardAllowedObject(accountValue, [
+        "id", "provider_id", "provider_name", "display_name", "plan",
+        "plan_expires_at", "trial_expires_at", "status", "last_checked_at",
+        "last_success_at", "next_refresh_at", "refresh_interval_seconds",
+        "history_retention_days", "source", "source_count", "snapshot",
+      ], ["snapshot"]);
+      if (account.snapshot === null) continue;
+      const snapshot = dashboardAllowedObject(account.snapshot, [
+        "fetched_at", "windows", "available_reset_count", "reset_credits",
+        "reset_credits_authoritative", "api_balance",
+      ], ["windows", "reset_credits", "api_balance"]);
+      for (const window of dashboardAllowedArray(snapshot.windows)) {
+        dashboardAllowedObject(window, [
+          "title", "kind", "window_minutes", "remaining_percent", "resets_at",
+        ]);
+      }
+      for (const credit of dashboardAllowedArray(snapshot.reset_credits)) {
+        dashboardAllowedObject(credit, ["status", "granted_at", "expires_at"]);
+      }
+      if (snapshot.api_balance !== undefined) {
+        dashboardAllowedObject(snapshot.api_balance, [
+          "title", "currency_code", "spent", "limit", "remaining", "period_start",
+          "period_end", "access_expires_at", "is_unlimited", "kind", "unit_label",
+        ]);
+      }
+    }
+    return;
+  }
+
+  dashboardAllowedObject(root.account, [
+    "id", "provider_id", "provider_name", "display_name", "plan",
+  ]);
+  for (const seriesValue of dashboardAllowedArray(root.series)) {
+    const series = dashboardAllowedObject(seriesValue, [
+      "id", "title", "kind", "window_minutes", "points",
+    ], ["points"]);
+    for (const point of dashboardAllowedArray(series.points)) {
+      dashboardAllowedObject(point, [
+        "recorded_at", "remaining_percent", "resets_at", "plan",
+      ]);
+    }
+  }
+}
+
+function dashboardAllowedObject(
+  value: unknown,
+  allowedKeys: readonly string[],
+  nestedKeys: readonly string[] = [],
+): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("Unsafe dashboard response shape");
+  const allowed = new Set(allowedKeys);
+  const nested = new Set(nestedKeys);
+  for (const [key, item] of Object.entries(value)) {
+    if (!allowed.has(key)) throw new Error("Unsafe dashboard response field");
+    if (!nested.has(key) && item !== null && typeof item === "object") {
+      throw new Error("Unsafe dashboard response shape");
+    }
+  }
+  return value;
+}
+
+function dashboardAllowedArray(value: unknown): unknown[] {
+  if (!Array.isArray(value)) throw new Error("Unsafe dashboard response shape");
+  return value;
+}
+
 function linkSecurityHeaders(additional: HeadersInit = {}): Headers {
   const headers = new Headers(additional);
   headers.set("cache-control", "no-store");
@@ -3469,12 +6597,17 @@ function linkSecurityHeaders(additional: HeadersInit = {}): Headers {
   headers.set("cross-origin-resource-policy", "same-origin");
   headers.set("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=()");
   headers.set("referrer-policy", "no-referrer");
+  headers.set("x-robots-tag", "noindex, nofollow, noarchive");
   headers.set("x-content-type-options", "nosniff");
   headers.set("x-frame-options", "DENY");
   return headers;
 }
 
 export const testing = {
+  applyVerifiedCredentialResult,
+  assertDashboardResponseSafe,
+  dashboardAccessKeyGeneration,
+  dashboardSessionHash,
   credentialFingerprint,
   createAPNSAuthorization,
   decryptCredentials,
@@ -3482,6 +6615,7 @@ export const testing = {
   handleAPNSResult,
   hashSecret,
   isUUID,
+  loadCredentialTarget,
   monitorRetryDelaySeconds,
   parseAccountUpload,
   parseRegistration,

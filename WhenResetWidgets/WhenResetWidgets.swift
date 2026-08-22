@@ -1899,8 +1899,10 @@ struct UsageLiveActivity: Widget {
             } compactTrailing: {
                 if let target = context.state.targets.first {
                     LiveActivityCountdown(expiry: target.expiresAt)
-                        .font(.system(size: 8, weight: .semibold, design: .rounded))
-                        .frame(width: 46, alignment: .trailing).foregroundStyle(.white)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .minimumScaleFactor(0.78)
+                        .frame(width: 52, alignment: .trailing)
+                        .foregroundStyle(.white)
                 }
             } minimal: {
                 if let target = context.state.targets.first {

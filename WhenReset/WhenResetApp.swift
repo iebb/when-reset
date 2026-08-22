@@ -201,6 +201,7 @@ struct WhenResetApp: App {
         }
         .backgroundTask(.appRefresh(BackgroundRefreshScheduler.identifier)) {
             await BackgroundRefreshScheduler.scheduleNext(after: store.refreshSettings.backgroundInterval)
+            await store.synchronizeAccountsFromICloudKeychain()
             _ = await store.refreshAll(source: .background)
         }
 #elseif os(macOS)

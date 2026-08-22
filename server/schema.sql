@@ -42,6 +42,61 @@ CREATE TABLE IF NOT EXISTS link_sessions (
 CREATE INDEX IF NOT EXISTS link_sessions_expires_at
 ON link_sessions(expires_at);
 
+CREATE TABLE IF NOT EXISTS dashboard_sessions (
+  token_hash TEXT PRIMARY KEY NOT NULL,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS dashboard_sessions_expires_at
+ON dashboard_sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS dashboard_session_authorizations (
+  token_hash TEXT PRIMARY KEY NOT NULL,
+  auth_method TEXT NOT NULL CHECK(auth_method IN ('access_key', 'passkey')),
+  key_verified_until INTEGER,
+  passkey_rp_id TEXT,
+  FOREIGN KEY (token_hash) REFERENCES dashboard_sessions(token_hash) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS dashboard_webauthn_identities (
+  rp_id TEXT PRIMARY KEY NOT NULL,
+  user_handle TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dashboard_passkeys (
+  credential_id TEXT PRIMARY KEY NOT NULL,
+  user_handle TEXT NOT NULL,
+  rp_id TEXT NOT NULL,
+  public_key BLOB NOT NULL,
+  counter INTEGER NOT NULL CHECK(counter >= 0),
+  transports_json TEXT NOT NULL DEFAULT '[]',
+  access_key_generation TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used_at INTEGER,
+  FOREIGN KEY (rp_id) REFERENCES dashboard_webauthn_identities(rp_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS dashboard_passkeys_generation
+ON dashboard_passkeys(rp_id, access_key_generation);
+
+CREATE TABLE IF NOT EXISTS dashboard_webauthn_challenges (
+  transaction_id TEXT PRIMARY KEY NOT NULL,
+  purpose TEXT NOT NULL CHECK(purpose IN ('authentication', 'registration')),
+  challenge TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  rp_id TEXT NOT NULL,
+  session_token_hash TEXT,
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  consumed_at INTEGER,
+  FOREIGN KEY (session_token_hash) REFERENCES dashboard_sessions(token_hash) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS dashboard_webauthn_challenges_expires_at
+ON dashboard_webauthn_challenges(expires_at);
+
 CREATE TABLE IF NOT EXISTS account_monitoring_consent (
   device_id TEXT NOT NULL,
   account_id TEXT NOT NULL,
@@ -51,6 +106,63 @@ CREATE TABLE IF NOT EXISTS account_monitoring_consent (
   PRIMARY KEY (device_id, account_id),
   FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
 );
+
+-- Device-published usage is deliberately separate from provider monitoring. These rows never
+-- contain provider credentials, workspace identifiers, profile data, or raw provider payloads.
+CREATE TABLE IF NOT EXISTS device_snapshot_consent (
+  device_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  consent_revision INTEGER NOT NULL CHECK(consent_revision > 0),
+  enabled INTEGER NOT NULL CHECK(enabled IN (0, 1)),
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (device_id, account_id),
+  FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS device_snapshot_sources (
+  device_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  display_name TEXT,
+  plan TEXT,
+  refresh_interval_seconds INTEGER NOT NULL,
+  history_retention_days INTEGER NOT NULL CHECK(history_retention_days BETWEEN 1 AND 3650),
+  next_sequence INTEGER NOT NULL DEFAULT 1 CHECK(next_sequence > 0),
+  last_payload_hash TEXT,
+  latest_snapshot TEXT,
+  last_observed_at INTEGER,
+  last_upload_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (device_id, account_id),
+  FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS device_snapshot_sources_freshness
+ON device_snapshot_sources(last_observed_at, device_id, account_id);
+
+CREATE TABLE IF NOT EXISTS device_snapshot_history (
+  device_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  row_tag TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  metric_id TEXT NOT NULL,
+  metric_title TEXT NOT NULL,
+  kind TEXT,
+  window_minutes INTEGER,
+  remaining_percent REAL NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  resets_at INTEGER NOT NULL,
+  seconds_until_reset REAL NOT NULL,
+  plan TEXT,
+  PRIMARY KEY (device_id, account_id, metric_id, recorded_at),
+  UNIQUE (device_id, account_id, row_tag),
+  FOREIGN KEY (device_id, account_id)
+    REFERENCES device_snapshot_sources(device_id, account_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS device_snapshot_history_account_time
+ON device_snapshot_history(device_id, account_id, recorded_at, metric_id);
 
 CREATE TABLE IF NOT EXISTS monitored_accounts (
   device_id TEXT NOT NULL,
@@ -123,6 +235,49 @@ CREATE TABLE IF NOT EXISTS usage_history (
 
 CREATE INDEX IF NOT EXISTS usage_history_account_time
 ON usage_history(device_id, account_id, recorded_at, metric_id);
+
+-- Archived Worker account data is retained only when the dashboard user explicitly
+-- chooses "remove from monitoring, keep data". It never stores provider credentials.
+CREATE TABLE IF NOT EXISTS dashboard_account_archives (
+  device_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  display_name TEXT,
+  plan TEXT,
+  plan_expires_at INTEGER,
+  trial_expires_at INTEGER,
+  missing_quotas TEXT NOT NULL DEFAULT '[]',
+  latest_snapshot TEXT,
+  last_refresh_at INTEGER,
+  last_success_at INTEGER,
+  refresh_interval_seconds INTEGER NOT NULL,
+  history_retention_days INTEGER NOT NULL,
+  archived_at INTEGER NOT NULL,
+  PRIMARY KEY (device_id, account_id),
+  FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS dashboard_account_archive_history (
+  device_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  metric_id TEXT NOT NULL,
+  metric_title TEXT NOT NULL,
+  kind TEXT,
+  window_minutes INTEGER,
+  remaining_percent REAL NOT NULL,
+  recorded_at INTEGER NOT NULL,
+  resets_at INTEGER NOT NULL,
+  seconds_until_reset REAL NOT NULL,
+  plan TEXT,
+  PRIMARY KEY (device_id, account_id, metric_id, recorded_at),
+  FOREIGN KEY (device_id, account_id)
+    REFERENCES dashboard_account_archives(device_id, account_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS dashboard_account_archive_history_time
+ON dashboard_account_archive_history(device_id, account_id, recorded_at, metric_id);
 
 CREATE TABLE IF NOT EXISTS monitor_runs (
   run_id TEXT PRIMARY KEY NOT NULL,

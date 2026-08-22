@@ -14,7 +14,7 @@
   "cloudflare": {
     "bindings": {
       "REGISTRATION_ACCESS_KEY": {
-        "description": "A private random value of at least 32 characters used only to create one-use device links. Generate one with `openssl rand -base64 32` and enter it on your Worker's link page; it is never placed in the QR code."
+        "description": "A private random value of at least 32 characters used to open the read-only dashboard and create one-use device links. Generate one with `openssl rand -base64 32`; it is exchanged for a short-lived browser session and is never placed in the QR code."
       },
       "CREDENTIAL_ENCRYPTION_KEY": {
         "description": "A separate private random value of at least 32 characters used to encrypt provider credentials before storing them in D1. Generate one with `openssl rand -base64 32` and never enter it in the app."
@@ -22,6 +22,7 @@
     }
   },
   "dependencies": {
+    "@simplewebauthn/server": "13.3.2",
     "uqr": "0.1.3"
   },
   "devDependencies": {

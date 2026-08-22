@@ -307,21 +307,66 @@ private struct AccountFailureView: View {
     let relink: () -> Void
     let remove: () -> Void
 
+    private var isExpiredWorkerSession: Bool {
+        failure == AccountRefreshFailure(
+            workerSessionStatus: .expired,
+            checkedAt: failure.failedAt
+        )
+    }
+
+    private var isWorkerSessionCheckFailure: Bool {
+        failure == AccountRefreshFailure(
+            workerSessionStatus: .error,
+            checkedAt: failure.failedAt
+        )
+    }
+
+    private var title: String {
+        if isExpiredWorkerSession { return "Worker sign-in expired" }
+        if isWorkerSessionCheckFailure { return "Worker session check failed" }
+        return failure.title
+    }
+
+    private var message: String {
+        if isExpiredWorkerSession {
+            return "Cloud quota refresh has stopped for this account. Reconnect the provider sign-in to resume Worker updates."
+        }
+        return failure.message
+    }
+
+    private var tint: Color {
+        failure.requiresRelink ? .red : .orange
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(failure.title, systemImage: failure.systemImageName)
+            Label(title, systemImage: failure.systemImageName)
                 .font(.headline)
-                .foregroundStyle(.red)
-            Text(failure.message)
+                .foregroundStyle(tint)
+            Text(message)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+            if isExpiredWorkerSession {
+                Text("Worker reported this \(failure.failedAt, style: .relative).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if let cachedAt {
                 Text("Showing the latest saved usage from \(cachedAt, style: .relative).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
             HStack(spacing: 10) {
-                if failure.requiresRelink,
+                if isExpiredWorkerSession {
+                    Button(
+                        "Reconnect now",
+                        systemImage: "arrow.triangle.2.circlepath",
+                        action: relink
+                    )
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .accessibilityHint("Opens the sign-in flow to resume Worker quota refresh")
+                } else if failure.requiresRelink,
                    !account.isRemoteOnly || account.providerID == .chatGPT {
                     Button(
                         account.isRemoteOnly ? "Update Worker sign-in" : "Sign in again",
@@ -338,7 +383,12 @@ private struct AccountFailureView: View {
             }
             .controlSize(.regular)
         }
-        .padding(.vertical, 4)
+        .padding(12)
+        .background(tint.opacity(0.08), in: .rect(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(tint.opacity(0.24), lineWidth: 1)
+        }
         .accessibilityElement(children: .contain)
     }
 }
@@ -426,11 +476,41 @@ struct AccountSettingsView: View {
             if selectedPage == .account {
             if let failure = store.refreshFailures[account.id] {
                 Section {
-                    Label(failure.title, systemImage: failure.systemImageName)
-                        .foregroundStyle(.red)
-                    Text(failure.message)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                    if failure == AccountRefreshFailure(
+                        workerSessionStatus: .expired,
+                        checkedAt: failure.failedAt
+                    ) {
+                        Label("Worker sign-in expired", systemImage: failure.systemImageName)
+                            .font(.headline)
+                            .foregroundStyle(.red)
+                        Text("Cloud quota refresh has stopped for this account. Reconnect the provider sign-in to resume Worker updates.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        Text("Worker reported this \(failure.failedAt, style: .relative).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Reconnect now", systemImage: "arrow.triangle.2.circlepath") {
+                            showingRelink = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                        .accessibilityHint("Opens the sign-in flow to resume Worker quota refresh")
+                    } else {
+                        let isWorkerSessionCheckFailure = failure == AccountRefreshFailure(
+                            workerSessionStatus: .error,
+                            checkedAt: failure.failedAt
+                        )
+                        Label(
+                            isWorkerSessionCheckFailure
+                                ? "Worker session check failed"
+                                : failure.title,
+                            systemImage: failure.systemImageName
+                        )
+                            .foregroundStyle(failure.requiresRelink ? .red : .orange)
+                        Text(failure.message)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             Section {
@@ -1352,11 +1432,13 @@ struct SettingsView: View {
                         if case .failed = store.pushServerStatus {
                             Button("Retry") { store.retryPushRegistration() }
                         }
-                        if store.pushServerStatus == .registered {
+                        if store.canAccessRemoteWorkerAccounts {
                             Button("Add Accounts from Worker",
                                    systemImage: "icloud.and.arrow.down") {
                                 showingRemoteWorkerAccounts = true
                             }
+                        }
+                        if store.pushServerStatus == .registered {
                             Button("Send Test Refresh") {
                                 Task { await store.requestTestPushRefresh() }
                             }
@@ -1820,7 +1902,8 @@ struct RemoteWorkerAccountsView: View {
     @State private var selectedIDs: Set<String> = []
     @State private var isLoading = true
     @State private var isImporting = false
-    @State private var errorMessage: String?
+    @State private var discoveryError: String?
+    @State private var importError: String?
 
     init(onlyAccountsMissingLocally: Bool = false) {
         self.onlyAccountsMissingLocally = onlyAccountsMissingLocally
@@ -1843,6 +1926,15 @@ struct RemoteWorkerAccountsView: View {
                         HStack {
                             ProgressView()
                             Text("Loading Worker accounts…")
+                        }
+                    } else if let discoveryError {
+                        ContentUnavailableView {
+                            Label("Couldn’t Load Worker Accounts",
+                                  systemImage: "exclamationmark.icloud.fill")
+                        } description: {
+                            Text(discoveryError)
+                        } actions: {
+                            Button("Try Again") { Task { await loadAccounts() } }
                         }
                     } else if accounts.isEmpty {
                         ContentUnavailableView(
@@ -1888,13 +1980,13 @@ struct RemoteWorkerAccountsView: View {
             }
             .refreshable { await loadAccounts() }
             .task { await loadAccounts() }
-            .alert("Couldn’t Add Accounts", isPresented: Binding(
-                get: { errorMessage != nil },
-                set: { if !$0 { errorMessage = nil } }
+            .alert("Couldn’t Finish Worker Import", isPresented: Binding(
+                get: { importError != nil },
+                set: { if !$0 { importError = nil } }
             )) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text(errorMessage ?? "The Worker accounts could not be imported.")
+                Text(importError ?? "The Worker accounts could not be imported.")
             }
         }
     }
@@ -1934,7 +2026,7 @@ struct RemoteWorkerAccountsView: View {
     @MainActor
     private func loadAccounts() async {
         isLoading = true
-        errorMessage = nil
+        discoveryError = nil
         do {
             accounts = try await (onlyAccountsMissingLocally
                 ? store.remoteWorkerAccountsMissingLocally()
@@ -1942,7 +2034,7 @@ struct RemoteWorkerAccountsView: View {
             selectedIDs.formIntersection(accounts.map(\.id))
         } catch {
             accounts = []
-            errorMessage = error.localizedDescription
+            discoveryError = error.localizedDescription
         }
         isLoading = false
     }
@@ -1956,7 +2048,7 @@ struct RemoteWorkerAccountsView: View {
                 _ = try await store.importRemoteWorkerAccounts(selected)
                 dismiss()
             } catch {
-                errorMessage = error.localizedDescription
+                importError = error.localizedDescription
                 isImporting = false
                 await loadAccounts()
             }

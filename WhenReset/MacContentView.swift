@@ -49,7 +49,7 @@ struct MacContentView: View {
                     .fixedSize()
                     .accessibilityLabel("Add account")
                     .help("Add account")
-                    if store.pushServerStatus == .registered {
+                    if store.canAccessRemoteWorkerAccounts {
                         Button {
                             showingRemoteWorkerAccounts = true
                         } label: {
@@ -176,7 +176,10 @@ private struct MacAccountDetailView: View {
     let account: MonitoredAccount
     @State private var showingRelink = false
     @State private var showingRemovalConfirmation = false
+    @State private var showingCredentialUploadConfirmation = false
+    @State private var showingCredentialStopConfirmation = false
     @State private var isRefreshingAccount = false
+    @State private var isUpdatingWorkerUsage = false
 
     private var currentAccount: MonitoredAccount {
         store.accounts.first { $0.id == account.id } ?? account
@@ -190,22 +193,13 @@ private struct MacAccountDetailView: View {
                 accountHeader
 
                 if let failure = store.refreshFailures[account.id] {
-                    HStack(spacing: 12) {
-                        Label(failure.message, systemImage: failure.systemImageName)
-                            .foregroundStyle(failure.requiresRelink ? .red : .orange)
-                        Spacer()
-                        if failure.requiresRelink,
-                           !currentAccount.isDemo,
-                           !currentAccount.isRemoteOnly || currentAccount.providerID == .chatGPT {
-                            Button(
-                                currentAccount.isRemoteOnly
-                                    ? "Update Worker sign-in" : "Reconnect"
-                            ) { showingRelink = true }
-                        }
-                    }
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(.orange.opacity(0.08), in: .rect(cornerRadius: 12))
+                    MacAccountFailureBanner(
+                        account: currentAccount,
+                        failure: failure,
+                        cachedAt: snapshot?.fetchedAt,
+                        retry: refreshAccount,
+                        reconnect: { showingRelink = true }
+                    )
                 }
 
                 if let snapshot {
@@ -221,6 +215,10 @@ private struct MacAccountDetailView: View {
 
                 MacUsageHistorySection(account: currentAccount)
                 accountPreferences
+                if store.canConfigureDeviceUsageUpload(for: currentAccount)
+                    || store.isDeviceUsageUploadEnabled(for: currentAccount) {
+                    workerUsageSharing
+                }
                 accountActions
             }
             .padding(28)
@@ -229,6 +227,18 @@ private struct MacAccountDetailView: View {
         }
         .navigationTitle(currentAccount.resolvedDisplayName)
         .toolbar {
+            ToolbarItem {
+                Menu {
+                    Picker("Update frequency", selection: updateFrequency) {
+                        ForEach(RefreshInterval.inAppOptions, id: \.self) { interval in
+                            Text(interval.title).tag(interval)
+                        }
+                    }
+                } label: {
+                    Label("Update frequency", systemImage: "timer")
+                }
+                .help("Update frequency: \(store.refreshSettings.inAppInterval.title)")
+            }
             ToolbarItem {
                 Button {
                     refreshAccount()
@@ -248,6 +258,26 @@ private struct MacAccountDetailView: View {
                 .environment(store)
         }
         .confirmationDialog(
+            "Upload credentials to \(workerHost)?",
+            isPresented: $showingCredentialUploadConfirmation
+        ) {
+            Button("Upload Credentials") { enableCredentialMonitoring() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This sends \(credentialDisclosure) to \(workerHost). The Worker encrypts stored credentials, but whoever controls it can use them. Continue only if you control this Worker.")
+        }
+        .confirmationDialog(
+            "Stop credential monitoring on \(workerHost)?",
+            isPresented: $showingCredentialStopConfirmation
+        ) {
+            Button("Stop Credential Monitoring", role: .destructive) {
+                disableCredentialMonitoring()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes this account’s credential-backed monitoring source and retained Worker history. It does not delete local Keychain credentials or change sanitized usage sharing.")
+        }
+        .confirmationDialog(
             "Remove \(currentAccount.resolvedDisplayName)?",
             isPresented: $showingRemovalConfirmation
         ) {
@@ -256,6 +286,17 @@ private struct MacAccountDetailView: View {
         } message: {
             Text(removalMessage)
         }
+    }
+
+    private var updateFrequency: Binding<RefreshInterval> {
+        Binding(
+            get: { store.refreshSettings.inAppInterval },
+            set: { value in
+                var settings = store.refreshSettings
+                settings.inAppInterval = value
+                store.setRefreshSettings(settings)
+            }
+        )
     }
 
     private var accountHeader: some View {
@@ -320,6 +361,161 @@ private struct MacAccountDetailView: View {
                 if currentAccount.providerID.supportsBankedResets {
                     Toggle("Show banked resets", isOn: accountSetting(\.showBankedResets))
                 }
+                if showsCredentialMonitoringControl {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 8) {
+                        Label(
+                            isCredentialMonitoringEnabled
+                                ? "Cloud credential monitoring is enabled"
+                                : "Cloud credential monitoring",
+                            systemImage: isCredentialMonitoringEnabled
+                                ? "checkmark.icloud.fill" : "key.icloud"
+                        )
+                        .font(.subheadline.weight(.semibold))
+
+                        Text(isCredentialMonitoringEnabled
+                            ? "The Worker can refresh this account when this Mac is offline."
+                            : "Upload this account’s credentials so your Worker can refresh it when this Mac is offline.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            if isCredentialMonitoringEnabled {
+                                showingCredentialStopConfirmation = true
+                            } else {
+                                showingCredentialUploadConfirmation = true
+                            }
+                        } label: {
+                            Label(
+                                isCredentialMonitoringEnabled
+                                    ? "Stop credential monitoring"
+                                    : "Upload credentials to Worker",
+                                systemImage: isCredentialMonitoringEnabled
+                                    ? "key.slash" : "key.icloud"
+                            )
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(isCredentialMonitoringEnabled ? .red : .accentColor)
+                        .disabled(store.isRefreshing)
+                        .accessibilityHint(isCredentialMonitoringEnabled
+                            ? "Removes the encrypted credential-backed source from the Worker"
+                            : "Requires confirmation before sending credentials to the Worker")
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, 4)
+        }
+    }
+
+    private var isCredentialMonitoringEnabled: Bool {
+        store.isServerMonitoringEnabled(for: currentAccount)
+            && !currentAccount.isRemoteOnly
+    }
+
+    private var canUploadCredentials: Bool {
+        !currentAccount.isDemo
+            && !currentAccount.isRemoteOnly
+            && !currentAccount.usesWorkerAsCredentialAuthority
+            && currentAccount.providerID.supportsOffDeviceMonitoring
+            && store.hasLocalCredentials(for: currentAccount)
+            && store.pushServerStatus == .registered
+    }
+
+    private var showsCredentialMonitoringControl: Bool {
+        isCredentialMonitoringEnabled || canUploadCredentials
+    }
+
+    private var workerHost: String {
+        (try? store.pushServerSettings.resolvedServerURL())?.host ?? "this Worker"
+    }
+
+    private var credentialDisclosure: String {
+        switch currentAccount.providerID {
+        case .chatGPT, .claude, .grok, .kimi:
+            "this account’s access token, refresh token, and ID token when available"
+        case .zai, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
+             .deepSeek, .poe:
+            "this account’s API key"
+        case .openAIAPI, .anthropicAPI:
+            "this account’s organization Admin API key and optional monthly budget"
+        case .githubCopilot:
+            "this account’s credentials"
+        case .ollamaCloud:
+            "this account’s browser session cookie"
+        case .antigravity:
+            "this account’s Google OAuth tokens"
+        case .compatibleAPI, .newAPI:
+            "this account’s endpoint URL and API key"
+        }
+    }
+
+    private func enableCredentialMonitoring() {
+        guard canUploadCredentials,
+              let serverURL = try? store.pushServerSettings.resolvedServerURL() else { return }
+        var settings = store.settings(for: currentAccount)
+        settings.monitorOnSelfHostedServer = true
+        settings.selfHostedServerConsentURL = serverURL.absoluteString
+        store.setSettings(settings, for: currentAccount)
+    }
+
+    private func disableCredentialMonitoring() {
+        guard isCredentialMonitoringEnabled else { return }
+        var settings = store.settings(for: currentAccount)
+        settings.monitorOnSelfHostedServer = false
+        settings.selfHostedServerConsentURL = nil
+        store.setSettings(settings, for: currentAccount)
+    }
+
+    private var workerUsageSharing: some View {
+        let settings = store.settings(for: currentAccount)
+        let isEnabled = store.isDeviceUsageUploadEnabled(for: currentAccount)
+        return GroupBox("Worker usage sharing") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("This sends only a sanitized account label and quota results. It never sends or replaces sign-in credentials.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                if let uploadedAt = settings.deviceUsageLastUploadedAt, isEnabled {
+                    Label {
+                        Text("Last uploaded \(uploadedAt, format: .relative(presentation: .named))")
+                    } icon: {
+                        Image(systemName: "checkmark.icloud.fill")
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                } else if isEnabled {
+                    Label("Waiting for the next successful local refresh",
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let error = settings.deviceUsageLastError, isEnabled {
+                    Label(error, systemImage: "exclamationmark.icloud.fill")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                Button {
+                    updateWorkerUsage(isEnabled: isEnabled)
+                } label: {
+                    HStack(spacing: 7) {
+                        if isUpdatingWorkerUsage {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Image(systemName: isEnabled
+                                  ? "icloud.slash" : "icloud.and.arrow.up")
+                        }
+                        Text(isEnabled ? "Stop uploading usage" : "Upload usage to Worker")
+                    }
+                }
+                .buttonStyle(.bordered)
+                .tint(isEnabled ? .red : .accentColor)
+                .disabled(isUpdatingWorkerUsage || store.isRefreshing)
+                .accessibilityHint(isEnabled
+                    ? "Removes this Mac's credential-free quota source from the Worker"
+                    : "Shares sanitized quota results after successful local refreshes")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, 4)
@@ -361,6 +557,9 @@ private struct MacAccountDetailView: View {
         if store.isServerMonitoringEnabled(for: currentAccount) {
             message += " Its copy on your linked self-hosted Worker will also be removed."
         }
+        if store.isDeviceUsageUploadEnabled(for: currentAccount) {
+            message += " Its sanitized device-usage copy will also be removed from the Worker."
+        }
         return message
     }
 
@@ -372,6 +571,118 @@ private struct MacAccountDetailView: View {
             defer { isRefreshingAccount = false }
             _ = await store.refresh(account)
         }
+    }
+
+    private func updateWorkerUsage(isEnabled: Bool) {
+        guard !isUpdatingWorkerUsage else { return }
+        let account = currentAccount
+        isUpdatingWorkerUsage = true
+        Task {
+            defer { isUpdatingWorkerUsage = false }
+            if isEnabled {
+                _ = await store.disableDeviceUsageUpload(for: account)
+            } else if await store.enableDeviceUsageUpload(for: account) {
+                // Start with a fresh provider result. A cached snapshot is never uploaded merely
+                // because consent was enabled.
+                _ = await store.refresh(account, source: .manual)
+            }
+        }
+    }
+}
+
+private struct MacAccountFailureBanner: View {
+    let account: MonitoredAccount
+    let failure: AccountRefreshFailure
+    let cachedAt: Date?
+    let retry: () -> Void
+    let reconnect: () -> Void
+
+    private var isExpiredWorkerSession: Bool {
+        failure == AccountRefreshFailure(
+            workerSessionStatus: .expired,
+            checkedAt: failure.failedAt
+        )
+    }
+
+    private var isWorkerSessionCheckFailure: Bool {
+        failure == AccountRefreshFailure(
+            workerSessionStatus: .error,
+            checkedAt: failure.failedAt
+        )
+    }
+
+    private var title: String {
+        if isExpiredWorkerSession { return "Worker sign-in expired" }
+        if isWorkerSessionCheckFailure { return "Worker session check failed" }
+        return failure.title
+    }
+
+    private var message: String {
+        if isExpiredWorkerSession {
+            return "Cloud quota refresh has stopped for this account. Reconnect the provider sign-in to resume Worker updates."
+        }
+        return failure.message
+    }
+
+    private var tint: Color {
+        failure.requiresRelink ? .red : .orange
+    }
+
+    private var canReconnect: Bool {
+        !account.isDemo && (
+            isExpiredWorkerSession
+                || !account.isRemoteOnly
+                || account.providerID == .chatGPT
+        )
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: failure.systemImageName)
+                .font(.title3)
+                .foregroundStyle(tint)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(tint)
+                Text(message)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                if isExpiredWorkerSession {
+                    Text("Worker reported this \(failure.failedAt, format: .relative(presentation: .named)).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                if let cachedAt {
+                    Text("Showing saved usage from \(cachedAt, format: .relative(presentation: .named)).")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            Spacer(minLength: 12)
+            if canReconnect && failure.requiresRelink {
+                Button(isExpiredWorkerSession ? "Reconnect now" : "Reconnect", action: reconnect)
+                    .buttonStyle(.borderedProminent)
+                    .tint(isExpiredWorkerSession ? .red : .accentColor)
+                    .accessibilityHint(
+                        isExpiredWorkerSession
+                            ? "Opens the sign-in flow to resume Worker quota refresh"
+                            : "Opens the account sign-in flow"
+                    )
+            } else {
+                Button("Try again", action: retry)
+                    .disabled(account.isDemo)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.08), in: .rect(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(tint.opacity(0.24), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
     }
 }
 
@@ -1418,12 +1729,16 @@ struct MacSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Refresh") {
-                Picker("While When Reset is running", selection: refreshInterval) {
+            Section {
+                Picker("Update frequency", selection: refreshInterval) {
                     ForEach(RefreshInterval.inAppOptions, id: \.self) { interval in
                         Text(interval.title).tag(interval)
                     }
                 }
+            } header: {
+                Text("Updates")
+            } footer: {
+                Text("When Reset checks all local accounts at this interval while the app is running. Manual refresh remains available when automatic updates are off.")
             }
 
             Section("Notifications") {
@@ -1455,10 +1770,12 @@ struct MacSettingsView: View {
                     if case .failed = store.pushServerStatus {
                         Button("Retry registration") { store.retryPushRegistration() }
                     }
-                    if store.pushServerStatus == .registered {
+                    if store.canAccessRemoteWorkerAccounts {
                         Button("Add accounts from Worker", systemImage: "icloud.and.arrow.down") {
                             showingRemoteWorkerAccounts = true
                         }
+                    }
+                    if store.pushServerStatus == .registered {
                         Button("Send test refresh") {
                             Task { await store.requestTestPushRefresh() }
                         }
@@ -1695,7 +2012,8 @@ private struct MacRemoteWorkerAccountsView: View {
     @State private var selectedIDs: Set<String> = []
     @State private var isLoading = true
     @State private var isImporting = false
-    @State private var errorMessage: String?
+    @State private var discoveryError: String?
+    @State private var importError: String?
 
     var body: some View {
         NavigationStack {
@@ -1717,6 +2035,16 @@ private struct MacRemoteWorkerAccountsView: View {
                             ProgressView()
                             Text("Loading Worker accounts…")
                         }
+                    } else if let discoveryError {
+                        ContentUnavailableView {
+                            Label("Couldn’t load Worker accounts",
+                                  systemImage: "exclamationmark.icloud.fill")
+                        } description: {
+                            Text(discoveryError)
+                        } actions: {
+                            Button("Try again") { Task { await loadAccounts() } }
+                        }
+                        .frame(minHeight: 180)
                     } else if accounts.isEmpty {
                         ContentUnavailableView(
                             "No accounts available",
@@ -1763,13 +2091,13 @@ private struct MacRemoteWorkerAccountsView: View {
                 }
             }
             .task { await loadAccounts() }
-            .alert("Couldn’t add accounts", isPresented: Binding(
-                get: { errorMessage != nil },
-                set: { if !$0 { errorMessage = nil } }
+            .alert("Couldn’t finish Worker import", isPresented: Binding(
+                get: { importError != nil },
+                set: { if !$0 { importError = nil } }
             )) {
                 Button("OK", role: .cancel) {}
             } message: {
-                Text(errorMessage ?? "The Worker accounts could not be imported.")
+                Text(importError ?? "The Worker accounts could not be imported.")
             }
         }
         .frame(minWidth: 620, minHeight: 520)
@@ -1821,13 +2149,13 @@ private struct MacRemoteWorkerAccountsView: View {
     @MainActor
     private func loadAccounts() async {
         isLoading = true
-        errorMessage = nil
+        discoveryError = nil
         do {
             accounts = try await store.availableRemoteWorkerAccounts()
             selectedIDs.formIntersection(accounts.map(\.id))
         } catch {
             accounts = []
-            errorMessage = error.localizedDescription
+            discoveryError = error.localizedDescription
         }
         isLoading = false
     }
@@ -1841,7 +2169,7 @@ private struct MacRemoteWorkerAccountsView: View {
                 _ = try await store.importRemoteWorkerAccounts(selected)
                 dismiss()
             } catch {
-                errorMessage = error.localizedDescription
+                importError = error.localizedDescription
                 isImporting = false
                 await loadAccounts()
             }
@@ -1863,6 +2191,9 @@ private struct MacAddAccountView: View {
     @State private var clientID = ""
     @State private var clientSecret = ""
     @State private var completionTask: Task<Void, Never>?
+    @State private var showingRemoteWorkerAccounts = false
+    @State private var didRequestDismiss = false
+    @State private var pendingLocalCLIImport: LocalCLICredentialSource?
 
     init(relinkingAccount: MonitoredAccount? = nil) {
         self.relinkingAccount = relinkingAccount
@@ -1897,29 +2228,94 @@ private struct MacAddAccountView: View {
                         .frame(maxWidth: .infinity)
                     }
                 } else {
-                    List(providers, id: \.rawValue) { provider in
-                        Button {
-                            selectedProvider = provider
-                        } label: {
-                            HStack(spacing: 12) {
-                                ProviderIcon(providerID: provider)
-                                    .frame(width: 34, height: 34)
-                                    .accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(provider.displayName).font(.headline)
-                                    Text(provider.accountDescription)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
+                    List {
+                        if relinkingAccount == nil, store.canAccessRemoteWorkerAccounts {
+                            Section {
+                                Button {
+                                    showingRemoteWorkerAccounts = true
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: "icloud.and.arrow.down.fill")
+                                            .font(.title2)
+                                            .foregroundStyle(Color.accentColor)
+                                            .frame(width: 34, height: 34)
+                                            .accessibilityHidden(true)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Import from Worker").font(.headline)
+                                            Text("Add accounts and retained history without downloading provider credentials.")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .foregroundStyle(.tertiary)
+                                            .accessibilityHidden(true)
+                                    }
+                                    .padding(.vertical, 5)
+                                    .contentShape(.rect)
                                 }
-                                Spacer()
-                                Image(systemName: "chevron.right")
-                                    .foregroundStyle(.tertiary)
-                                    .accessibilityHidden(true)
+                                .buttonStyle(.plain)
                             }
-                            .padding(.vertical, 5)
-                            .contentShape(.rect)
                         }
-                        .buttonStyle(.plain)
+                        if relinkingAccount == nil, !visibleLocalCLIImports.isEmpty {
+                            Section("On this Mac") {
+                                ForEach(visibleLocalCLIImports, id: \.source) { capability in
+                                    Button {
+                                        if capability.isAvailable {
+                                            pendingLocalCLIImport = capability.source
+                                        }
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            ProviderIcon(providerID: capability.source.providerID)
+                                                .frame(width: 34, height: 34)
+                                                .accessibilityHidden(true)
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text("Import \(capability.source.displayName) sign-in")
+                                                    .font(.headline)
+                                                Text(capability.message)
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                            Image(systemName: capability.isAvailable
+                                                  ? "square.and.arrow.down" : "lock.fill")
+                                                .foregroundStyle(.tertiary)
+                                                .accessibilityHidden(true)
+                                        }
+                                        .padding(.vertical, 5)
+                                        .contentShape(.rect)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(store.isLinking || !capability.isAvailable)
+                                }
+                            }
+                        }
+                        Section("Connect a provider") {
+                            ForEach(providers, id: \.rawValue) { provider in
+                                Button {
+                                    selectedProvider = provider
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        ProviderIcon(providerID: provider)
+                                            .frame(width: 34, height: 34)
+                                            .accessibilityHidden(true)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(provider.displayName).font(.headline)
+                                            Text(provider.accountDescription)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "chevron.right")
+                                            .foregroundStyle(.tertiary)
+                                            .accessibilityHidden(true)
+                                    }
+                                    .padding(.vertical, 5)
+                                    .contentShape(.rect)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
                     }
                 }
             }
@@ -1944,7 +2340,43 @@ private struct MacAddAccountView: View {
             }
         }
         .frame(minWidth: 640, minHeight: 620)
+        .sheet(isPresented: $showingRemoteWorkerAccounts) {
+            MacRemoteWorkerAccountsView()
+                .environment(store)
+        }
+        .alert(relinkingAccount == nil ? "Couldn’t add account" : "Couldn’t reconnect account",
+               isPresented: Binding(
+            get: { store.errorMessage != nil },
+            set: { if !$0 { store.errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(store.errorMessage ?? "The account could not be reconnected.")
+        }
+        .confirmationDialog(
+            "Import local sign-in?",
+            isPresented: Binding(
+                get: { pendingLocalCLIImport != nil },
+                set: { if !$0 { pendingLocalCLIImport = nil } }
+            ),
+            presenting: pendingLocalCLIImport
+        ) { source in
+            Button("Import \(source.displayName)") {
+                importLocalCLICredential(source)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { source in
+            Text("When Reset will copy the existing \(source.displayName) credential into its iCloud Keychain and verify the account identity. It will update the Worker only if this same account already has Worker monitoring enabled.")
+        }
         .onDisappear { completionTask?.cancel(); store.cancelLink() }
+    }
+
+    private var visibleLocalCLIImports: [LocalCLICredentialCapability] {
+        LocalCLICredentialSource.allCases
+            .map(store.localCLICredentialCapability(for:))
+            .filter { capability in
+                capability.isAvailable || capability.unavailableReason == .sandboxed
+            }
     }
 
     private func providerHeader(_ provider: ProviderID) -> some View {
@@ -1994,7 +2426,35 @@ private struct MacAddAccountView: View {
                  ? "When Reset uses the provider’s device authorization page. The replacement credential is sent directly to your Worker and is not stored on this Mac."
                  : "When Reset uses the provider’s device authorization page. Credentials are stored securely in iCloud Keychain.")
                 .foregroundStyle(.secondary)
-            if let link = store.deviceLink, link.providerID == provider {
+            if let account = relinkingAccount,
+               store.accountLinkProgress.applies(to: account.id),
+               store.accountLinkProgress.isVerifyingWorker {
+                ProgressView("Updating Worker sign-in…")
+                Text("Provider authorization succeeded. When Reset is securely replacing the Worker credential and checking that quota refresh is active.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if let account = relinkingAccount,
+                      store.accountLinkProgress.applies(to: account.id),
+                      case .workerVerificationFailed = store.accountLinkProgress {
+                Label("Worker sign-in update failed", systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.orange)
+                Text(store.refreshFailures[account.id]?.message
+                     ?? "The provider accepted the sign-in, but the Worker could not confirm the replacement credential.")
+                    .foregroundStyle(.secondary)
+                HStack {
+                    if store.accountLinkProgress.canRetryWithoutAuthorization {
+                        Button("Retry Worker update") {
+                            retryWorkerReplacement(for: account)
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+                    Button("Sign in again") {
+                        startDeviceLink(provider)
+                    }
+                    .buttonStyle(.bordered)
+                }
+            } else if let link = store.deviceLink, link.providerID == provider {
                 GroupBox("Authorization code") {
                     HStack {
                         Text(link.userCode)
@@ -2207,7 +2667,9 @@ private struct MacAddAccountView: View {
                   let link = store.deviceLink,
                   link.providerID == provider else { return }
             NSWorkspace.shared.open(link.verificationURL)
-            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+            if await store.completeDeviceLink(replacing: relinkingAccount) {
+                dismissAfterSuccess()
+            }
         }
     }
 
@@ -2222,8 +2684,42 @@ private struct MacAddAccountView: View {
             await previousTask?.value
             guard !Task.isCancelled,
                   store.deviceLink?.providerID == provider else { return }
-            if await store.completeDeviceLink(replacing: relinkingAccount) { dismiss() }
+            if await store.completeDeviceLink(replacing: relinkingAccount) {
+                dismissAfterSuccess()
+            }
         }
+    }
+
+    private func retryWorkerReplacement(for account: MonitoredAccount) {
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            if await store.retryWorkerCredentialReplacement(for: account.id) {
+                dismissAfterSuccess()
+            }
+        }
+    }
+
+    private func importLocalCLICredential(_ source: LocalCLICredentialSource) {
+        pendingLocalCLIImport = nil
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            if await store.importLocalCLICredential(from: source) {
+                dismissAfterSuccess()
+            }
+        }
+    }
+
+    @MainActor
+    private func dismissAfterSuccess() {
+        guard !didRequestDismiss else { return }
+        didRequestDismiss = true
+        dismiss()
     }
 }
 #endif

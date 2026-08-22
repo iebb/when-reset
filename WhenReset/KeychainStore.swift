@@ -16,9 +16,107 @@ struct AccountCredentials: Codable, Equatable, Sendable {
     var currencyCode: String? = nil
 }
 
+struct ChatGPTDuplicateCredentialCandidate: Sendable {
+    var accountID: UUID
+    var credentials: AccountCredentials
+}
+
+/// A credential-free, synchronizable redirect retained after a duplicate account row is deleted.
+/// Other devices use it to re-key device-local history, settings, and snapshots even when iCloud
+/// delivers the account deletion before that device has observed both rows together.
+struct DirectChatGPTAccountMergeAlias: Codable, Equatable, Sendable {
+    var sourceAccountID: UUID
+    var canonicalAccountID: UUID
+    var workspaceID: String
+    var createdAt: Date
+
+    var isValid: Bool {
+        sourceAccountID != canonicalAccountID
+            && !workspaceID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+enum ChatGPTDuplicateCredentialPolicy {
+    static func preferred(
+        from candidates: [ChatGPTDuplicateCredentialCandidate],
+        canonicalAccountID: UUID,
+        workspaceID: String
+    ) -> ChatGPTDuplicateCredentialCandidate? {
+        guard !workspaceID.isEmpty else { return nil }
+        let valid = candidates.filter {
+            isValid($0.credentials, forWorkspaceID: workspaceID)
+        }
+        return valid.sorted { lhs, rhs in
+            let lhsFreshness = freshness(of: lhs.credentials)
+            let rhsFreshness = freshness(of: rhs.credentials)
+            if lhsFreshness != rhsFreshness { return lhsFreshness > rhsFreshness }
+            if (lhs.accountID == canonicalAccountID) != (rhs.accountID == canonicalAccountID) {
+                return lhs.accountID == canonicalAccountID
+            }
+            return lhs.accountID.uuidString < rhs.accountID.uuidString
+        }.first
+    }
+
+    static func isValid(_ credentials: AccountCredentials, forWorkspaceID workspaceID: String)
+        -> Bool {
+        guard !credentials.accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !credentials.refreshToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !credentials.idToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return false
+        }
+        return workspaceIDFromIDToken(credentials.idToken) == workspaceID
+    }
+
+    private static func freshness(of credentials: AccountCredentials) -> Date {
+        credentials.expiresAt
+            ?? expirationFromJWT(credentials.accessToken)
+            ?? expirationFromJWT(credentials.idToken)
+            ?? .distantPast
+    }
+
+    private static func workspaceIDFromIDToken(_ token: String) -> String? {
+        guard let claims = jwtClaims(token) else { return nil }
+        let auth = claims["https://api.openai.com/auth"] as? [String: Any]
+        return nonEmpty(auth?["chatgpt_account_id"] as? String)
+            ?? nonEmpty(claims["chatgpt_account_id"] as? String)
+    }
+
+    private static func expirationFromJWT(_ token: String) -> Date? {
+        guard let raw = jwtClaims(token)?["exp"] else { return nil }
+        let seconds: TimeInterval?
+        switch raw {
+        case let value as NSNumber: seconds = value.doubleValue
+        case let value as String: seconds = TimeInterval(value)
+        default: seconds = nil
+        }
+        guard let seconds, seconds.isFinite, seconds > 0 else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    private static func jwtClaims(_ token: String) -> [String: Any]? {
+        let components = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count >= 2 else { return nil }
+        var encoded = String(components[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+        guard let data = Data(base64Encoded: encoded),
+              let claims = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return claims
+    }
+
+    private static func nonEmpty(_ value: String?) -> String? {
+        let normalized = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized?.isEmpty == false ? normalized : nil
+    }
+}
+
 enum KeychainStore {
     static let credentialsService = "ad.neko.when.credentials"
     static let accountsService = "ad.neko.when.accounts"
+    static let accountMergeAliasesService = "ad.neko.when.account-merge-aliases"
     static let pushRegistrationService = "ad.neko.when.push-registration"
     static let pushServerAccessService = "ad.neko.when.push-server-access"
 
@@ -81,6 +179,65 @@ enum KeychainStore {
 
     static func deleteAccount(for id: UUID) {
         deleteData(service: accountsService, account: id.uuidString)
+    }
+
+    static func saveAccountMergeAlias(_ alias: DirectChatGPTAccountMergeAlias) throws {
+        guard alias.isValid else { throw keychainError(errSecParam) }
+        try saveSynchronizable(
+            try JSONEncoder().encode(alias),
+            service: accountMergeAliasesService,
+            account: alias.sourceAccountID.uuidString
+        )
+    }
+
+    static func loadAccountMergeAliases() throws -> [DirectChatGPTAccountMergeAlias] {
+        let decoded = try loadSynchronizableData(service: accountMergeAliasesService).compactMap {
+            try? JSONDecoder().decode(DirectChatGPTAccountMergeAlias.self, from: $0)
+        }.filter(\.isValid)
+        let bySource = Dictionary(
+            decoded.map { ($0.sourceAccountID, $0) },
+            uniquingKeysWith: { existing, candidate in
+                candidate.createdAt > existing.createdAt ? candidate : existing
+            }
+        )
+        return bySource.values.sorted {
+            $0.sourceAccountID.uuidString < $1.sourceAccountID.uuidString
+        }
+    }
+
+    static func deleteAccountMergeAlias(for sourceID: UUID) {
+        deleteData(service: accountMergeAliasesService, account: sourceID.uuidString)
+    }
+
+    static func prepareChatGPTDuplicateCredential(
+        canonical: MonitoredAccount,
+        duplicateIDs: [UUID]
+    ) throws -> Bool {
+        let ids = [canonical.id] + duplicateIDs
+        var candidates: [ChatGPTDuplicateCredentialCandidate] = []
+        for id in ids {
+            do {
+                candidates.append(.init(accountID: id, credentials: try load(for: id)))
+            } catch let error as NSError where error.domain == NSOSStatusErrorDomain
+                && error.code == Int(errSecItemNotFound) {
+                continue
+            }
+        }
+        if canonical.usesWorkerAsCredentialAuthority { return true }
+        guard let preferred = ChatGPTDuplicateCredentialPolicy.preferred(
+            from: candidates,
+            canonicalAccountID: canonical.id,
+            workspaceID: canonical.workspaceID
+        ) else { return false }
+        try save(preferred.credentials, for: canonical.id)
+        return true
+    }
+
+    static func deleteDuplicateAccountAndCredential(for id: UUID) throws {
+        // Delete the credential first. If that fails, retain the account record so a later sync can
+        // retry without leaving an invisible credential orphaned in iCloud Keychain.
+        try deleteDataIfPresent(service: credentialsService, account: id.uuidString)
+        try deleteDataIfPresent(service: accountsService, account: id.uuidString)
     }
 
     static func savePushRegistration(_ credentials: PushRegistrationCredentials) throws {
@@ -197,10 +354,33 @@ enum KeychainStore {
         return data
     }
 
+    private static func loadSynchronizableData(service: String) throws -> [Data] {
+        var query = baseQuery(service: service)
+        query[kSecAttrSynchronizable as String] = true
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw keychainError(status) }
+        if let data = result as? Data { return [data] }
+        if let data = result as? [Data] { return data }
+        throw keychainError(errSecDecode)
+    }
+
     private static func deleteData(service: String, account: String) {
         var query = baseQuery(service: service, account: account)
         query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
         SecItemDelete(query as CFDictionary)
+    }
+
+    private static func deleteDataIfPresent(service: String, account: String) throws {
+        var query = baseQuery(service: service, account: account)
+        query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw keychainError(status)
+        }
     }
 
     private static func baseQuery(service: String, account: String? = nil) -> [String: Any] {

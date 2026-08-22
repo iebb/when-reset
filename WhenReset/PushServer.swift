@@ -100,6 +100,21 @@ enum PushServerStatus: Equatable, Sendable {
     }
 }
 
+enum WorkerErrorCode: String, Decodable, Equatable, Sendable {
+    case unauthorized
+    case providerSessionExpired = "provider_session_expired"
+    case providerRequestForbidden = "provider_request_forbidden"
+    case providerCheckFailed = "provider_check_failed"
+    case invalidSnapshotSource = "invalid_snapshot_source"
+    case consentRevisionConflict = "consent_revision_conflict"
+    case localAccountConflict = "local_account_conflict"
+    case invalidDeviceSnapshot = "invalid_device_snapshot"
+    case snapshotOutsideTimeWindow = "snapshot_outside_time_window"
+    case snapshotReplay = "snapshot_replay"
+    case snapshotStale = "snapshot_stale"
+    case accountNotFound = "account_not_found"
+}
+
 enum PushServerError: LocalizedError {
     case invalidServerURL
     case invalidWorkerLink
@@ -107,7 +122,7 @@ enum PushServerError: LocalizedError {
     case workerIdentityMismatch
     case invalidResponse
     case responseTooLarge
-    case serverRejected(Int)
+    case serverRejected(Int, WorkerErrorCode? = nil)
     case userConfirmationRequired
     case serverCleanupRequired
     case missingRegistration
@@ -115,6 +130,9 @@ enum PushServerError: LocalizedError {
     case randomGenerationFailed(OSStatus)
     case accountMonitoringUnavailable
     case remoteAccountUnavailable
+    case consentRevisionConflict
+    case accountConsentChanged
+    case credentialReplacementUnconfirmed
 
     var errorDescription: String? {
         switch self {
@@ -124,18 +142,58 @@ enum PushServerError: LocalizedError {
         case .workerIdentityMismatch: "The Worker identity does not match this link."
         case .invalidResponse: "The push server returned an invalid response."
         case .responseTooLarge: "The push server returned too much data."
-        case let .serverRejected(code): "The push server returned HTTP \(code)."
+        case let .serverRejected(code, workerCode):
+            switch workerCode {
+            case .unauthorized:
+                "This device is no longer registered with the Worker. Pair it again in Cloud Worker settings."
+            case .providerSessionExpired:
+                "The Worker reports that this provider sign-in expired or was revoked."
+            case .providerRequestForbidden:
+                "ChatGPT rejected the quota check from this Cloudflare Worker. Try again later, or monitor this account on this device instead."
+            case .invalidSnapshotSource, .invalidDeviceSnapshot:
+                "The Worker rejected this sanitized usage snapshot."
+            case .consentRevisionConflict:
+                "Usage-sharing settings changed on another device. Try again."
+            case .localAccountConflict:
+                "This local account identifier is already attached to a different Worker account."
+            case .snapshotOutsideTimeWindow:
+                "The Worker rejected this snapshot because its collection time is outside the allowed window."
+            case .snapshotReplay:
+                "The Worker has already received this usage update."
+            case .snapshotStale:
+                "The Worker already has a newer usage snapshot for this account."
+            case .accountNotFound:
+                "Device usage sharing is no longer enabled for this account."
+            case .providerCheckFailed, nil:
+                "The push server returned HTTP \(code)."
+            }
         case .userConfirmationRequired: "Confirm the Worker link before continuing."
         case .serverCleanupRequired:
             "Finish removing the previous Worker before linking another one. Retry cleanup first."
-        case .missingRegistration: "Register this device before sending a test refresh."
+        case .missingRegistration: "The Worker registration is not ready on this device. Finish pairing, then try the refresh again."
         case .missingServerAccessKey: "Enter the access key for this self-hosted server."
         case let .randomGenerationFailed(status): "Couldn’t create the device secret (\(status))."
         case .accountMonitoringUnavailable:
-            "Register this device with the self-hosted server before enabling server monitoring."
+            "The Worker registration is not ready on this device. Finish pairing before enabling server monitoring."
         case .remoteAccountUnavailable:
             "This account is no longer available on the self-hosted Worker."
+        case .consentRevisionConflict:
+            "The Worker account authorization conflicts with a pending removal. Finish Worker cleanup or reconnect the account."
+        case .accountConsentChanged:
+            "The Worker account settings changed during this update. Try refreshing again."
+        case .credentialReplacementUnconfirmed:
+            "The Worker did not confirm the new sign-in. Sign in again to resume updates."
         }
+    }
+
+    var httpStatus: Int? {
+        guard case let .serverRejected(status, _) = self else { return nil }
+        return status
+    }
+
+    var workerErrorCode: WorkerErrorCode? {
+        guard case let .serverRejected(_, code) = self else { return nil }
+        return code
     }
 }
 
@@ -404,6 +462,90 @@ struct RemoteWorkerAccountCandidate: Identifiable, Decodable, Hashable, Sendable
     }
 }
 
+struct RemoteWorkerAccountImportResult: Equatable, Sendable {
+    var account: RemoteWorkerAccountCandidate
+    var consentRevision: Int64
+}
+
+enum ServerConsentRevisionPolicy {
+    static let maximum: Int64 = 9_007_199_254_740_991
+
+    static func importedRevision(_ revision: Int64?) throws -> Int64 {
+        let resolvedRevision = revision ?? 1
+        guard (1...maximum).contains(resolvedRevision) else {
+            throw PushServerError.invalidResponse
+        }
+        return resolvedRevision
+    }
+
+    static func recoveredRevision(
+        isRemoteOnly: Bool,
+        proposedRevision: Int64,
+        previousRevision: Int64,
+        highWaterRevision: Int64
+    ) -> Int64 {
+        guard !isRemoteOnly else { return 1 }
+        // A recovered direct attachment's stored revision came from the Worker. UI state and
+        // a monotonic high-water mark can both be stale relative to a newly imported source.
+        _ = proposedRevision
+        _ = highWaterRevision
+        return max(1, min(previousRevision, maximum))
+    }
+
+    static func synchronizedRevision(
+        currentRevision: Int64,
+        serverRevision: Int64,
+        highWaterRevision: Int64,
+        pendingDeletionRevision: Int64?
+    ) throws -> Int64 {
+        guard (1...maximum).contains(serverRevision) else {
+            throw PushServerError.invalidResponse
+        }
+        if let pendingDeletionRevision,
+           serverRevision <= pendingDeletionRevision {
+            throw PushServerError.consentRevisionConflict
+        }
+        // An authenticated sync response is authoritative for the resolved Worker source. This
+        // permits recovery to a newer direct-source revision and rebases an imported subscription
+        // to its independent revision 1 instead of projecting stale local state onto it.
+        _ = currentRevision
+        _ = highWaterRevision
+        return serverRevision
+    }
+}
+
+enum ServerAccountUploadPolicy {
+    static func permitsUpload(
+        isDemo: Bool,
+        isRemoteOnly: Bool,
+        hasRemoteWorkerAccountID: Bool,
+        replacingRemoteCredential: Bool
+    ) -> Bool {
+        !isDemo
+            && !isRemoteOnly
+            && (!hasRemoteWorkerAccountID || replacingRemoteCredential)
+    }
+}
+
+enum WorkerCredentialReplacementPolicy {
+    static func isConfirmed(sessionStatus: WorkerSessionStatus?) -> Bool {
+        sessionStatus == .active
+    }
+}
+
+enum DeviceUsageSequencePolicy {
+    static func isValid(_ sequence: Int64) -> Bool {
+        sequence > 0 && sequence < ServerConsentRevisionPolicy.maximum
+    }
+
+    static func next(after sequence: Int64) -> Int64? {
+        guard isValid(sequence) else { return nil }
+        let (next, overflow) = sequence.addingReportingOverflow(1)
+        guard !overflow, isValid(next) else { return nil }
+        return next
+    }
+}
+
 enum RemoteWorkerAccountMatcher {
     static func reference(for accountID: UUID) -> String {
         let canonical = "when-reset:synced-account:v1:\(accountID.uuidString.lowercased())"
@@ -427,11 +569,43 @@ enum RemoteWorkerAccountMatcher {
         guard let syncedAccountReference = candidate.syncedAccountReference else { return false }
         return syncedAccountReference == reference(for: account.id)
     }
+
+    static func isAlreadyAttached(
+        _ candidate: RemoteWorkerAccountCandidate,
+        accounts: [MonitoredAccount],
+        serverURL: String,
+        settingsForAccount: (MonitoredAccount) -> AccountMonitorSettings
+    ) -> Bool {
+        accounts.contains { account in
+            let settings = settingsForAccount(account)
+            let usesWorker = account.remoteWorkerServerURL == serverURL
+                || settings.selfHostedServerConsentURL == serverURL
+            guard usesWorker else { return false }
+
+            if account.remoteWorkerAccountID == candidate.remoteAccountID
+                || settings.remoteWorkerAccountID == candidate.remoteAccountID {
+                return true
+            }
+
+            guard let candidateReference = candidate.workerAccountReference,
+                  settings.workerAccountReference == candidateReference else {
+                return false
+            }
+
+            // A matching direct account that has only learned the Worker's stable reference
+            // still needs the import call to attach its remote account ID. Remote-only accounts,
+            // and direct accounts with an existing remote ID, are already attached.
+            return account.isRemoteOnly
+                || account.remoteWorkerAccountID != nil
+                || settings.remoteWorkerAccountID != nil
+        }
+    }
 }
 
 enum PushServerClient {
     private static let smallResponseLimit = 16 * 1_024
     private static let accountResponseLimit = 1_048_576
+    private static let errorResponseLimit = 4 * 1_024
     private static var apnsEnvironment: String {
         #if DEBUG
         "development"
@@ -516,6 +690,7 @@ enum PushServerClient {
         var lastSuccessTimestamp: TimeInterval?
         var sessionStatus: WorkerSessionStatus?
         var sessionCheckedTimestamp: TimeInterval?
+        var consentRevision: Int64?
 
         enum CodingKeys: String, CodingKey {
             case remoteAccountID = "remote_account_id"
@@ -529,6 +704,7 @@ enum PushServerClient {
             case lastSuccessTimestamp = "last_success_at"
             case sessionStatus = "session_status"
             case sessionCheckedTimestamp = "session_checked_at"
+            case consentRevision = "consent_revision"
         }
     }
 
@@ -649,6 +825,231 @@ enum PushServerClient {
     private struct HistoryUploadResponse: Decodable {
         var accepted: Int
         var deduplicated: Int
+    }
+
+    struct DeviceUsageSourceResponse: Decodable, Equatable, Sendable {
+        var ok: Bool
+        var consentRevision: Int64
+        var nextSequence: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case ok
+            case consentRevision = "consent_revision"
+            case nextSequence = "next_sequence"
+        }
+    }
+
+    private struct DeviceUsageSourceRequest: Encodable {
+        var providerID: ProviderID
+        var displayName: String
+        var refreshIntervalSeconds: Int
+        var historyRetentionDays: Int
+        var consentRevision: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case providerID = "provider_id"
+            case displayName = "display_name"
+            case refreshIntervalSeconds = "refresh_interval_seconds"
+            case historyRetentionDays = "history_retention_days"
+            case consentRevision = "consent_revision"
+        }
+    }
+
+    private struct DeviceUsageUploadResponse: Decodable {
+        var accepted: Bool
+        var sequence: Int64
+    }
+
+    private struct DeviceUsageUploadRequest: Encodable {
+        var consentRevision: Int64
+        var sequence: Int64
+        var observedAt: TimeInterval
+        var snapshot: DeviceUsageSnapshotPayload
+
+        enum CodingKeys: String, CodingKey {
+            case consentRevision = "consent_revision"
+            case sequence
+            case observedAt = "observed_at"
+            case snapshot
+        }
+    }
+
+    /// A credential-free allowlist. Never encode `UsageSnapshot` directly: it includes local
+    /// account identifiers and presentation metadata that the Worker does not need.
+    private struct DeviceUsageSnapshotPayload: Encodable {
+        var providerID: ProviderID
+        var plan: String?
+        private var windows: [DeviceUsageWindow]
+        var availableResetCount: Int
+        private var resetCredits: [DeviceUsageResetCredit]
+        var resetCreditsAuthoritative = true
+        private var apiBalance: DeviceUsageAPIBalance?
+
+        enum CodingKeys: String, CodingKey {
+            case providerID = "provider_id"
+            case plan, windows
+            case availableResetCount = "available_reset_count"
+            case resetCredits = "reset_credits"
+            case resetCreditsAuthoritative = "reset_credits_authoritative"
+            case apiBalance = "api_balance"
+        }
+
+        init(snapshot: UsageSnapshot, providerID: ProviderID) throws {
+            let currentWindows = snapshot.usageWindows.filter {
+                $0.resetsAt.timeIntervalSince(snapshot.fetchedAt) >= -5 * 60
+            }
+            guard snapshot.accountProviderID == nil || snapshot.accountProviderID == providerID,
+                  currentWindows.count <= 32,
+                  snapshot.resetCredits.count <= 32 else {
+                throw PushServerError.invalidResponse
+            }
+            self.providerID = providerID
+            plan = Self.bounded(snapshot.plan, maximum: 200)
+            windows = currentWindows.enumerated().map {
+                DeviceUsageWindow(offset: $0.offset, element: $0.element)
+            }
+            availableResetCount = max(0, min(1_000, snapshot.availableResetCount))
+            resetCredits = snapshot.resetCredits.map(DeviceUsageResetCredit.init)
+            apiBalance = try snapshot.apiBalance.map { try DeviceUsageAPIBalance($0) }
+        }
+
+        func encode(to encoder: Encoder) throws {
+            var values = encoder.container(keyedBy: CodingKeys.self)
+            try values.encode(providerID, forKey: .providerID)
+            if let plan { try values.encode(plan, forKey: .plan) }
+            else { try values.encodeNil(forKey: .plan) }
+            try values.encode(windows, forKey: .windows)
+            try values.encode(availableResetCount, forKey: .availableResetCount)
+            try values.encode(resetCredits, forKey: .resetCredits)
+            try values.encode(resetCreditsAuthoritative, forKey: .resetCreditsAuthoritative)
+            try values.encodeIfPresent(apiBalance, forKey: .apiBalance)
+        }
+
+        private static func bounded(_ value: String?, maximum: Int) -> String? {
+            guard let value else { return nil }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : String(trimmed.prefix(maximum))
+        }
+
+        private struct DeviceUsageWindow: Encodable {
+            var position: Int
+            var metricID: String
+            var title: String
+            var kind: UsageWindowKind?
+            var windowMinutes: Int?
+            var remainingPercent: Double
+            var resetsAt: TimeInterval
+
+            enum CodingKeys: String, CodingKey {
+                case position
+                case metricID = "metric_id"
+                case title, kind
+                case windowMinutes = "window_minutes"
+                case remainingPercent = "remaining_percent"
+                case resetsAt = "resets_at"
+            }
+
+            init(offset: Int, element window: UsageWindow) {
+                position = offset
+                metricID = String(window.metricID.prefix(128))
+                title = String(window.displayTitle.prefix(128))
+                kind = window.kind
+                windowMinutes = window.windowMinutes
+                remainingPercent = max(0, min(100, window.remainingPercent))
+                resetsAt = window.resetsAt.timeIntervalSince1970
+            }
+
+            func encode(to encoder: Encoder) throws {
+                var values = encoder.container(keyedBy: CodingKeys.self)
+                try values.encode(position, forKey: .position)
+                try values.encode(metricID, forKey: .metricID)
+                try values.encode(title, forKey: .title)
+                if let kind { try values.encode(kind, forKey: .kind) }
+                else { try values.encodeNil(forKey: .kind) }
+                if let windowMinutes { try values.encode(windowMinutes, forKey: .windowMinutes) }
+                else { try values.encodeNil(forKey: .windowMinutes) }
+                try values.encode(remainingPercent, forKey: .remainingPercent)
+                try values.encode(resetsAt, forKey: .resetsAt)
+            }
+        }
+
+        private struct DeviceUsageResetCredit: Encodable {
+            var expiresAt: TimeInterval?
+            var status: String?
+            var grantedAt: TimeInterval?
+
+            enum CodingKeys: String, CodingKey {
+                case status
+                case expiresAt = "expires_at"
+                case grantedAt = "granted_at"
+            }
+
+            init(_ credit: ResetCredit) {
+                expiresAt = credit.expiresAt?.timeIntervalSince1970
+                status = DeviceUsageSnapshotPayload.bounded(credit.status, maximum: 64)
+                grantedAt = credit.grantedAt?.timeIntervalSince1970
+            }
+
+            func encode(to encoder: Encoder) throws {
+                var values = encoder.container(keyedBy: CodingKeys.self)
+                if let expiresAt { try values.encode(expiresAt, forKey: .expiresAt) }
+                else { try values.encodeNil(forKey: .expiresAt) }
+                if let status { try values.encode(status, forKey: .status) }
+                else { try values.encodeNil(forKey: .status) }
+                if let grantedAt { try values.encode(grantedAt, forKey: .grantedAt) }
+                else { try values.encodeNil(forKey: .grantedAt) }
+            }
+        }
+
+        private struct DeviceUsageAPIBalance: Encodable {
+            var title: String
+            var currencyCode: String
+            var spent: Double
+            var limit: Double?
+            var remaining: Double?
+            var periodStart: TimeInterval?
+            var periodEnd: TimeInterval?
+            var accessExpiresAt: TimeInterval?
+            var isUnlimited: Bool
+            var kind: APIBalanceKind?
+            var unitLabel: String?
+
+            enum CodingKeys: String, CodingKey {
+                case title, spent, limit, remaining, kind
+                case currencyCode = "currency_code"
+                case periodStart = "period_start"
+                case periodEnd = "period_end"
+                case accessExpiresAt = "access_expires_at"
+                case isUnlimited = "is_unlimited"
+                case unitLabel = "unit_label"
+            }
+
+            init(_ balance: APIBalance) throws {
+                let currency = balance.currencyCode
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .uppercased()
+                guard currency.range(
+                    of: #"^[A-Z]{3,8}$"#,
+                    options: .regularExpression
+                ) != nil,
+                      balance.spent.isFinite,
+                      balance.limit?.isFinite != false,
+                      balance.remaining?.isFinite != false else {
+                    throw PushServerError.invalidResponse
+                }
+                title = String(balance.title.prefix(128))
+                currencyCode = currency
+                spent = balance.spent
+                limit = balance.limit
+                remaining = balance.remaining
+                periodStart = balance.periodStart?.timeIntervalSince1970
+                periodEnd = balance.periodEnd?.timeIntervalSince1970
+                accessExpiresAt = balance.accessExpiresAt?.timeIntervalSince1970
+                isUnlimited = balance.isUnlimited
+                kind = balance.kind
+                unitLabel = balance.unitLabel.map { String($0.prefix(64)) }
+            }
+        }
     }
 
     private struct MissingQuotaPayload: Encodable {
@@ -970,7 +1371,7 @@ enum PushServerClient {
             }
             do {
                 try await claim(payload, credentials: credentials, deviceToken: deviceToken)
-            } catch let PushServerError.serverRejected(code) where code == 409 {
+            } catch let error as PushServerError where error.httpStatus == 409 {
                 // A lost 201 response leaves the one-time session consumed. Prove that this
                 // device owns the resulting registration before treating the retry as success.
                 try await rotateDeviceToken(
@@ -989,8 +1390,8 @@ enum PushServerClient {
                     deviceToken: deviceToken
                 )
                 return
-            } catch let PushServerError.serverRejected(code)
-                where (code == 401 || code == 404) && enrollment != nil {
+            } catch let error as PushServerError
+                where (error.httpStatus == 401 || error.httpStatus == 404) && enrollment != nil {
                 // The app may have created its local registration before the Worker accepted it.
                 // Continue with the explicitly confirmed enrollment method below.
             }
@@ -1132,7 +1533,7 @@ enum PushServerClient {
         request.setValue("Bearer \(credentials.deviceSecret)", forHTTPHeaderField: "Authorization")
         do {
             _ = try await send(request)
-        } catch let PushServerError.serverRejected(code) where code == 404 {
+        } catch let error as PushServerError where error.httpStatus == 404 {
             // The Worker already removed this registration.
         }
         KeychainStore.deletePushRegistration(for: serverURL)
@@ -1193,11 +1594,20 @@ enum PushServerClient {
         return response.accounts
     }
 
+    static func hasStoredRegistration(settings: PushServerSettings) -> Bool {
+        guard settings.mode != .disabled,
+              let serverURL = try? settings.resolvedServerURL(),
+              let registration = try? KeychainStore.loadPushRegistration(for: serverURL) else {
+            return false
+        }
+        return registration.serverURL == serverURL
+    }
+
     static func importRemoteAccount(
         settings: PushServerSettings,
         candidate: RemoteWorkerAccountCandidate,
         localAccountID: UUID
-    ) async throws -> RemoteWorkerAccountCandidate {
+    ) async throws -> RemoteWorkerAccountImportResult {
         let (serverURL, registration) = try monitoringContext(settings: settings)
         var request = URLRequest(url: remoteAccountsURL(
             serverURL: serverURL,
@@ -1218,7 +1628,22 @@ enum PushServerClient {
             maximumResponseBytes: smallResponseLimit,
             acceptedStatusCodes: [200, 201]
         )
-        let imported = try JSONDecoder().decode(RemoteAccountImportResponse.self, from: data).account
+        return try decodeRemoteAccountImportResponse(
+            data,
+            candidate: candidate,
+            localAccountID: localAccountID
+        )
+    }
+
+    static func decodeRemoteAccountImportResponse(
+        _ data: Data,
+        candidate: RemoteWorkerAccountCandidate,
+        localAccountID: UUID
+    ) throws -> RemoteWorkerAccountImportResult {
+        let imported = try JSONDecoder().decode(
+            RemoteAccountImportResponse.self,
+            from: data
+        ).account
         guard imported.remoteAccountID == candidate.remoteAccountID,
               imported.localAccountID == localAccountID,
               imported.providerID == candidate.providerID,
@@ -1228,7 +1653,10 @@ enum PushServerClient {
                 || imported.workerAccountReference == candidate.workerAccountReference) else {
             throw PushServerError.invalidResponse
         }
-        return RemoteWorkerAccountCandidate(
+        let consentRevision = try ServerConsentRevisionPolicy.importedRevision(
+            imported.consentRevision
+        )
+        let account = RemoteWorkerAccountCandidate(
             remoteAccountID: imported.remoteAccountID,
             syncedAccountReference: imported.syncedAccountReference,
             workerAccountReference: imported.workerAccountReference,
@@ -1239,6 +1667,10 @@ enum PushServerClient {
             lastSuccessTimestamp: imported.lastSuccessTimestamp,
             sessionStatus: imported.sessionStatus,
             sessionCheckedTimestamp: imported.sessionCheckedTimestamp
+        )
+        return RemoteWorkerAccountImportResult(
+            account: account,
+            consentRevision: consentRevision
         )
     }
 
@@ -1360,6 +1792,183 @@ enum PushServerClient {
         return uploaded
     }
 
+    static func enableDeviceUsageUploads(
+        settings: PushServerSettings,
+        account: MonitoredAccount,
+        consentRevision: Int64,
+        refreshInterval: RefreshInterval
+    ) async throws -> DeviceUsageSourceResponse {
+        guard consentRevision > 0,
+              !account.isDemo,
+              !account.isRemoteOnly else {
+            throw PushServerError.accountMonitoringUnavailable
+        }
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        let interval = Int(refreshInterval.timeInterval ?? 0)
+        var request = URLRequest(
+            url: accountURL(
+                serverURL: serverURL,
+                registration: registration,
+                accountID: account.id
+            ).appending(path: "snapshots")
+        )
+        request.httpMethod = "PUT"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue(
+            "Bearer \(registration.deviceSecret)",
+            forHTTPHeaderField: "Authorization"
+        )
+        request.httpBody = try JSONEncoder().encode(DeviceUsageSourceRequest(
+            providerID: account.providerID,
+            displayName: String(account.resolvedDisplayName.prefix(128)),
+            refreshIntervalSeconds: interval,
+            historyRetentionDays: settings.historyRetention.rawValue,
+            consentRevision: consentRevision
+        ))
+        let (data, _) = try await send(
+            request,
+            maximumResponseBytes: smallResponseLimit,
+            acceptedStatusCodes: [200, 201]
+        )
+        let response = try JSONDecoder().decode(DeviceUsageSourceResponse.self, from: data)
+        guard response.ok,
+              response.consentRevision == consentRevision,
+              DeviceUsageSequencePolicy.isValid(response.nextSequence) else {
+            throw PushServerError.invalidResponse
+        }
+        return response
+    }
+
+    static func uploadDeviceUsageSnapshot(
+        settings: PushServerSettings,
+        account: MonitoredAccount,
+        snapshot: UsageSnapshot,
+        consentRevision: Int64,
+        sequence: Int64
+    ) async throws -> Int64 {
+        guard consentRevision > 0,
+              DeviceUsageSequencePolicy.isValid(sequence),
+              let nextSequence = DeviceUsageSequencePolicy.next(after: sequence),
+              snapshot.accountID == account.id,
+              !account.isDemo,
+              !account.isRemoteOnly else {
+            throw PushServerError.invalidResponse
+        }
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        var request = URLRequest(
+            url: accountURL(
+                serverURL: serverURL,
+                registration: registration,
+                accountID: account.id
+            ).appending(path: "snapshots")
+        )
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue(
+            "Bearer \(registration.deviceSecret)",
+            forHTTPHeaderField: "Authorization"
+        )
+        request.httpBody = try deviceUsageSnapshotBody(
+            account: account,
+            snapshot: snapshot,
+            consentRevision: consentRevision,
+            sequence: sequence
+        )
+        let (data, _) = try await send(
+            request,
+            maximumResponseBytes: smallResponseLimit,
+            acceptedStatusCodes: [200, 201]
+        )
+        let response = try JSONDecoder().decode(DeviceUsageUploadResponse.self, from: data)
+        guard response.accepted, response.sequence == sequence else {
+            throw PushServerError.invalidResponse
+        }
+        return nextSequence
+    }
+
+    static func disableDeviceUsageUploads(
+        settings: PushServerSettings,
+        accountID: UUID,
+        consentRevision: Int64
+    ) async throws {
+        guard consentRevision > 0 else { throw PushServerError.invalidResponse }
+        let (serverURL, registration) = try monitoringContext(settings: settings)
+        var components = URLComponents(
+            url: accountURL(
+                serverURL: serverURL,
+                registration: registration,
+                accountID: accountID
+            ).appending(path: "snapshots"),
+            resolvingAgainstBaseURL: false
+        )!
+        components.queryItems = [
+            URLQueryItem(name: "consent_revision", value: String(consentRevision))
+        ]
+        guard let url = components.url else { throw PushServerError.invalidServerURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.timeoutInterval = 20
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.setValue(
+            "Bearer \(registration.deviceSecret)",
+            forHTTPHeaderField: "Authorization"
+        )
+        _ = try await send(
+            request,
+            maximumResponseBytes: smallResponseLimit,
+            acceptedStatusCodes: [204]
+        )
+    }
+
+    static func deviceUsageSnapshotBody(
+        account: MonitoredAccount,
+        snapshot: UsageSnapshot,
+        consentRevision: Int64,
+        sequence: Int64
+    ) throws -> Data {
+        guard (1...ServerConsentRevisionPolicy.maximum).contains(consentRevision),
+              DeviceUsageSequencePolicy.isValid(sequence) else {
+            throw PushServerError.invalidResponse
+        }
+        let data = try JSONEncoder().encode(DeviceUsageUploadRequest(
+            consentRevision: consentRevision,
+            sequence: sequence,
+            observedAt: snapshot.fetchedAt.timeIntervalSince1970,
+            snapshot: try DeviceUsageSnapshotPayload(
+                snapshot: snapshot,
+                providerID: account.providerID
+            )
+        ))
+        guard data.count <= 32 * 1_024 else { throw PushServerError.responseTooLarge }
+        return data
+    }
+
+    static func deviceUsageSnapshotKeys(
+        account: MonitoredAccount,
+        snapshot: UsageSnapshot,
+        consentRevision: Int64 = 1,
+        sequence: Int64 = 1
+    ) throws -> (root: Set<String>, snapshot: Set<String>, resetCredit: Set<String>?) {
+        let data = try deviceUsageSnapshotBody(
+            account: account,
+            snapshot: snapshot,
+            consentRevision: consentRevision,
+            sequence: sequence
+        )
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let projection = root["snapshot"] as? [String: Any] else {
+            throw PushServerError.invalidResponse
+        }
+        let creditKeys = (projection["reset_credits"] as? [[String: Any]])?.first.map {
+            Set($0.keys)
+        }
+        return (Set(root.keys), Set(projection.keys), creditKeys)
+    }
+
     static func updateAccountPolicy(
         settings: PushServerSettings,
         account: MonitoredAccount
@@ -1418,7 +2027,7 @@ enum PushServerClient {
             request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
             let (data, _) = try await send(request)
             let page = try JSONDecoder().decode(AccountSyncPage.self, from: data)
-            guard page.consentRevision > 0,
+            guard (1...ServerConsentRevisionPolicy.maximum).contains(page.consentRevision),
                   page.history.count <= 1_000,
                   responseConsentRevision == nil
                     || responseConsentRevision == page.consentRevision else {
@@ -1512,6 +2121,9 @@ enum PushServerClient {
     static func decodeAccountResponse(_ data: Data,
                                       account: MonitoredAccount) throws -> ServerAccountSyncResult {
         let page = try JSONDecoder().decode(AccountSyncPage.self, from: data)
+        guard (1...ServerConsentRevisionPolicy.maximum).contains(page.consentRevision) else {
+            throw PushServerError.invalidResponse
+        }
         return makeSyncResult(page: page, account: account)
     }
 
@@ -1554,7 +2166,27 @@ enum PushServerClient {
             throw PushServerError.invalidResponse
         }
         guard acceptedStatusCodes.contains(httpResponse.statusCode) else {
-            throw PushServerError.serverRejected(httpResponse.statusCode)
+            var errorData = Data()
+            var errorBodyExceededLimit = httpResponse.expectedContentLength
+                > Int64(errorResponseLimit)
+            if !errorBodyExceededLimit {
+                if httpResponse.expectedContentLength > 0 {
+                    errorData.reserveCapacity(
+                        min(errorResponseLimit, Int(httpResponse.expectedContentLength))
+                    )
+                }
+                for try await byte in bytes {
+                    guard errorData.count < errorResponseLimit else {
+                        errorBodyExceededLimit = true
+                        break
+                    }
+                    errorData.append(byte)
+                }
+            }
+            throw rejectedResponseError(
+                statusCode: httpResponse.statusCode,
+                body: errorBodyExceededLimit ? nil : errorData
+            )
         }
         if httpResponse.expectedContentLength > Int64(maximumResponseBytes) {
             throw PushServerError.responseTooLarge
@@ -1570,6 +2202,19 @@ enum PushServerClient {
             data.append(byte)
         }
         return (data, httpResponse)
+    }
+
+    static func rejectedResponseError(statusCode: Int, body: Data?) -> PushServerError {
+        struct ErrorEnvelope: Decodable {
+            var error: WorkerErrorCode
+        }
+
+        guard let body,
+              body.count <= errorResponseLimit,
+              let envelope = try? JSONDecoder().decode(ErrorEnvelope.self, from: body) else {
+            return .serverRejected(statusCode)
+        }
+        return .serverRejected(statusCode, envelope.error)
     }
 }
 
@@ -1590,8 +2235,17 @@ private final class NoRedirectSessionDelegate: NSObject, URLSessionTaskDelegate,
 
 enum RemotePushRegistrationFailurePolicy {
     static func isMissingAPNSEntitlement(_ error: Error) -> Bool {
+        let message = message(for: error)
+        return message.contains("aps-environment") && message.contains("entitlement")
+    }
+
+    static func notificationsAreNotAllowed(_ error: Error) -> Bool {
+        message(for: error).contains("notifications are not allowed for this application")
+    }
+
+    private static func message(for error: Error) -> String {
         let error = error as NSError
-        let message = [
+        return [
             error.localizedDescription,
             error.localizedFailureReason,
             error.localizedRecoverySuggestion
@@ -1599,7 +2253,6 @@ enum RemotePushRegistrationFailurePolicy {
         .compactMap { $0 }
         .joined(separator: " ")
         .lowercased()
-        return message.contains("aps-environment") && message.contains("entitlement")
     }
 }
 

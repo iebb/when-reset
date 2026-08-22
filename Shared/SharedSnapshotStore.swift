@@ -509,12 +509,85 @@ actor UsageHistoryStore {
             }
             return $0.metricID < $1.metricID
         }
-        archive.detectorStates.removeValue(forKey: sourceID)
+        if let sourceState = archive.detectorStates.removeValue(forKey: sourceID) {
+            archive.detectorStates[targetID] = mergedDetectorState(
+                canonical: archive.detectorStates[targetID],
+                duplicate: sourceState,
+                accountID: targetID
+            )
+        }
         archive.pendingNotifications.removeAll { $0.accountID == sourceID }
-        prune(&archive, now: now)
+        // Re-keying an identity must not enforce the actor's default 35-day retention. This path
+        // can run before launch has applied a user's 90-day–2-year preference, and it introduces
+        // no new history. Normal load/record operations perform configured retention pruning.
         try persist(archive)
         cachedArchive = archive
         return archive.points
+    }
+
+    private func mergedDetectorState(
+        canonical: UsageAlertDetectorState?,
+        duplicate: UsageAlertDetectorState,
+        accountID: UUID
+    ) -> UsageAlertDetectorState {
+        let rekeyedDuplicate = rekeyedDetectorState(duplicate, accountID: accountID)
+        guard let canonical else { return rekeyedDuplicate }
+        var rekeyedCanonical = rekeyedDetectorState(canonical, accountID: accountID)
+        guard rekeyedCanonical.sourceIdentity == rekeyedDuplicate.sourceIdentity else {
+            return rekeyedCanonical
+        }
+
+        let older: UsageAlertDetectorState
+        if rekeyedDuplicate.lastObservedAt > rekeyedCanonical.lastObservedAt {
+            older = rekeyedCanonical
+            rekeyedCanonical = rekeyedDuplicate
+        } else {
+            older = rekeyedDuplicate
+        }
+        for (metricID, point) in older.metricObservations {
+            if let existing = rekeyedCanonical.metricObservations[metricID],
+               existing.recordedAt >= point.recordedAt { continue }
+            rekeyedCanonical.metricObservations[metricID] = point
+        }
+        if let olderWeekly = older.weeklyObservation,
+           (rekeyedCanonical.weeklyObservation?.recordedAt ?? .distantPast)
+            < olderWeekly.recordedAt {
+            rekeyedCanonical.weeklyObservation = olderWeekly
+        }
+        rekeyedCanonical.creditBaselineEstablished = rekeyedCanonical.creditBaselineEstablished
+            || older.creditBaselineEstablished
+        for (creditID, seen) in older.seenCredits {
+            if let existing = rekeyedCanonical.seenCredits[creditID],
+               existing.lastSeenAt >= seen.lastSeenAt { continue }
+            rekeyedCanonical.seenCredits[creditID] = seen
+        }
+        return rekeyedCanonical
+    }
+
+    private func rekeyedDetectorState(
+        _ state: UsageAlertDetectorState,
+        accountID: UUID
+    ) -> UsageAlertDetectorState {
+        var result = state
+        result.metricObservations = result.metricObservations.mapValues {
+            rekeyedHistoryPoint($0, accountID: accountID)
+        }
+        if let weekly = result.weeklyObservation {
+            result.weeklyObservation = rekeyedHistoryPoint(weekly, accountID: accountID)
+        }
+        return result
+    }
+
+    private func rekeyedHistoryPoint(_ point: UsageHistoryPoint, accountID: UUID)
+        -> UsageHistoryPoint {
+        var result = point
+        result.accountID = accountID
+        result.rowTag = UsageHistoryPoint.makeRowTag(
+            accountID: accountID,
+            metricID: result.metricID,
+            recordedAt: result.recordedAt
+        )
+        return result
     }
 
     func mergeServerHistory(_ incomingPoints: [UsageHistoryPoint],

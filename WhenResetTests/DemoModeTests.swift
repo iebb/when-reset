@@ -127,9 +127,26 @@ final class DemoModeTests: XCTestCase {
         XCTAssertFalse(failure.requiresRelink)
     }
 
-    func testServerMonitoredAccountsNeverUseTheLocalProviderRoute() {
+    func testDirectAccountsWithLocalCredentialsKeepTheLocalProviderRoute() {
         XCTAssertEqual(
             AccountRefreshRoute(isDemo: false, serverMonitoringEnabled: true),
+            .server
+        )
+        XCTAssertEqual(
+            AccountRefreshRoute(
+                isDemo: false,
+                serverMonitoringEnabled: true,
+                hasLocalCredentials: true
+            ),
+            .provider
+        )
+        XCTAssertEqual(
+            AccountRefreshRoute(
+                isDemo: false,
+                serverMonitoringEnabled: true,
+                hasLocalCredentials: true,
+                workerIsCredentialAuthority: true
+            ),
             .server
         )
         XCTAssertEqual(

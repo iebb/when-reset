@@ -602,6 +602,28 @@ final class ParsingTests: XCTestCase {
         )
     }
 
+    func testNotificationsNotAllowedRegistrationFailureIsRecognized() {
+        let notificationsDenied = NSError(
+            domain: NSCocoaErrorDomain,
+            code: 3_010,
+            userInfo: [
+                NSLocalizedDescriptionKey:
+                    "Notifications are not allowed for this application"
+            ]
+        )
+        let unrelatedFailure = NSError(
+            domain: NSURLErrorDomain,
+            code: NSURLErrorNotConnectedToInternet
+        )
+
+        XCTAssertTrue(
+            RemotePushRegistrationFailurePolicy.notificationsAreNotAllowed(notificationsDenied)
+        )
+        XCTAssertFalse(
+            RemotePushRegistrationFailurePolicy.notificationsAreNotAllowed(unrelatedFailure)
+        )
+    }
+
     func testPushServerURLRequiresHTTPSAndNormalizesOrigin() throws {
         let url = try PushServerConfiguration.normalizedServerURL(
             "  https://PUSH.Example.com/base///?secret=no#fragment  "
@@ -884,6 +906,300 @@ final class ParsingTests: XCTestCase {
         ))
     }
 
+    func testMatchingDirectWorkerAccountRemainsEligibleUntilRemoteIDIsAttached() throws {
+        let serverURL = "https://worker.example.com"
+        let account = MonitoredAccount(
+            id: UUID(uuidString: "019F724A-3414-4D52-AE37-0C7024A1ABA0")!,
+            providerID: .claude,
+            displayName: "Work",
+            workspaceID: "workspace",
+            plan: "Max",
+            addedAt: .now
+        )
+        let remoteAccountID = String(repeating: "A", count: 43)
+        let workerReference = String(repeating: "B", count: 43)
+        let candidate = RemoteWorkerAccountCandidate(
+            remoteAccountID: remoteAccountID,
+            workerAccountReference: workerReference,
+            providerID: .claude,
+            displayName: "Work",
+            plan: "Max",
+            metadata: nil,
+            lastSuccessTimestamp: nil
+        )
+        let awaitingAttachment = AccountMonitorSettings(
+            monitorOnSelfHostedServer: true,
+            selfHostedServerConsentURL: serverURL,
+            selfHostedServerConsentRevision: 1,
+            workerAccountReference: workerReference
+        )
+
+        XCTAssertTrue(RemoteWorkerAccountMatcher.matches(
+            candidate,
+            account: account,
+            settings: awaitingAttachment
+        ))
+        XCTAssertFalse(RemoteWorkerAccountMatcher.isAlreadyAttached(
+            candidate,
+            accounts: [account],
+            serverURL: serverURL,
+            settingsForAccount: { _ in awaitingAttachment }
+        ))
+
+        var attached = awaitingAttachment
+        attached.remoteWorkerAccountID = remoteAccountID
+        XCTAssertTrue(RemoteWorkerAccountMatcher.isAlreadyAttached(
+            candidate,
+            accounts: [account],
+            serverURL: serverURL,
+            settingsForAccount: { _ in attached }
+        ))
+    }
+
+    func testRemoteWorkerImportResponsePropagatesConsentRevision() throws {
+        let remoteAccountID = String(repeating: "A", count: 43)
+        let localAccountID = UUID(uuidString: "019F724A-3414-4D52-AE37-0C7024A1ABA0")!
+        let candidate = RemoteWorkerAccountCandidate(
+            remoteAccountID: remoteAccountID,
+            providerID: .claude,
+            displayName: "Work",
+            plan: "Max",
+            metadata: nil,
+            lastSuccessTimestamp: nil
+        )
+        let response = Data(#"""
+        {
+          "account": {
+            "remote_account_id": "\#(remoteAccountID)",
+            "local_account_id": "\#(localAccountID.uuidString.lowercased())",
+            "provider_id": "claude",
+            "display_name": "Work",
+            "consent_revision": 23
+          }
+        }
+        """#.utf8)
+
+        let result = try PushServerClient.decodeRemoteAccountImportResponse(
+            response,
+            candidate: candidate,
+            localAccountID: localAccountID
+        )
+
+        XCTAssertEqual(result.account.remoteAccountID, remoteAccountID)
+        XCTAssertEqual(result.consentRevision, 23)
+    }
+
+    func testRemoteWorkerImportResponseDefaultsLegacyConsentRevisionToOne() throws {
+        let remoteAccountID = String(repeating: "A", count: 43)
+        let localAccountID = UUID(uuidString: "019F724A-3414-4D52-AE37-0C7024A1ABA0")!
+        let candidate = RemoteWorkerAccountCandidate(
+            remoteAccountID: remoteAccountID,
+            providerID: .claude,
+            displayName: "Work",
+            plan: "Max",
+            metadata: nil,
+            lastSuccessTimestamp: nil
+        )
+        let response = Data(#"""
+        {
+          "account": {
+            "remote_account_id": "\#(remoteAccountID)",
+            "local_account_id": "\#(localAccountID.uuidString.lowercased())",
+            "provider_id": "claude",
+            "display_name": "Work"
+          }
+        }
+        """#.utf8)
+
+        let result = try PushServerClient.decodeRemoteAccountImportResponse(
+            response,
+            candidate: candidate,
+            localAccountID: localAccountID
+        )
+
+        XCTAssertEqual(result.consentRevision, 1)
+    }
+
+    func testRemoteWorkerImportResponseRejectsInvalidConsentRevision() throws {
+        let remoteAccountID = String(repeating: "A", count: 43)
+        let localAccountID = UUID(uuidString: "019F724A-3414-4D52-AE37-0C7024A1ABA0")!
+        let candidate = RemoteWorkerAccountCandidate(
+            remoteAccountID: remoteAccountID,
+            providerID: .claude,
+            displayName: "Work",
+            plan: "Max",
+            metadata: nil,
+            lastSuccessTimestamp: nil
+        )
+
+        for revision in [Int64(0), ServerConsentRevisionPolicy.maximum + 1] {
+            let response = Data(#"""
+            {
+              "account": {
+                "remote_account_id": "\#(remoteAccountID)",
+                "local_account_id": "\#(localAccountID.uuidString.lowercased())",
+                "provider_id": "claude",
+                "display_name": "Work",
+                "consent_revision": \#(revision)
+              }
+            }
+            """#.utf8)
+
+            XCTAssertThrowsError(try PushServerClient.decodeRemoteAccountImportResponse(
+                response,
+                candidate: candidate,
+                localAccountID: localAccountID
+            )) { error in
+                guard let pushServerError = error as? PushServerError,
+                      case .invalidResponse = pushServerError else {
+                    return XCTFail("Expected invalidResponse, got \(error)")
+                }
+            }
+        }
+    }
+
+    func testStoredWorkerRegistrationControlsRemoteDiscoveryReadiness() throws {
+        let serverURL = try XCTUnwrap(URL(
+            string: "https://worker-\(UUID().uuidString.lowercased()).example.com"
+        ))
+        let settings = PushServerSettings(
+            mode: .custom,
+            customServerURL: serverURL.absoluteString
+        )
+        defer { KeychainStore.deletePushRegistration(for: serverURL) }
+        KeychainStore.deletePushRegistration(for: serverURL)
+
+        XCTAssertFalse(PushServerClient.hasStoredRegistration(settings: settings))
+
+        do {
+            try KeychainStore.savePushRegistration(.init(
+                deviceID: UUID(),
+                deviceSecret: "test-only-device-secret",
+                serverURL: serverURL
+            ))
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == NSOSStatusErrorDomain,
+               nsError.code == Int(errSecMissingEntitlement) {
+                throw XCTSkip("The simulator test host cannot access Keychain.")
+            }
+            throw error
+        }
+        XCTAssertTrue(PushServerClient.hasStoredRegistration(settings: settings))
+    }
+
+    func testRemoteHistoryImportFailureExplainsPartialSuccess() {
+        let error = RemoteWorkerImportError.retainedHistoryDownloadFailed(
+            importedCount: 2,
+            reason: "The Worker could not be reached."
+        )
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "2 accounts were added, but retained history could not be downloaded. The Worker could not be reached. Retry from the account’s Usage History section."
+        )
+    }
+
+    func testRemoteWorkerImportFailureExplainsDurablePartialSuccess() {
+        let error = RemoteWorkerImportError.accountImportPartiallySucceeded(
+            importedCount: 2,
+            reason: "The Worker returned HTTP 409.",
+            retainedHistoryReason: nil
+        )
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "2 accounts were added, but the remaining Worker accounts could not be added. The Worker returned HTTP 409. Try again to continue."
+        )
+    }
+
+    func testRemoteWorkerImportFailureCanAlsoReportHistoryFailure() {
+        let error = RemoteWorkerImportError.accountImportPartiallySucceeded(
+            importedCount: 1,
+            reason: "The Worker returned HTTP 409.",
+            retainedHistoryReason: "The history request timed out."
+        )
+
+        XCTAssertEqual(
+            error.localizedDescription,
+            "1 account was added, but the remaining Worker accounts could not be added. The Worker returned HTTP 409. Retained history for the added accounts also could not be downloaded. The history request timed out. Try again to continue."
+        )
+    }
+
+    func testRecoveredWorkerConsentRevisionPreservesDirectSourceButNotSubscription() {
+        XCTAssertEqual(ServerConsentRevisionPolicy.recoveredRevision(
+            isRemoteOnly: false,
+            proposedRevision: 1,
+            previousRevision: 1,
+            highWaterRevision: 29
+        ), 1)
+        XCTAssertEqual(ServerConsentRevisionPolicy.recoveredRevision(
+            isRemoteOnly: false,
+            proposedRevision: 23,
+            previousRevision: 23,
+            highWaterRevision: 29
+        ), 23)
+        XCTAssertEqual(ServerConsentRevisionPolicy.recoveredRevision(
+            isRemoteOnly: true,
+            proposedRevision: 29,
+            previousRevision: 29,
+            highWaterRevision: 29
+        ), 1)
+    }
+
+    func testAuthenticatedWorkerSyncRecoversNewerDirectConsentRevision() throws {
+        XCTAssertEqual(try ServerConsentRevisionPolicy.synchronizedRevision(
+            currentRevision: 2,
+            serverRevision: 59,
+            highWaterRevision: 2,
+            pendingDeletionRevision: nil
+        ), 59)
+    }
+
+    func testAuthenticatedWorkerSyncRebasesRemoteSubscriptionToRevisionOne() throws {
+        XCTAssertEqual(try ServerConsentRevisionPolicy.synchronizedRevision(
+            currentRevision: 29,
+            serverRevision: 1,
+            highWaterRevision: 29,
+            pendingDeletionRevision: nil
+        ), 1)
+    }
+
+    func testAuthenticatedWorkerSyncCannotRevivePendingDeletion() {
+        XCTAssertThrowsError(try ServerConsentRevisionPolicy.synchronizedRevision(
+            currentRevision: 60,
+            serverRevision: 59,
+            highWaterRevision: 60,
+            pendingDeletionRevision: 60
+        )) { error in
+            guard let pushError = error as? PushServerError,
+                  case .consentRevisionConflict = pushError else {
+                return XCTFail("Expected consentRevisionConflict, got \(error)")
+            }
+        }
+    }
+
+    func testSameAccountReconnectCanReplaceRemoteCredentialButNormalUploadCannot() {
+        XCTAssertTrue(ServerAccountUploadPolicy.permitsUpload(
+            isDemo: false,
+            isRemoteOnly: false,
+            hasRemoteWorkerAccountID: true,
+            replacingRemoteCredential: true
+        ))
+        XCTAssertFalse(ServerAccountUploadPolicy.permitsUpload(
+            isDemo: false,
+            isRemoteOnly: false,
+            hasRemoteWorkerAccountID: true,
+            replacingRemoteCredential: false
+        ))
+        XCTAssertFalse(ServerAccountUploadPolicy.permitsUpload(
+            isDemo: false,
+            isRemoteOnly: true,
+            hasRemoteWorkerAccountID: true,
+            replacingRemoteCredential: true
+        ))
+    }
+
     func testLiveActivityRotatesBeforeSystemEightHourLimit() {
         let startedAt = Date(timeIntervalSince1970: 2_000_000_000)
 
@@ -1096,6 +1412,378 @@ final class ParsingTests: XCTestCase {
         XCTAssertNil(try KeychainStore.loadAccounts().first(where: { $0.id == account.id }))
     }
 
+    func testDirectChatGPTDuplicatePlanOnlyOriginatesOnWorkerAuthoritativeDevice() throws {
+        let earlier = Date(timeIntervalSince1970: 1_000)
+        let later = Date(timeIntervalSince1970: 2_000)
+        let unmonitored = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            providerID: .chatGPT,
+            displayName: "Different provider label",
+            workspaceID: "shared-chatgpt-workspace",
+            plan: "Pro",
+            addedAt: later
+        )
+        let workerProtected = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
+            providerID: .chatGPT,
+            displayName: "Another provider label",
+            workspaceID: "shared-chatgpt-workspace",
+            plan: "Pro",
+            addedAt: earlier
+        )
+        let sameNameDifferentWorkspace = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000003")!,
+            providerID: .chatGPT,
+            displayName: unmonitored.displayName,
+            workspaceID: "different-chatgpt-workspace",
+            plan: "Pro",
+            addedAt: earlier
+        )
+
+        let plan = try XCTUnwrap(DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [unmonitored, workerProtected, sameNameDifferentWorkspace],
+            workerProtectedAccountIDs: [workerProtected.id]
+        ).first)
+
+        XCTAssertEqual(plan.canonicalAccountID, workerProtected.id)
+        XCTAssertEqual(plan.duplicateAccountIDs, [unmonitored.id])
+        let zeroProtectedPlan = try XCTUnwrap(
+            DirectChatGPTDuplicateMergePolicy.plans(
+                accounts: [unmonitored, workerProtected, sameNameDifferentWorkspace],
+                workerProtectedAccountIDs: []
+            ).first
+        )
+        XCTAssertEqual(zeroProtectedPlan.canonicalAccountID, workerProtected.id)
+        XCTAssertEqual(zeroProtectedPlan.duplicateAccountIDs, [unmonitored.id])
+    }
+
+    func testDirectChatGPTDuplicatePlanNeverMergesTwoWorkerSourcesOrOtherProviders() {
+        let date = Date(timeIntervalSince1970: 2_000)
+        let first = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            providerID: .chatGPT, displayName: "One",
+            workspaceID: "workspace", plan: "Pro", addedAt: date
+        )
+        let second = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
+            providerID: .chatGPT, displayName: "Two",
+            workspaceID: "workspace", plan: "Pro",
+            addedAt: date.addingTimeInterval(1)
+        )
+        let claude = MonitoredAccount(
+            id: UUID(), providerID: .claude, displayName: "One",
+            workspaceID: "workspace", plan: "Pro", addedAt: date
+        )
+
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [first, second, claude],
+            workerProtectedAccountIDs: [first.id, second.id]
+        ).isEmpty)
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [first, second],
+            workerProtectedAccountIDs: [second.id]
+        ).isEmpty)
+        let zeroProtectedForward = DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [first, second],
+            workerProtectedAccountIDs: []
+        )
+        let zeroProtectedReverse = DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [second, first],
+            workerProtectedAccountIDs: []
+        )
+        XCTAssertEqual(zeroProtectedForward, zeroProtectedReverse)
+        XCTAssertEqual(zeroProtectedForward.first?.canonicalAccountID, first.id)
+        XCTAssertEqual(zeroProtectedForward.first?.duplicateAccountIDs, [second.id])
+        XCTAssertEqual(DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [second, first],
+            workerProtectedAccountIDs: [first.id]
+        ).first?.canonicalAccountID, first.id)
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [first, claude],
+            workerProtectedAccountIDs: []
+        ).isEmpty)
+    }
+
+    func testColdLaunchMissingAccountSynthesizesBothWorkerDeletionFloors() {
+        let workerURL = "https://worker.example"
+        let settings = AccountMonitorSettings(
+            monitorOnSelfHostedServer: true,
+            selfHostedServerConsentURL: workerURL,
+            selfHostedServerConsentRevision: 7,
+            uploadsDeviceUsageToWorker: true,
+            deviceUsageWorkerURL: workerURL,
+            deviceUsageConsentRevision: 11
+        )
+
+        let needs = ColdLaunchAccountCleanupPolicy.workerDeletionNeeds(
+            settings: settings,
+            workerURL: workerURL,
+            pendingCredentialRevision: 9,
+            pendingDeviceUsageRevision: 13
+        )
+
+        XCTAssertEqual(needs.credentialRevisionFloor, 9)
+        XCTAssertEqual(needs.deviceUsageRevisionFloor, 13)
+        XCTAssertFalse(needs.isEmpty)
+        // A relaunched device retains the already-journaled floors even after account settings
+        // have been cleared locally by the prior offline removal attempt.
+        XCTAssertEqual(
+            ColdLaunchAccountCleanupPolicy.workerDeletionNeeds(
+                settings: nil,
+                workerURL: workerURL,
+                pendingCredentialRevision: 10,
+                pendingDeviceUsageRevision: 14
+            ),
+            .init(credentialRevisionFloor: 10, deviceUsageRevisionFloor: 14)
+        )
+
+        let credentialDeleted = ColdLaunchAccountCleanupPolicy.clearingCredentialSource(
+            in: settings,
+            deletionRevision: 10
+        )
+        XCTAssertFalse(credentialDeleted.monitorOnSelfHostedServer)
+        XCTAssertNil(credentialDeleted.selfHostedServerConsentURL)
+        XCTAssertEqual(credentialDeleted.selfHostedServerConsentRevision, 10)
+        XCTAssertTrue(credentialDeleted.uploadsDeviceUsageToWorker)
+
+        let fullyDeleted = ColdLaunchAccountCleanupPolicy.clearingDeviceUsageSource(
+            in: credentialDeleted,
+            deletionRevision: 14
+        )
+        XCTAssertFalse(fullyDeleted.uploadsDeviceUsageToWorker)
+        XCTAssertNil(fullyDeleted.deviceUsageWorkerURL)
+        XCTAssertEqual(fullyDeleted.deviceUsageConsentRevision, 14)
+        XCTAssertFalse(DirectChatGPTDuplicateMergePolicy.protectsDeviceUsageSource(fullyDeleted))
+    }
+
+    func testColdLaunchAliasSourceIsRetainedWhetherAliasArrivesBeforeOrAfterDeletion() {
+        let canonical = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            providerID: .chatGPT,
+            displayName: "Canonical",
+            workspaceID: "exact-workspace",
+            plan: "Pro",
+            addedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let deletedSource = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
+            providerID: .chatGPT,
+            displayName: "Old label",
+            workspaceID: "exact-workspace",
+            plan: "Pro",
+            addedAt: Date(timeIntervalSince1970: 2_000)
+        )
+
+        XCTAssertEqual(
+            ColdLaunchAccountCleanupPolicy.missingCachedAccounts(
+                cachedAccounts: [canonical, deletedSource],
+                syncedAccounts: [canonical]
+            ),
+            [deletedSource]
+        )
+        XCTAssertTrue(ColdLaunchAccountCleanupPolicy.isPotentialChatGPTMergeSource(
+            deletedSource,
+            syncedAccounts: [canonical]
+        ))
+        XCTAssertFalse(ColdLaunchAccountCleanupPolicy.isPotentialChatGPTMergeSource(
+            MonitoredAccount(
+                id: UUID(), providerID: .chatGPT, displayName: "Other",
+                workspaceID: "other-workspace", plan: nil, addedAt: .now
+            ),
+            syncedAccounts: [canonical]
+        ))
+    }
+
+    func testDuplicateMergeAbortsWhenProtectionAppearsAfterPlan() throws {
+        let date = Date(timeIntervalSince1970: 2_000)
+        let canonical = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000001")!,
+            providerID: .chatGPT, displayName: "One",
+            workspaceID: "workspace", plan: "Pro", addedAt: date
+        )
+        let duplicate = MonitoredAccount(
+            id: UUID(uuidString: "00000000-0000-4000-8000-000000000002")!,
+            providerID: .chatGPT, displayName: "Two",
+            workspaceID: "workspace", plan: "Pro", addedAt: date
+        )
+        let plan = try XCTUnwrap(DirectChatGPTDuplicateMergePolicy.plans(
+            accounts: [duplicate, canonical],
+            workerProtectedAccountIDs: []
+        ).first)
+
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.protectionRemainsValid(
+            plan,
+            protectedAccountIDs: []
+        ))
+        XCTAssertFalse(DirectChatGPTDuplicateMergePolicy.protectionRemainsValid(
+            plan,
+            protectedAccountIDs: [duplicate.id]
+        ))
+        XCTAssertFalse(DirectChatGPTDuplicateMergePolicy.protectionRemainsValid(
+            plan,
+            protectedAccountIDs: [canonical.id]
+        ))
+
+        var canonicalProtectedPlan = plan
+        canonicalProtectedPlan.allowedProtectedAccountIDs = [canonical.id]
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.protectionRemainsValid(
+            canonicalProtectedPlan,
+            protectedAccountIDs: [canonical.id]
+        ))
+        XCTAssertFalse(DirectChatGPTDuplicateMergePolicy.protectionRemainsValid(
+            canonicalProtectedPlan,
+            protectedAccountIDs: [canonical.id, duplicate.id]
+        ))
+    }
+
+    func testDirectChatGPTDuplicateMergePreservesWorkerTupleAndRestrictiveSettings() {
+        let canonical = AccountMonitorSettings(
+            notifyAboutResets: true,
+            notifyAtScheduledReset: true,
+            showBankedResets: true,
+            hiddenMetricIDs: ["canonical-hidden"],
+            showBankedResetsInLiveActivity: true,
+            hiddenLiveActivityMetricIDs: ["canonical-live-hidden"],
+            pinnedLiveActivityMetricIDs: ["canonical-pinned"],
+            monitorOnSelfHostedServer: true,
+            selfHostedServerConsentURL: "https://worker.example",
+            selfHostedServerConsentRevision: 9,
+            remoteWorkerAccountID: String(repeating: "A", count: 43),
+            workerAccountReference: String(repeating: "B", count: 43)
+        )
+        let duplicate = AccountMonitorSettings(
+            notifyAboutResets: false,
+            notifyAtScheduledReset: false,
+            showBankedResets: false,
+            hiddenMetricIDs: ["duplicate-hidden"],
+            showBankedResetsInLiveActivity: false,
+            hiddenLiveActivityMetricIDs: ["duplicate-live-hidden"],
+            pinnedLiveActivityMetricIDs: ["duplicate-pinned"],
+            monitorOnSelfHostedServer: false,
+            selfHostedServerConsentURL: "https://must-not-replace.example",
+            selfHostedServerConsentRevision: 99,
+            remoteWorkerAccountID: String(repeating: "C", count: 43),
+            workerAccountReference: String(repeating: "D", count: 43)
+        )
+
+        let merged = DirectChatGPTDuplicateMergePolicy.mergedSettings(
+            canonical: canonical,
+            duplicate: duplicate
+        )
+
+        XCTAssertFalse(merged.notifyAboutResets)
+        XCTAssertFalse(merged.notifyAtScheduledReset)
+        XCTAssertFalse(merged.showBankedResets)
+        XCTAssertFalse(merged.showBankedResetsInLiveActivity)
+        XCTAssertEqual(merged.hiddenMetricIDs, ["canonical-hidden", "duplicate-hidden"])
+        XCTAssertEqual(
+            merged.hiddenLiveActivityMetricIDs,
+            ["canonical-live-hidden", "duplicate-live-hidden"]
+        )
+        XCTAssertEqual(
+            merged.pinnedLiveActivityMetricIDs,
+            ["canonical-pinned", "duplicate-pinned"]
+        )
+        XCTAssertEqual(merged.monitorOnSelfHostedServer, canonical.monitorOnSelfHostedServer)
+        XCTAssertEqual(merged.selfHostedServerConsentURL, canonical.selfHostedServerConsentURL)
+        XCTAssertEqual(
+            merged.selfHostedServerConsentRevision,
+            canonical.selfHostedServerConsentRevision
+        )
+        XCTAssertEqual(merged.remoteWorkerAccountID, canonical.remoteWorkerAccountID)
+        XCTAssertEqual(merged.workerAccountReference, canonical.workerAccountReference)
+    }
+
+    func testChatGPTDuplicateCredentialPolicyUsesFreshestValidCredential() throws {
+        let canonicalID = UUID(uuidString: "00000000-0000-4000-8000-000000000001")!
+        let olderFallbackID = UUID(uuidString: "00000000-0000-4000-8000-000000000002")!
+        let newerFallbackID = UUID(uuidString: "00000000-0000-4000-8000-000000000003")!
+        let canonical = ChatGPTDuplicateCredentialCandidate(
+            accountID: canonicalID,
+            credentials: chatGPTCredential(workspaceID: "workspace", expiresAt: 4_000)
+        )
+        let olderFallback = ChatGPTDuplicateCredentialCandidate(
+            accountID: olderFallbackID,
+            credentials: chatGPTCredential(workspaceID: "workspace", expiresAt: 2_000)
+        )
+        let newerFallback = ChatGPTDuplicateCredentialCandidate(
+            accountID: newerFallbackID,
+            credentials: chatGPTCredential(workspaceID: "workspace", expiresAt: 3_000)
+        )
+        let wrongWorkspace = ChatGPTDuplicateCredentialCandidate(
+            accountID: UUID(),
+            credentials: chatGPTCredential(workspaceID: "other", expiresAt: 5_000)
+        )
+
+        XCTAssertEqual(ChatGPTDuplicateCredentialPolicy.preferred(
+            from: [newerFallback, wrongWorkspace, canonical, olderFallback],
+            canonicalAccountID: canonicalID,
+            workspaceID: "workspace"
+        )?.accountID, canonicalID)
+        XCTAssertEqual(ChatGPTDuplicateCredentialPolicy.preferred(
+            from: [olderFallback, wrongWorkspace, newerFallback],
+            canonicalAccountID: canonicalID,
+            workspaceID: "workspace"
+        )?.accountID, newerFallbackID)
+    }
+
+    func testChatGPTDuplicateKeychainMergeDeletesLosingSynchronizedRecords() throws {
+        let canonical = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Canonical",
+            workspaceID: "workspace", plan: "Pro",
+            addedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let duplicate = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Duplicate",
+            workspaceID: canonical.workspaceID, plan: "Pro",
+            addedAt: Date(timeIntervalSince1970: 2_000)
+        )
+        defer {
+            KeychainStore.delete(for: canonical.id)
+            KeychainStore.delete(for: duplicate.id)
+            KeychainStore.deleteAccount(for: canonical.id)
+            KeychainStore.deleteAccount(for: duplicate.id)
+            KeychainStore.deleteAccountMergeAlias(for: duplicate.id)
+        }
+        try KeychainStore.save(
+            chatGPTCredential(workspaceID: canonical.workspaceID, expiresAt: 2_000),
+            for: canonical.id
+        )
+        try KeychainStore.save(
+            chatGPTCredential(workspaceID: canonical.workspaceID, expiresAt: 3_000),
+            for: duplicate.id
+        )
+        try KeychainStore.saveAccount(canonical)
+        try KeychainStore.saveAccount(duplicate)
+
+        XCTAssertTrue(try KeychainStore.prepareChatGPTDuplicateCredential(
+            canonical: canonical,
+            duplicateIDs: [duplicate.id]
+        ))
+        let alias = DirectChatGPTAccountMergeAlias(
+            sourceAccountID: duplicate.id,
+            canonicalAccountID: canonical.id,
+            workspaceID: canonical.workspaceID,
+            createdAt: .now
+        )
+        try KeychainStore.saveAccountMergeAlias(alias)
+        try KeychainStore.deleteDuplicateAccountAndCredential(for: duplicate.id)
+
+        XCTAssertEqual(
+            try KeychainStore.load(for: canonical.id).expiresAt,
+            Date(timeIntervalSince1970: 3_000)
+        )
+        XCTAssertThrowsError(try KeychainStore.load(for: duplicate.id))
+        XCTAssertNotNil(try KeychainStore.loadAccounts().first { $0.id == canonical.id })
+        XCTAssertNil(try KeychainStore.loadAccounts().first { $0.id == duplicate.id })
+        XCTAssertEqual(
+            try KeychainStore.loadAccountMergeAliases().first {
+                $0.sourceAccountID == duplicate.id
+            },
+            alias
+        )
+    }
+
     private func makeWorkerLink(
         server: String,
         session: String,
@@ -1170,6 +1858,108 @@ final class ParsingTests: XCTestCase {
         XCTAssertFalse(failure.message.contains("provider response"))
     }
 
+    func testWorkerErrorEnvelopePreservesOnlyAllowlistedCodes() throws {
+        let decoded = PushServerClient.rejectedResponseError(
+            statusCode: 403,
+            body: Data(#"{"error":"provider_request_forbidden"}"#.utf8)
+        )
+        XCTAssertEqual(decoded.httpStatus, 403)
+        XCTAssertEqual(decoded.workerErrorCode, .providerRequestForbidden)
+
+        for body in [
+            Data(#"{"error":"upstream-secret-canary"}"#.utf8),
+            Data(#"{"error":401}"#.utf8),
+            Data("not-json-upstream-secret-canary".utf8),
+            Data(repeating: 65, count: 4_097)
+        ] {
+            let rejected = PushServerClient.rejectedResponseError(
+                statusCode: 403,
+                body: body
+            )
+            XCTAssertEqual(rejected.httpStatus, 403)
+            XCTAssertNil(rejected.workerErrorCode)
+            XCTAssertFalse(rejected.localizedDescription.contains("upstream-secret-canary"))
+        }
+    }
+
+    func testWorkerFailureClassificationUsesStructuredCodeNotHTTPStatus() {
+        let expired = AccountRefreshFailure(
+            error: PushServerError.serverRejected(401, .providerSessionExpired)
+        )
+        XCTAssertEqual(expired.kind, .authentication)
+        XCTAssertTrue(expired.requiresRelink)
+
+        let forbidden = AccountRefreshFailure(
+            error: PushServerError.serverRejected(403, .providerRequestForbidden)
+        )
+        XCTAssertEqual(forbidden.kind, .update)
+        XCTAssertFalse(forbidden.requiresRelink)
+        XCTAssertEqual(forbidden.title, "ChatGPT blocked the Worker check")
+        XCTAssertTrue(forbidden.message.contains("was not activated on the Worker"))
+
+        let unauthorized = AccountRefreshFailure(
+            error: PushServerError.serverRejected(401, .unauthorized)
+        )
+        XCTAssertEqual(unauthorized.kind, .update)
+        XCTAssertFalse(unauthorized.requiresRelink)
+        XCTAssertEqual(unauthorized.title, "Worker pairing expired")
+
+        for status in [401, 403] {
+            let unclassified = AccountRefreshFailure(
+                error: PushServerError.serverRejected(status)
+            )
+            XCTAssertEqual(unclassified.kind, .update)
+            XCTAssertFalse(unclassified.requiresRelink)
+        }
+    }
+
+    func testWorkerRelinkKeepsExpiredFailureUntilWorkerConfirmsSuccess() {
+        XCTAssertFalse(AccountRelinkFailurePolicy.clearsFailureAfterLocalCredentialSave(
+            serverMonitoringEnabled: true
+        ))
+        XCTAssertTrue(AccountRelinkFailurePolicy.clearsFailureAfterLocalCredentialSave(
+            serverMonitoringEnabled: false
+        ))
+        XCTAssertTrue(WorkerCredentialReplacementPolicy.isConfirmed(
+            sessionStatus: .active
+        ))
+        XCTAssertFalse(WorkerCredentialReplacementPolicy.isConfirmed(
+            sessionStatus: .expired
+        ))
+        XCTAssertFalse(WorkerCredentialReplacementPolicy.isConfirmed(
+            sessionStatus: nil
+        ))
+    }
+
+    func testWorkerRelinkProgressDoesNotReturnToProviderStartAfterAuthorization() {
+        let accountID = UUID()
+        let verifying = AccountLinkProgress.verifyingWorker(
+            accountID: accountID,
+            canRetryWithoutAuthorization: true
+        )
+        let failed = AccountLinkProgress.workerVerificationFailed(
+            accountID: accountID,
+            canRetryWithoutAuthorization: true
+        )
+
+        XCTAssertTrue(verifying.applies(to: accountID))
+        XCTAssertTrue(verifying.isVerifyingWorker)
+        XCTAssertTrue(verifying.canRetryWithoutAuthorization)
+        XCTAssertTrue(failed.applies(to: accountID))
+        XCTAssertFalse(failed.isVerifyingWorker)
+        XCTAssertTrue(failed.canRetryWithoutAuthorization)
+        XCTAssertFalse(AccountLinkProgress.idle.applies(to: accountID))
+    }
+
+    func testRemoteOnlyWorkerRelinkFailureRequiresExplicitNewAuthorization() {
+        let failed = AccountLinkProgress.workerVerificationFailed(
+            accountID: UUID(),
+            canRetryWithoutAuthorization: false
+        )
+
+        XCTAssertFalse(failed.canRetryWithoutAuthorization)
+    }
+
     func testServerAccountOperationGateSerializesOneAccount() async {
         let gate = ServerAccountOperationGate()
         let accountID = UUID()
@@ -1231,6 +2021,36 @@ final class ParsingTests: XCTestCase {
         )
     }
 
+    func testMissingRemoteSourceCanBeRecreatedOnlyFromConsentedLocalCredentials() {
+        let attached = AccountMonitorSettings(
+            monitorOnSelfHostedServer: true,
+            selfHostedServerConsentURL: "https://push.example.com",
+            selfHostedServerConsentRevision: 4,
+            remoteWorkerAccountID: String(repeating: "a", count: 43),
+            workerAccountReference: String(repeating: "b", count: 43)
+        )
+
+        let recovered = ServerMonitoringRecovery.detachingMissingRemoteSource(
+            in: attached,
+            hasLocalCredentials: true
+        )
+        XCTAssertEqual(recovered?.monitorOnSelfHostedServer, true)
+        XCTAssertEqual(recovered?.selfHostedServerConsentRevision, 4)
+        XCTAssertNil(recovered?.remoteWorkerAccountID)
+        XCTAssertNil(recovered?.workerAccountReference)
+
+        XCTAssertNil(ServerMonitoringRecovery.detachingMissingRemoteSource(
+            in: attached,
+            hasLocalCredentials: false
+        ))
+        var disabled = attached
+        disabled.monitorOnSelfHostedServer = false
+        XCTAssertNil(ServerMonitoringRecovery.detachingMissingRemoteSource(
+            in: disabled,
+            hasLocalCredentials: true
+        ))
+    }
+
     func testCleanupRecoveryMatchesWorkerOriginDespiteIntervalChange() {
         let cleanup = PushServerSettings(
             mode: .custom,
@@ -1256,6 +2076,27 @@ final class ParsingTests: XCTestCase {
             cleanup: cleanup,
             current: otherWorker
         ))
+    }
+
+    private func chatGPTCredential(
+        workspaceID: String,
+        expiresAt: TimeInterval
+    ) -> AccountCredentials {
+        let claims: [String: Any] = [
+            "exp": expiresAt,
+            "https://api.openai.com/auth": ["chatgpt_account_id": workspaceID]
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: claims)
+        let payload = data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        return AccountCredentials(
+            accessToken: "test-access",
+            refreshToken: "test-refresh",
+            idToken: "header.\(payload).signature",
+            expiresAt: Date(timeIntervalSince1970: expiresAt)
+        )
     }
 }
 
@@ -1618,6 +2459,107 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(merged.first?.accountID, target.id)
         XCTAssertEqual(merged.first?.remainingPercent, 70)
         XCTAssertEqual(merged.first?.source, .server)
+    }
+
+    func testHistoryMergePreservesNewestDetectorStateForSameChatGPTIdentity() async throws {
+        let store = try makeStore()
+        let firstDate = Date(timeIntervalSince1970: 2_000_000_000)
+        let duplicateDate = firstDate.addingTimeInterval(300)
+        let nextDate = duplicateDate.addingTimeInterval(300)
+        let canonical = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Canonical",
+            workspaceID: "same-workspace", plan: "Pro", addedAt: firstDate
+        )
+        let duplicate = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Duplicate",
+            workspaceID: canonical.workspaceID, plan: "Pro", addedAt: duplicateDate
+        )
+        let resetAt = firstDate.addingTimeInterval(6 * 24 * 60 * 60)
+        _ = try await store.record(
+            snapshot: makeSnapshot(
+                account: canonical,
+                at: firstDate,
+                weeklyRemaining: 40,
+                weeklyResetAt: resetAt
+            ),
+            account: canonical,
+            source: .background,
+            now: firstDate
+        )
+        _ = try await store.record(
+            snapshot: makeSnapshot(
+                account: duplicate,
+                at: duplicateDate,
+                weeklyRemaining: 70,
+                weeklyResetAt: resetAt
+            ),
+            account: duplicate,
+            source: .background,
+            now: duplicateDate
+        )
+
+        _ = try await store.mergeAccount(
+            sourceID: duplicate.id,
+            into: canonical.id,
+            now: duplicateDate
+        )
+        let result = try await store.record(
+            snapshot: makeSnapshot(
+                account: canonical,
+                at: nextDate,
+                weeklyRemaining: 71,
+                weeklyResetAt: resetAt
+            ),
+            account: canonical,
+            source: .background,
+            now: nextDate
+        )
+
+        XCTAssertTrue(result.pendingNotifications.isEmpty)
+        XCTAssertEqual(result.points.filter { $0.accountID == canonical.id }.count, 3)
+        XCTAssertFalse(result.points.contains { $0.accountID == duplicate.id })
+
+        let repeated = try await store.mergeAccount(
+            sourceID: duplicate.id,
+            into: canonical.id,
+            now: nextDate
+        )
+        XCTAssertEqual(repeated, result.points)
+    }
+
+    func testHistoryIdentityMergeDoesNotApplyDefaultThirtyFiveDayPruning() async throws {
+        let store = try makeStore()
+        let mergeDate = Date(timeIntervalSince1970: 2_000_000_000)
+        let oldDate = mergeDate.addingTimeInterval(-60 * 24 * 60 * 60)
+        let canonical = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Canonical",
+            workspaceID: "same-workspace", plan: "Pro", addedAt: oldDate
+        )
+        let duplicate = MonitoredAccount(
+            id: UUID(), providerID: .chatGPT, displayName: "Duplicate",
+            workspaceID: canonical.workspaceID, plan: "Pro", addedAt: oldDate
+        )
+        _ = try await store.record(
+            snapshot: makeSnapshot(
+                account: duplicate,
+                at: oldDate,
+                weeklyRemaining: 60,
+                weeklyResetAt: oldDate.addingTimeInterval(7 * 24 * 60 * 60)
+            ),
+            account: duplicate,
+            source: .background,
+            now: oldDate
+        )
+
+        let merged = try await store.mergeAccount(
+            sourceID: duplicate.id,
+            into: canonical.id,
+            now: mergeDate
+        )
+
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged.first?.accountID, canonical.id)
+        XCTAssertEqual(merged.first?.recordedAt, oldDate)
     }
 
     func testDuplicateBankedCreditIDsDoNotCrashOrDoubleCount() async throws {
@@ -2070,6 +3012,91 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertFalse(decoded.monitorOnSelfHostedServer)
         XCTAssertNil(decoded.selfHostedServerConsentURL)
         XCTAssertEqual(decoded.selfHostedServerConsentRevision, 0)
+        XCTAssertFalse(decoded.uploadsDeviceUsageToWorker)
+        XCTAssertNil(decoded.deviceUsageWorkerURL)
+        XCTAssertEqual(decoded.deviceUsageConsentRevision, 0)
+        XCTAssertEqual(decoded.deviceUsageNextSequence, 1)
+    }
+
+    func testDeviceUsageSnapshotEncodingIsCredentialFreeAndExact() throws {
+        let account = MonitoredAccount(
+            id: UUID(),
+            providerID: .chatGPT,
+            displayName: "Private account name",
+            workspaceID: "private-workspace",
+            plan: "Pro",
+            addedAt: .now,
+            profileName: "Private profile",
+            email: "private@example.com"
+        )
+        let snapshot = UsageSnapshot(
+            accountID: account.id,
+            providerName: "ChatGPT",
+            accountName: account.displayName,
+            accountProviderID: .chatGPT,
+            plan: account.plan,
+            primary: UsageWindow(
+                title: "Limit",
+                usedPercent: 20,
+                resetsAt: Date(timeIntervalSince1970: 2_000_000_600),
+                windowMinutes: nil,
+                kind: nil,
+                identifier: "limit"
+            ),
+            secondary: nil,
+            availableResetCount: 1,
+            resetCredits: [ResetCredit(
+                id: "private-provider-reset-id",
+                expiresAt: nil,
+                status: nil,
+                grantedAt: nil
+            )],
+            fetchedAt: Date(timeIntervalSince1970: 2_000_000_000)
+        )
+
+        let data = try PushServerClient.deviceUsageSnapshotBody(
+            account: account,
+            snapshot: snapshot,
+            consentRevision: 7,
+            sequence: 11
+        )
+        let text = try XCTUnwrap(String(data: data, encoding: .utf8))
+        for privateValue in [
+            account.id.uuidString,
+            account.displayName,
+            account.workspaceID,
+            account.profileName!,
+            account.email!,
+            "private-provider-reset-id",
+            "credentials",
+            "access_token",
+            "refresh_token",
+            "id_token",
+        ] {
+            XCTAssertFalse(text.contains(privateValue))
+        }
+
+        let keys = try PushServerClient.deviceUsageSnapshotKeys(
+            account: account,
+            snapshot: snapshot,
+            consentRevision: 7,
+            sequence: 11
+        )
+        XCTAssertEqual(keys.root, ["consent_revision", "sequence", "observed_at", "snapshot"])
+        XCTAssertEqual(keys.snapshot, [
+            "provider_id", "plan", "windows", "available_reset_count",
+            "reset_credits", "reset_credits_authoritative",
+        ])
+        XCTAssertEqual(keys.resetCredit, ["expires_at", "status", "granted_at"])
+        let json = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let projection = try XCTUnwrap(json["snapshot"] as? [String: Any])
+        let window = try XCTUnwrap((projection["windows"] as? [[String: Any]])?.first)
+        XCTAssertTrue(window["kind"] is NSNull)
+        XCTAssertTrue(window["window_minutes"] is NSNull)
+        let credit = try XCTUnwrap((projection["reset_credits"] as? [[String: Any]])?.first)
+        XCTAssertTrue(credit["expires_at"] is NSNull)
+        XCTAssertTrue(credit["status"] is NSNull)
+        XCTAssertTrue(credit["granted_at"] is NSNull)
     }
 
     func testServerConsentRevisionSurvivesSettingsPersistence() throws {
@@ -2086,6 +3113,120 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertEqual(decoded.selfHostedServerConsentRevision, 42)
         XCTAssertEqual(decoded.selfHostedServerConsentURL, "https://push.example")
         XCTAssertTrue(decoded.monitorOnSelfHostedServer)
+    }
+
+    func testDeviceUsageConsentRoundTripsWithoutEnablingCredentialMonitoring() throws {
+        let uploadedAt = Date(timeIntervalSince1970: 2_000_000_000)
+        let settings = AccountMonitorSettings(
+            monitorOnSelfHostedServer: false,
+            uploadsDeviceUsageToWorker: true,
+            deviceUsageWorkerURL: "https://worker.example",
+            deviceUsageConsentRevision: 4,
+            deviceUsageNextSequence: 9,
+            deviceUsageLastUploadedAt: uploadedAt,
+            deviceUsageLastError: "Retry pending"
+        )
+
+        let decoded = try JSONDecoder().decode(
+            AccountMonitorSettings.self,
+            from: JSONEncoder().encode(settings)
+        )
+        XCTAssertFalse(decoded.monitorOnSelfHostedServer)
+        XCTAssertTrue(decoded.uploadsDeviceUsageToWorker)
+        XCTAssertEqual(decoded.deviceUsageWorkerURL, "https://worker.example")
+        XCTAssertEqual(decoded.deviceUsageConsentRevision, 4)
+        XCTAssertEqual(decoded.deviceUsageNextSequence, 9)
+        XCTAssertEqual(decoded.deviceUsageLastUploadedAt, uploadedAt)
+        XCTAssertEqual(decoded.deviceUsageLastError, "Retry pending")
+    }
+
+    func testDeviceUsageSequencePolicyRejectsUnsafeBoundaries() {
+        XCTAssertFalse(DeviceUsageSequencePolicy.isValid(0))
+        XCTAssertTrue(DeviceUsageSequencePolicy.isValid(1))
+        XCTAssertEqual(DeviceUsageSequencePolicy.next(after: 1), 2)
+        XCTAssertEqual(
+            DeviceUsageSequencePolicy.next(after: ServerConsentRevisionPolicy.maximum - 2),
+            ServerConsentRevisionPolicy.maximum - 1
+        )
+        XCTAssertNil(DeviceUsageSequencePolicy.next(
+            after: ServerConsentRevisionPolicy.maximum - 1
+        ))
+        XCTAssertFalse(DeviceUsageSequencePolicy.isValid(
+            ServerConsentRevisionPolicy.maximum
+        ))
+        XCTAssertNil(DeviceUsageSequencePolicy.next(after: Int64.max))
+    }
+
+    @MainActor
+    func testEnableRaceRecordsDurableDeletionBeforeAttemptAndKeepsItOnFailure() async {
+        enum ExpectedFailure: Error { case offline }
+        var events: [String] = []
+
+        let succeeded = await DeviceUsageEnableCompensation.run(
+            recordDeletionIntent: { events.append("record") },
+            deleteSource: {
+                events.append("delete")
+                throw ExpectedFailure.offline
+            },
+            clearDeletionIntent: { events.append("clear") }
+        )
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(events, ["record", "delete"])
+    }
+
+    @MainActor
+    func testEnableRaceClearsDurableDeletionOnlyAfterConfirmedDelete() async {
+        var events: [String] = []
+
+        let succeeded = await DeviceUsageEnableCompensation.run(
+            recordDeletionIntent: { events.append("record") },
+            deleteSource: { events.append("delete") },
+            clearDeletionIntent: { events.append("clear") }
+        )
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(events, ["record", "delete", "clear"])
+    }
+
+    func testDuplicateMergePreservesOnlyCanonicalDeviceUsageConsent() {
+        let canonical = AccountMonitorSettings(
+            uploadsDeviceUsageToWorker: false,
+            deviceUsageConsentRevision: 2
+        )
+        let duplicate = AccountMonitorSettings(
+            uploadsDeviceUsageToWorker: true,
+            deviceUsageWorkerURL: "https://must-not-enable.example",
+            deviceUsageConsentRevision: 8,
+            deviceUsageNextSequence: 12
+        )
+        let merged = DirectChatGPTDuplicateMergePolicy.mergedSettings(
+            canonical: canonical,
+            duplicate: duplicate
+        )
+
+        XCTAssertFalse(merged.uploadsDeviceUsageToWorker)
+        XCTAssertNil(merged.deviceUsageWorkerURL)
+        XCTAssertEqual(merged.deviceUsageConsentRevision, 2)
+        XCTAssertEqual(merged.deviceUsageNextSequence, 1)
+    }
+
+    func testDuplicateMergeProtectsActiveOrPendingDeviceUsageSources() {
+        XCTAssertFalse(DirectChatGPTDuplicateMergePolicy.protectsDeviceUsageSource(nil))
+        XCTAssertFalse(DirectChatGPTDuplicateMergePolicy.protectsDeviceUsageSource(.init()))
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.protectsDeviceUsageSource(
+            .init(uploadsDeviceUsageToWorker: true)
+        ))
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.protectsDeviceUsageSource(
+            .init(deviceUsageWorkerURL: "https://worker.example")
+        ))
+        XCTAssertFalse(DirectChatGPTDuplicateMergePolicy.protectsDeviceUsageSource(
+            .init(deviceUsageConsentRevision: 1)
+        ))
+        XCTAssertTrue(DirectChatGPTDuplicateMergePolicy.protectsDeviceUsageSource(
+            nil,
+            hasPendingDeletion: true
+        ))
     }
 
     func testServerHistoryMergeKeepsOnlyMatchingAccountAndProvider() async throws {
@@ -2579,6 +3720,134 @@ final class MacUsageHistoryPresentationTests: XCTestCase {
         XCTAssertEqual(selected.upperBound, latest)
         XCTAssertEqual(selected.lowerBound, latest.addingTimeInterval(-7 * 24 * 60 * 60))
         XCTAssertEqual(series.points.map(\.recordedAt), [recent, latest])
+    }
+
+    func testCodexCLICredentialParserReadsChatGPTAuthSchema() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "auth_mode": "chatgpt",
+            "last_refresh": "2030-01-02T03:04:05.678Z",
+            "tokens": [
+                "access_token": "codex-access-placeholder",
+                "account_id": "account-123",
+                "id_token": "codex-id-placeholder",
+                "refresh_token": "codex-refresh-placeholder"
+            ]
+        ])
+
+        let parsed = try CodexCLICredentialParser.parse(data)
+
+        XCTAssertEqual(parsed.accountID, "account-123")
+        XCTAssertEqual(
+            parsed.lastRefresh.timeIntervalSince1970,
+            ISO8601DateFormatter().date(from: "2030-01-02T03:04:05Z")!
+                .addingTimeInterval(0.678).timeIntervalSince1970,
+            accuracy: 0.001
+        )
+        XCTAssertEqual(parsed.credentials.accessToken, "codex-access-placeholder")
+        XCTAssertEqual(parsed.credentials.idToken, "codex-id-placeholder")
+        XCTAssertEqual(parsed.credentials.refreshToken, "codex-refresh-placeholder")
+    }
+
+    func testCodexCLICredentialParserRejectsOtherAuthModesWithoutLeakingValues() throws {
+        let sensitivePlaceholder = "credential-value-must-not-appear"
+        let data = try JSONSerialization.data(withJSONObject: [
+            "auth_mode": "apikey",
+            "last_refresh": "2030-01-02T03:04:05Z",
+            "tokens": [
+                "access_token": sensitivePlaceholder,
+                "account_id": "account-123",
+                "id_token": sensitivePlaceholder,
+                "refresh_token": sensitivePlaceholder
+            ]
+        ])
+
+        XCTAssertThrowsError(try CodexCLICredentialParser.parse(data)) { error in
+            XCTAssertEqual(
+                error as? LocalCLICredentialImportError,
+                .invalidCredential(.codex)
+            )
+            XCTAssertFalse(error.localizedDescription.contains(sensitivePlaceholder))
+        }
+    }
+
+    func testClaudeCodeCredentialParserReadsKeychainSchemaAndMilliseconds() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "claudeAiOauth": [
+                "accessToken": "claude-access-placeholder",
+                "refreshToken": "claude-refresh-placeholder",
+                "expiresAt": 2_000_000_000_000,
+                "subscriptionType": "max",
+                "rateLimitTier": "default_claude_max_20x",
+                "scopes": ["user:profile", "user:inference"]
+            ]
+        ])
+
+        let parsed = try ClaudeCodeCredentialParser.parse(data)
+
+        XCTAssertEqual(
+            LocalCLICredentialRuntime.claudeCodeKeychainService,
+            "Claude Code-credentials"
+        )
+        XCTAssertEqual(parsed.credentials.accessToken, "claude-access-placeholder")
+        XCTAssertEqual(parsed.credentials.refreshToken, "claude-refresh-placeholder")
+        XCTAssertEqual(parsed.credentials.expiresAt, Date(timeIntervalSince1970: 2_000_000_000))
+        XCTAssertEqual(parsed.subscriptionType, "max")
+        XCTAssertEqual(parsed.rateLimitTier, "default_claude_max_20x")
+        XCTAssertEqual(parsed.scopes, ["user:profile", "user:inference"])
+        XCTAssertEqual(parsed.planHint, "Claude Max 20x")
+    }
+
+    func testLocalCLICredentialCapabilityReportsRuntimeRestrictions() {
+        let sandboxed = LocalCLICredentialCapabilityPolicy.capability(
+            source: .codex,
+            isMacOS: true,
+            isSandboxed: true,
+            resourceAccess: .available
+        )
+        XCTAssertFalse(sandboxed.isAvailable)
+        XCTAssertEqual(sandboxed.unavailableReason, .sandboxed)
+
+        let inaccessible = LocalCLICredentialCapabilityPolicy.capability(
+            source: .claudeCode,
+            isMacOS: true,
+            isSandboxed: false,
+            resourceAccess: .inaccessible
+        )
+        XCTAssertFalse(inaccessible.isAvailable)
+        XCTAssertEqual(inaccessible.unavailableReason, .inaccessible)
+
+        let unsupported = LocalCLICredentialCapabilityPolicy.capability(
+            source: .codex,
+            isMacOS: false,
+            isSandboxed: false,
+            resourceAccess: .available
+        )
+        XCTAssertFalse(unsupported.isAvailable)
+        XCTAssertEqual(unsupported.unavailableReason, .unsupportedPlatform)
+
+        let available = LocalCLICredentialCapabilityPolicy.capability(
+            source: .codex,
+            isMacOS: true,
+            isSandboxed: false,
+            resourceAccess: .available
+        )
+        XCTAssertTrue(available.isAvailable)
+        XCTAssertNil(available.unavailableReason)
+    }
+
+    func testLocalCLIImportOnlyReplacesWorkerCredentialForMatchedMonitoredAccount() {
+        XCTAssertTrue(LocalCLICredentialImportPolicy.requiresWorkerCredentialReplacement(
+            deduplicatedExistingAccount: true,
+            existingAccountUsesWorkerMonitoring: true
+        ))
+        XCTAssertFalse(LocalCLICredentialImportPolicy.requiresWorkerCredentialReplacement(
+            deduplicatedExistingAccount: false,
+            existingAccountUsesWorkerMonitoring: true
+        ))
+        XCTAssertFalse(LocalCLICredentialImportPolicy.requiresWorkerCredentialReplacement(
+            deduplicatedExistingAccount: true,
+            existingAccountUsesWorkerMonitoring: false
+        ))
     }
 
     private func point(

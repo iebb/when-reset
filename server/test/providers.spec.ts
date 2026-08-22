@@ -98,11 +98,12 @@ describe("server-side provider adapters", () => {
     expect(result.snapshot.available_reset_count).toBe(2);
     expect(result.snapshot.reset_credits).toEqual([]);
     expect(result.snapshot.reset_credits_authoritative).toBe(false);
-    expect(result.account_identity).toBe("user:user-stable-123");
+    expect(result.account_identity)
+      .toBe("user:user-stable-123|account:workspace-test");
     expect(fetchMock.mock.calls[0]?.[0]).toBe("https://chatgpt.com/backend-api/me");
   });
 
-  it("uses a stable token identity when the ChatGPT profile check is temporarily unavailable", async () => {
+  it("keeps collecting ChatGPT quota without merging when profile verification is unavailable", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(null, { status: 503 }))
       .mockResolvedValueOnce(Response.json({
@@ -128,7 +129,42 @@ describe("server-side provider adapters", () => {
       expires_at: 2_100_000_000,
     }, 1_700_000_000);
 
-    expect(result.account_identity).toBe("user:stable-token-user");
+    expect(result.account_identity).toBeUndefined();
+    expect(result.snapshot.windows).toHaveLength(1);
+    expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
+      "https://chatgpt.com/backend-api/me",
+      "https://chatgpt.com/backend-api/wham/usage",
+      "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits",
+    ]);
+  });
+
+  it("keeps collecting ChatGPT quota when a Codex-scoped token cannot read the profile", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(null, { status: 403 }))
+      .mockResolvedValueOnce(Response.json({
+        rate_limit: {
+          primary_window: {
+            used_percent: 10,
+            limit_window_seconds: 604_800,
+            reset_at: 2_000_604_800,
+          },
+        },
+      }))
+      .mockResolvedValueOnce(Response.json({ credits: [], available_count: 0 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await fetchProviderUsage({
+      provider_id: "chatgpt",
+      workspace_id: "workspace-test",
+      plan: null,
+    }, {
+      access_token: "codex-scoped-access",
+      refresh_token: "test-refresh",
+      id_token: unsignedJWT({ sub: "stable-token-user" }),
+      expires_at: 2_100_000_000,
+    }, 1_700_000_000);
+
+    expect(result.account_identity).toBeUndefined();
     expect(result.snapshot.windows).toHaveLength(1);
     expect(fetchMock.mock.calls.map((call) => call[0])).toEqual([
       "https://chatgpt.com/backend-api/me",
@@ -392,7 +428,8 @@ describe("server-side provider adapters", () => {
       expires_at: null,
     }, now);
 
-    expect(result.account_identity).toBe("creator:user-stable");
+    expect(result.account_identity)
+      .toBe("creator:user-stable|key:openrouter-test-key");
     expect(result.snapshot.plan).toBe("Free tier");
     expect(result.snapshot.windows).toEqual([]);
     expect(result.snapshot.api_balance).toMatchObject({
@@ -428,6 +465,13 @@ describe("server-side provider adapters", () => {
       remaining: 100,
       is_unlimited: false,
     });
+  });
+
+  it("scopes OpenRouter identity to the exact key as well as its creator", () => {
+    const first = providerTesting.openRouterAccountIdentity("creator-1", "key-a");
+    expect(providerTesting.openRouterAccountIdentity("creator-1", "key-a")).toBe(first);
+    expect(providerTesting.openRouterAccountIdentity("creator-1", "key-b")).not.toBe(first);
+    expect(providerTesting.openRouterAccountIdentity("creator-2", "key-a")).not.toBe(first);
   });
 
   it.each(["accounts/team-one", "team-one"])(
