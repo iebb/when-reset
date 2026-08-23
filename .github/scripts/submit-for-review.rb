@@ -1,4 +1,5 @@
 require "base64"
+require "digest"
 require "json"
 require "net/http"
 require "openssl"
@@ -271,6 +272,139 @@ def apply_release_notes(token, version_id, release_notes, dry_run)
   end
 end
 
+def upload_asset_part(operation, file_data)
+  uri = URI(operation.fetch("url"))
+  request = Net::HTTP::Put.new(uri)
+  operation.fetch("requestHeaders", []).each do |header|
+    request[header.fetch("name")] = header.fetch("value")
+  end
+  request.body = file_data.byteslice(operation.fetch("offset"), operation.fetch("length"))
+  response = Net::HTTP.start(
+    uri.host,
+    uri.port,
+    use_ssl: uri.scheme == "https",
+    open_timeout: 15,
+    read_timeout: 120
+  ) { |http| http.request(request) }
+  return if response.code.to_i.between?(200, 299)
+
+  raise "App Store Connect screenshot upload failed with HTTP #{response.code}"
+end
+
+def ensure_desktop_screenshot(token, version_id, screenshot_path, dry_run, deadline, poll_seconds)
+  raise "macOS screenshot does not exist at #{screenshot_path}" unless File.file?(screenshot_path)
+
+  localizations = request_json(
+    :get,
+    "/v1/appStoreVersions/#{version_id}/appStoreVersionLocalizations?limit=50",
+    token
+  ).fetch("data")
+  localization = localizations.find { |candidate| candidate.dig("attributes", "locale") == "en-US" } || localizations.first
+  raise "App Store version #{version_id} has no localization for a desktop screenshot" unless localization
+
+  sets = request_json(
+    :get,
+    api_path(
+      "/v1/appStoreVersionLocalizations/#{localization.fetch("id")}/appScreenshotSets",
+      { "filter[screenshotDisplayType]" => "APP_DESKTOP", "limit" => "10" }
+    ),
+    token
+  ).fetch("data")
+  screenshot_set = sets.find { |candidate| candidate.dig("attributes", "screenshotDisplayType") == "APP_DESKTOP" }
+
+  unless screenshot_set
+    if dry_run
+      puts "Would create an APP_DESKTOP screenshot set and upload #{File.basename(screenshot_path)}."
+      return
+    end
+
+    screenshot_set = request_json(
+      :post,
+      "/v1/appScreenshotSets",
+      token,
+      {
+        data: {
+          type: "appScreenshotSets",
+          attributes: { screenshotDisplayType: "APP_DESKTOP" },
+          relationships: {
+            appStoreVersionLocalization: {
+              data: { type: "appStoreVersionLocalizations", id: localization.fetch("id") }
+            }
+          }
+        }
+      }
+    ).fetch("data")
+    puts "Created the APP_DESKTOP screenshot set."
+  end
+
+  screenshots = request_json(
+    :get,
+    "/v1/appScreenshotSets/#{screenshot_set.fetch("id")}/appScreenshots?limit=10",
+    token
+  ).fetch("data")
+  if screenshots.any? { |screenshot| screenshot.dig("attributes", "assetDeliveryState", "state") == "COMPLETE" }
+    puts "The APP_DESKTOP screenshot set already contains a processed screenshot."
+    return
+  end
+
+  if dry_run
+    puts "Would upload #{File.basename(screenshot_path)} to the APP_DESKTOP screenshot set."
+    return
+  end
+
+  file_data = File.binread(screenshot_path)
+  reservation = request_json(
+    :post,
+    "/v1/appScreenshots",
+    token,
+    {
+      data: {
+        type: "appScreenshots",
+        attributes: { fileName: File.basename(screenshot_path), fileSize: file_data.bytesize },
+        relationships: {
+          appScreenshotSet: { data: { type: "appScreenshotSets", id: screenshot_set.fetch("id") } }
+        }
+      }
+    }
+  ).fetch("data")
+
+  reservation.dig("attributes", "uploadOperations").to_a.each do |operation|
+    upload_asset_part(operation, file_data)
+  end
+
+  screenshot_id = reservation.fetch("id")
+  request_json(
+    :patch,
+    "/v1/appScreenshots/#{screenshot_id}",
+    token,
+    {
+      data: {
+        type: "appScreenshots",
+        id: screenshot_id,
+        attributes: { uploaded: true, sourceFileChecksum: Digest::MD5.hexdigest(file_data) }
+      }
+    }
+  )
+
+  loop do
+    screenshot = request_json(:get, "/v1/appScreenshots/#{screenshot_id}", token).fetch("data")
+    delivery = screenshot.dig("attributes", "assetDeliveryState") || {}
+    state = delivery["state"]
+    if state == "COMPLETE"
+      puts "Uploaded and processed the APP_DESKTOP screenshot."
+      return
+    end
+    if state == "FAILED"
+      errors = Array(delivery["errors"]).map { |error| error["description"] || error["message"] }.compact
+      raise "App Store Connect rejected the desktop screenshot#{errors.empty? ? "" : ": #{errors.join("; ")}"}"
+    end
+    raise "Timed out waiting for the desktop screenshot to finish processing" if Time.now >= deadline
+
+    puts "Waiting for Apple to process the desktop screenshot..."
+    sleep poll_seconds
+  end
+end
+
 def attach_build(token, version_id, build_id, dry_run)
   current = request_json(:get, "/v1/appStoreVersions/#{version_id}/relationships/build", token).fetch("data", nil)
   if current && current.fetch("id") == build_id
@@ -371,6 +505,7 @@ bundle_id = required_env("APP_BUNDLE_ID")
 marketing_version = required_env("MARKETING_VERSION")
 build_number = required_env("BUILD_NUMBER")
 release_notes = ENV["RELEASE_NOTES"].to_s.strip
+macos_screenshot_path = ENV["MACOS_SCREENSHOT_PATH"].to_s.strip
 platforms = required_env("REVIEW_PLATFORMS").split(",").map { |value| value.strip.upcase }.reject(&:empty?)
 timeout_seconds = Integer(ENV.fetch("REVIEW_PROCESSING_TIMEOUT_SECONDS", "3600"))
 poll_seconds = Integer(ENV.fetch("REVIEW_POLL_SECONDS", "60"))
@@ -399,6 +534,9 @@ platforms.each do |platform|
   end
 
   attach_build(token, version_id, build.fetch("id"), dry_run)
+  if platform == "MAC_OS" && !macos_screenshot_path.empty?
+    ensure_desktop_screenshot(token, version_id, macos_screenshot_path, dry_run, deadline, poll_seconds)
+  end
   submit_for_review(token, app_id, version_id, platform, dry_run)
 end
 

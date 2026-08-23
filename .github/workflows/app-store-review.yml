@@ -77,6 +77,7 @@ jobs:
           REVIEW_PLATFORMS: ${{ inputs.platform == 'both' && 'IOS,MAC_OS' || inputs.platform == 'macos' && 'MAC_OS' || 'IOS' }}
           RELEASE_NOTES: ${{ inputs.release_notes }}
           REVIEW_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          MACOS_SCREENSHOT_PATH: .github/assets/app-store/macos-1280x800.png
         run: |
           set -o pipefail
           ruby .github/scripts/submit-for-review.rb | tee "$RUNNER_TEMP/submit.log"
