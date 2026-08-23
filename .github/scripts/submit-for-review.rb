@@ -147,6 +147,11 @@ def find_or_create_version(token, app_id, marketing_version, platform, dry_run)
   if existing
     state = version_state(existing)
     unless EDITABLE_VERSION_STATES.include?(state)
+      if dry_run
+        puts "Found #{platform} App Store version #{marketing_version} (#{state})."
+        return existing
+      end
+
       raise "App Store version #{marketing_version} for #{platform} is #{state} and can no longer be edited"
     end
 
