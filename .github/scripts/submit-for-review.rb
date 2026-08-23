@@ -131,18 +131,18 @@ def await_valid_build(token, app_id, marketing_version, build_number, platform, 
 end
 
 def find_or_create_version(token, app_id, marketing_version, platform, dry_run)
-  existing = request_json(
+  versions = request_json(
     :get,
     api_path(
       "/v1/apps/#{app_id}/appStoreVersions",
       {
-        "filter[versionString]" => marketing_version,
         "filter[platform]" => platform,
-        "limit" => "10"
+        "limit" => "50"
       }
     ),
     token
-  ).fetch("data").first
+  ).fetch("data")
+  existing = versions.find { |version| version.dig("attributes", "versionString") == marketing_version }
 
   if existing
     state = version_state(existing)
@@ -157,6 +157,35 @@ def find_or_create_version(token, app_id, marketing_version, platform, dry_run)
 
     puts "Reusing #{platform} App Store version #{marketing_version} (#{state})."
     return existing
+  end
+
+  editable_versions = versions.select { |version| EDITABLE_VERSION_STATES.include?(version_state(version)) }
+  if editable_versions.length > 1
+    raise "Multiple editable App Store versions exist for #{platform}; refusing to choose one"
+  end
+
+  if editable_versions.one?
+    editable = editable_versions.first
+    old_version = editable.dig("attributes", "versionString")
+    if dry_run
+      puts "Would update #{platform} App Store version #{old_version} to #{marketing_version}."
+      return editable
+    end
+
+    updated = request_json(
+      :patch,
+      "/v1/appStoreVersions/#{editable.fetch("id")}",
+      token,
+      {
+        data: {
+          type: "appStoreVersions",
+          id: editable.fetch("id"),
+          attributes: { versionString: marketing_version }
+        }
+      }
+    ).fetch("data")
+    puts "Updated #{platform} App Store version #{old_version} to #{marketing_version}."
+    return updated
   end
 
   if dry_run
