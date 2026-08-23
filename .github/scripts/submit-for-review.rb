@@ -533,7 +533,8 @@ def submit_for_review(token, app_id, version_id, platform, dry_run)
     token
   ).fetch("data").reject { |submission| CLOSED_SUBMISSION_STATES.include?(submission.dig("attributes", "state")) }.first
 
-  if open_submission && open_submission.dig("attributes", "submitted") == true
+  submitted_states = %w[WAITING_FOR_REVIEW IN_REVIEW UNRESOLVED_ISSUES]
+  if open_submission && submitted_states.include?(open_submission.dig("attributes", "state"))
     puts "A #{platform} review submission is already with Apple (#{open_submission.dig("attributes", "state")}); nothing to do."
     return
   end
