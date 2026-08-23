@@ -134,9 +134,8 @@ def find_or_create_version(token, app_id, marketing_version, platform, dry_run)
   existing = request_json(
     :get,
     api_path(
-      "/v1/appStoreVersions",
+      "/v1/apps/#{app_id}/appStoreVersions",
       {
-        "filter[app]" => app_id,
         "filter[versionString]" => marketing_version,
         "filter[platform]" => platform,
         "limit" => "10"

@@ -78,6 +78,7 @@ jobs:
           RELEASE_NOTES: ${{ inputs.release_notes }}
           REVIEW_DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: |
+          set -o pipefail
           ruby .github/scripts/submit-for-review.rb | tee "$RUNNER_TEMP/submit.log"
           {
             echo "### ${{ inputs.marketing_version }} (${{ inputs.build_number }}) · ${{ inputs.platform }}"
