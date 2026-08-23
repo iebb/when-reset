@@ -184,8 +184,8 @@ def app_has_released_version?(token, app_id, platform)
   request_json(
     :get,
     api_path(
-      "/v1/appStoreVersions",
-      { "filter[app]" => app_id, "filter[platform]" => platform, "limit" => "50" }
+      "/v1/apps/#{app_id}/appStoreVersions",
+      { "filter[platform]" => platform, "limit" => "50" }
     ),
     token
   ).fetch("data").any? { |version| version_state(version) == "READY_FOR_SALE" }
