@@ -188,7 +188,9 @@ def app_has_released_version?(token, app_id, platform)
       { "filter[platform]" => platform, "limit" => "50" }
     ),
     token
-  ).fetch("data").any? { |version| version_state(version) == "READY_FOR_SALE" }
+  ).fetch("data").any? do |version|
+    %w[READY_FOR_DISTRIBUTION READY_FOR_SALE].include?(version_state(version))
+  end
 end
 
 def apply_release_notes(token, version_id, release_notes, dry_run)
