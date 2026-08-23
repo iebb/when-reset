@@ -68,11 +68,20 @@ def request_json(method, path, token_provider, body = nil)
 
   unless response.code.to_i.between?(200, 299)
     detail = begin
-      JSON.parse(response.body).fetch("errors", []).flat_map do |error|
-        messages = [error["detail"] || error["title"]]
-        messages.concat(Array(error.dig("meta", "associatedErrors")).map { |associated| associated["detail"] || associated["title"] })
-        messages.compact
-      end.join("; ")
+      collect_messages = lambda do |value|
+        case value
+        when Hash
+          value.flat_map do |key, nested|
+            message = %w[detail title].include?(key) && nested.is_a?(String) ? [nested] : []
+            message + collect_messages.call(nested)
+          end
+        when Array
+          value.flat_map { |nested| collect_messages.call(nested) }
+        else
+          []
+        end
+      end
+      collect_messages.call(JSON.parse(response.body)).uniq.join("; ")
     rescue StandardError
       ""
     end
