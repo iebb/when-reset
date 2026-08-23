@@ -57,7 +57,8 @@ def request_json(method, path, token_provider, body = nil)
   request_class = {
     get: Net::HTTP::Get,
     post: Net::HTTP::Post,
-    patch: Net::HTTP::Patch
+    patch: Net::HTTP::Patch,
+    delete: Net::HTTP::Delete
   }.fetch(method)
   request = request_class.new(uri)
   request["Authorization"] = "Bearer #{token_provider.call}"
@@ -291,8 +292,10 @@ def upload_asset_part(operation, file_data)
   raise "App Store Connect screenshot upload failed with HTTP #{response.code}"
 end
 
-def ensure_desktop_screenshot(token, version_id, screenshot_path, dry_run, deadline, poll_seconds)
-  raise "macOS screenshot does not exist at #{screenshot_path}" unless File.file?(screenshot_path)
+def ensure_desktop_screenshots(token, version_id, screenshot_paths, dry_run, deadline, poll_seconds)
+  screenshot_paths.each do |screenshot_path|
+    raise "macOS screenshot does not exist at #{screenshot_path}" unless File.file?(screenshot_path)
+  end
 
   localizations = request_json(
     :get,
@@ -314,7 +317,7 @@ def ensure_desktop_screenshot(token, version_id, screenshot_path, dry_run, deadl
 
   unless screenshot_set
     if dry_run
-      puts "Would create an APP_DESKTOP screenshot set and upload #{File.basename(screenshot_path)}."
+      puts "Would create an APP_DESKTOP screenshot set and upload #{screenshot_paths.length} screenshot(s)."
       return
     end
 
@@ -342,65 +345,159 @@ def ensure_desktop_screenshot(token, version_id, screenshot_path, dry_run, deadl
     "/v1/appScreenshotSets/#{screenshot_set.fetch("id")}/appScreenshots?limit=10",
     token
   ).fetch("data")
-  if screenshots.any? { |screenshot| screenshot.dig("attributes", "assetDeliveryState", "state") == "COMPLETE" }
-    puts "The APP_DESKTOP screenshot set already contains a processed screenshot."
+  desired_checksums = screenshot_paths.map { |path| Digest::MD5.file(path).hexdigest }
+  current_checksums = screenshots.map do |screenshot|
+    screenshot.dig("attributes", "sourceFileChecksum").to_s.downcase
+  end
+  all_complete = screenshots.all? do |screenshot|
+    screenshot.dig("attributes", "assetDeliveryState", "state") == "COMPLETE"
+  end
+  if all_complete && current_checksums == desired_checksums
+    puts "The APP_DESKTOP screenshot set already contains the requested screenshots in order."
     return
   end
 
   if dry_run
-    puts "Would upload #{File.basename(screenshot_path)} to the APP_DESKTOP screenshot set."
+    puts "Would replace #{screenshots.length} APP_DESKTOP screenshot(s) with #{screenshot_paths.length} requested screenshot(s)."
     return
   end
 
-  file_data = File.binread(screenshot_path)
-  reservation = request_json(
-    :post,
-    "/v1/appScreenshots",
-    token,
-    {
-      data: {
-        type: "appScreenshots",
-        attributes: { fileName: File.basename(screenshot_path), fileSize: file_data.bytesize },
-        relationships: {
-          appScreenshotSet: { data: { type: "appScreenshotSets", id: screenshot_set.fetch("id") } }
+  screenshots.each do |screenshot|
+    request_json(:delete, "/v1/appScreenshots/#{screenshot.fetch("id")}", token)
+  end
+  puts "Removed #{screenshots.length} previous APP_DESKTOP screenshot(s)." unless screenshots.empty?
+
+  screenshot_paths.each do |screenshot_path|
+    file_data = File.binread(screenshot_path)
+    reservation = request_json(
+      :post,
+      "/v1/appScreenshots",
+      token,
+      {
+        data: {
+          type: "appScreenshots",
+          attributes: { fileName: File.basename(screenshot_path), fileSize: file_data.bytesize },
+          relationships: {
+            appScreenshotSet: { data: { type: "appScreenshotSets", id: screenshot_set.fetch("id") } }
+          }
         }
       }
-    }
-  ).fetch("data")
+    ).fetch("data")
 
-  reservation.dig("attributes", "uploadOperations").to_a.each do |operation|
-    upload_asset_part(operation, file_data)
+    reservation.dig("attributes", "uploadOperations").to_a.each do |operation|
+      upload_asset_part(operation, file_data)
+    end
+
+    screenshot_id = reservation.fetch("id")
+    request_json(
+      :patch,
+      "/v1/appScreenshots/#{screenshot_id}",
+      token,
+      {
+        data: {
+          type: "appScreenshots",
+          id: screenshot_id,
+          attributes: { uploaded: true, sourceFileChecksum: Digest::MD5.hexdigest(file_data) }
+        }
+      }
+    )
+
+    loop do
+      screenshot = request_json(:get, "/v1/appScreenshots/#{screenshot_id}", token).fetch("data")
+      delivery = screenshot.dig("attributes", "assetDeliveryState") || {}
+      state = delivery["state"]
+      if state == "COMPLETE"
+        puts "Uploaded and processed #{File.basename(screenshot_path)}."
+        break
+      end
+      if state == "FAILED"
+        errors = Array(delivery["errors"]).map { |error| error["description"] || error["message"] }.compact
+        raise "App Store Connect rejected #{File.basename(screenshot_path)}#{errors.empty? ? "" : ": #{errors.join("; ")}"}"
+      end
+      raise "Timed out waiting for #{File.basename(screenshot_path)} to finish processing" if Time.now >= deadline
+
+      puts "Waiting for Apple to process #{File.basename(screenshot_path)}..."
+      sleep poll_seconds
+    end
   end
 
-  screenshot_id = reservation.fetch("id")
+  processed = request_json(
+    :get,
+    "/v1/appScreenshotSets/#{screenshot_set.fetch("id")}/appScreenshots?limit=10",
+    token
+  ).fetch("data")
+  processed_checksums = processed.map do |screenshot|
+    screenshot.dig("attributes", "sourceFileChecksum").to_s.downcase
+  end
+  processed_complete = processed.all? do |screenshot|
+    screenshot.dig("attributes", "assetDeliveryState", "state") == "COMPLETE"
+  end
+  unless processed_checksums == desired_checksums && processed_complete
+    raise "APP_DESKTOP screenshot verification did not match the requested files and order"
+  end
+  puts "Verified #{processed.length} APP_DESKTOP screenshot(s) in the requested order."
+end
+
+def cancel_review_submission(token, app_id, platform, dry_run)
+  submissions = request_json(
+    :get,
+    api_path(
+      "/v1/reviewSubmissions",
+      { "filter[app]" => app_id, "filter[platform]" => platform, "limit" => "50" }
+    ),
+    token
+  ).fetch("data")
+  submission = submissions.find do |candidate|
+    %w[READY_FOR_REVIEW WAITING_FOR_REVIEW IN_REVIEW UNRESOLVED_ISSUES].include?(
+      candidate.dig("attributes", "state")
+    )
+  end
+  unless submission
+    puts "No active #{platform} review submission needs to be withdrawn."
+    return
+  end
+
+  state = submission.dig("attributes", "state")
+  if dry_run
+    puts "Would withdraw #{platform} review submission #{submission.fetch("id")} (#{state})."
+    return
+  end
+
   request_json(
     :patch,
-    "/v1/appScreenshots/#{screenshot_id}",
+    "/v1/reviewSubmissions/#{submission.fetch("id")}",
     token,
     {
       data: {
-        type: "appScreenshots",
-        id: screenshot_id,
-        attributes: { uploaded: true, sourceFileChecksum: Digest::MD5.hexdigest(file_data) }
+        type: "reviewSubmissions",
+        id: submission.fetch("id"),
+        attributes: { canceled: true }
       }
     }
   )
+  puts "Withdrew #{platform} review submission #{submission.fetch("id")} (was #{state})."
+end
 
+def await_editable_version(token, app_id, marketing_version, platform, deadline, poll_seconds)
   loop do
-    screenshot = request_json(:get, "/v1/appScreenshots/#{screenshot_id}", token).fetch("data")
-    delivery = screenshot.dig("attributes", "assetDeliveryState") || {}
-    state = delivery["state"]
-    if state == "COMPLETE"
-      puts "Uploaded and processed the APP_DESKTOP screenshot."
-      return
+    version = request_json(
+      :get,
+      api_path(
+        "/v1/apps/#{app_id}/appStoreVersions",
+        { "filter[platform]" => platform, "limit" => "50" }
+      ),
+      token
+    ).fetch("data").find do |candidate|
+      candidate.dig("attributes", "versionString") == marketing_version
     end
-    if state == "FAILED"
-      errors = Array(delivery["errors"]).map { |error| error["description"] || error["message"] }.compact
-      raise "App Store Connect rejected the desktop screenshot#{errors.empty? ? "" : ": #{errors.join("; ")}"}"
-    end
-    raise "Timed out waiting for the desktop screenshot to finish processing" if Time.now >= deadline
 
-    puts "Waiting for Apple to process the desktop screenshot..."
+    return if version && EDITABLE_VERSION_STATES.include?(version_state(version))
+    if Time.now >= deadline
+      raise "Timed out waiting for #{platform} version #{marketing_version} to become editable"
+    end
+
+    state = version ? version_state(version) : "missing"
+    puts "Waiting for #{platform} version #{marketing_version} to become editable (#{state})..."
     sleep poll_seconds
   end
 end
@@ -505,7 +602,12 @@ bundle_id = required_env("APP_BUNDLE_ID")
 marketing_version = required_env("MARKETING_VERSION")
 build_number = required_env("BUILD_NUMBER")
 release_notes = ENV["RELEASE_NOTES"].to_s.strip
-macos_screenshot_path = ENV["MACOS_SCREENSHOT_PATH"].to_s.strip
+macos_screenshot_paths = ENV["MACOS_SCREENSHOT_PATHS"].to_s.split(",").map(&:strip).reject(&:empty?)
+if macos_screenshot_paths.empty?
+  legacy_screenshot_path = ENV["MACOS_SCREENSHOT_PATH"].to_s.strip
+  macos_screenshot_paths = [legacy_screenshot_path] unless legacy_screenshot_path.empty?
+end
+replace_macos_screenshots = ENV["REPLACE_MACOS_SCREENSHOTS"] == "1"
 platforms = required_env("REVIEW_PLATFORMS").split(",").map { |value| value.strip.upcase }.reject(&:empty?)
 timeout_seconds = Integer(ENV.fetch("REVIEW_PROCESSING_TIMEOUT_SECONDS", "3600"))
 poll_seconds = Integer(ENV.fetch("REVIEW_POLL_SECONDS", "60"))
@@ -520,6 +622,17 @@ deadline = Time.now + timeout_seconds
 
 platforms.each do |platform|
   puts "== #{platform} =="
+  if platform == "MAC_OS" && replace_macos_screenshots
+    cancel_review_submission(token, app_id, platform, dry_run)
+    await_editable_version(
+      token,
+      app_id,
+      marketing_version,
+      platform,
+      deadline,
+      poll_seconds
+    ) unless dry_run
+  end
   build = await_valid_build(token, app_id, marketing_version, build_number, platform, deadline, poll_seconds)
   version = find_or_create_version(token, app_id, marketing_version, platform, dry_run)
   next if version.nil?
@@ -534,8 +647,15 @@ platforms.each do |platform|
   end
 
   attach_build(token, version_id, build.fetch("id"), dry_run)
-  if platform == "MAC_OS" && !macos_screenshot_path.empty?
-    ensure_desktop_screenshot(token, version_id, macos_screenshot_path, dry_run, deadline, poll_seconds)
+  if platform == "MAC_OS" && !macos_screenshot_paths.empty?
+    ensure_desktop_screenshots(
+      token,
+      version_id,
+      macos_screenshot_paths,
+      dry_run,
+      deadline,
+      poll_seconds
+    )
   end
   submit_for_review(token, app_id, version_id, platform, dry_run)
 end
