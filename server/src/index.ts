@@ -5657,30 +5657,35 @@ async function finishMonitorRun(
   ).bind(status, completedAt, runID).run();
 }
 
+// Start from the small source tables. CROSS JOIN fixes the loop order so SQLite range-searches
+// the existing per-account history indexes instead of scanning every retained history row.
+const PRUNE_USAGE_HISTORY_SQL = `DELETE FROM usage_history
+  WHERE rowid IN (
+    SELECT history.rowid
+    FROM monitored_accounts AS source
+    CROSS JOIN usage_history AS history INDEXED BY usage_history_account_time
+    WHERE history.device_id = source.device_id
+      AND history.account_id = source.account_id
+      AND history.recorded_at < ? - source.history_retention_days * 86400
+  )`;
+
+const PRUNE_DEVICE_SNAPSHOT_HISTORY_SQL = `DELETE FROM device_snapshot_history
+  WHERE rowid IN (
+    SELECT history.rowid
+    FROM device_snapshot_sources AS source
+    CROSS JOIN device_snapshot_history AS history
+      INDEXED BY device_snapshot_history_account_time
+    WHERE history.device_id = source.device_id
+      AND history.account_id = source.account_id
+      AND history.recorded_at < ? - source.history_retention_days * 86400
+  )`;
+
 async function pruneHistory(env: Env, now: number): Promise<void> {
-  await env.DB.prepare(
-    `DELETE FROM usage_history
-     WHERE EXISTS (
-       SELECT 1 FROM monitored_accounts
-       WHERE monitored_accounts.device_id = usage_history.device_id
-         AND monitored_accounts.account_id = usage_history.account_id
-         AND usage_history.recorded_at
-           < ? - monitored_accounts.history_retention_days * 86400
-     )`
-  ).bind(now).run();
+  await env.DB.prepare(PRUNE_USAGE_HISTORY_SQL).bind(now).run();
 }
 
 async function pruneDeviceSnapshotHistory(env: Env, now: number): Promise<void> {
-  await env.DB.prepare(
-    `DELETE FROM device_snapshot_history
-     WHERE EXISTS (
-       SELECT 1 FROM device_snapshot_sources
-       WHERE device_snapshot_sources.device_id = device_snapshot_history.device_id
-         AND device_snapshot_sources.account_id = device_snapshot_history.account_id
-         AND device_snapshot_history.recorded_at
-           < ? - device_snapshot_sources.history_retention_days * 86400
-     )`
-  ).bind(now).run();
+  await env.DB.prepare(PRUNE_DEVICE_SNAPSHOT_HISTORY_SQL).bind(now).run();
 }
 
 async function pruneLinkSessions(env: Env, now: number): Promise<void> {
@@ -6620,9 +6625,13 @@ export const testing = {
   parseAccountUpload,
   parseRegistration,
   processQueue,
+  pruneDeviceSnapshotHistory,
   pruneDeviceDeletionTombstones,
+  pruneHistory,
   pruneLinkSessions,
   pruneMonitorRuns,
+  PRUNE_DEVICE_SNAPSHOT_HISTORY_SQL,
+  PRUNE_USAGE_HISTORY_SQL,
   refreshMonitorRun,
   runScheduledRefresh,
   snapshotForCredentials,

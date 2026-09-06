@@ -274,6 +274,8 @@ beforeEach(async () => {
     )`),
     env.DB.prepare(`CREATE UNIQUE INDEX usage_history_account_row_tag
       ON usage_history(device_id, account_id, row_tag)`),
+    env.DB.prepare(`CREATE INDEX usage_history_account_time
+      ON usage_history(device_id, account_id, recorded_at, metric_id)`),
     env.DB.prepare(`CREATE TABLE device_snapshot_history (
       device_id TEXT NOT NULL,
       account_id TEXT NOT NULL,
@@ -293,6 +295,8 @@ beforeEach(async () => {
       FOREIGN KEY (device_id, account_id)
         REFERENCES device_snapshot_sources(device_id, account_id) ON DELETE CASCADE
     )`),
+    env.DB.prepare(`CREATE INDEX device_snapshot_history_account_time
+      ON device_snapshot_history(device_id, account_id, recorded_at, metric_id)`),
   ]);
 });
 
@@ -459,6 +463,67 @@ function rawES256SignatureToDER(raw: Uint8Array): Uint8Array {
   const s = integer(raw.slice(32));
   return Uint8Array.from([0x30, r.length + s.length, ...r, ...s]);
 }
+
+describe("history retention pruning", () => {
+  it("drives cleanup from the small source tables and range-searches the history indexes", async () => {
+    const plans = await Promise.all([
+      env.DB.prepare(`EXPLAIN QUERY PLAN ${testing.PRUNE_USAGE_HISTORY_SQL}`)
+        .bind(2_000_000_000).all<{ detail: string }>(),
+      env.DB.prepare(`EXPLAIN QUERY PLAN ${testing.PRUNE_DEVICE_SNAPSHOT_HISTORY_SQL}`)
+        .bind(2_000_000_000).all<{ detail: string }>(),
+    ]);
+
+    const usageDetails = plans[0].results.map((row) => row.detail);
+    expect(usageDetails).toContain("SCAN source");
+    expect(usageDetails.some((detail) =>
+      detail.includes("SEARCH history USING COVERING INDEX usage_history_account_time")
+    )).toBe(true);
+    expect(usageDetails).not.toContain("SCAN usage_history");
+
+    const deviceDetails = plans[1].results.map((row) => row.detail);
+    expect(deviceDetails).toContain("SCAN source");
+    expect(deviceDetails.some((detail) =>
+      detail.includes("SEARCH history USING COVERING INDEX device_snapshot_history_account_time")
+    )).toBe(true);
+    expect(deviceDetails).not.toContain("SCAN device_snapshot_history");
+  });
+
+  it("preserves fresh rows while deleting rows beyond each account's retention", async () => {
+    await registerDevice();
+    const accountID = "019f724a-3414-4d52-ae37-0c7024a1ab98";
+    expect((await SELF.fetch(
+      `https://push.example/v1/devices/${deviceID}/accounts/${accountID}`,
+      {
+        method: "PUT",
+        headers: { authorization: `Bearer ${deviceSecret}` },
+        body: JSON.stringify({
+          ...accountRequestBody("chatgpt", 1),
+          history_retention_days: 1,
+        }),
+      },
+    )).status).toBe(201);
+
+    const now = 2_000_000_000;
+    const insert = (metricID: string, recordedAt: number) => env.DB.prepare(
+      `INSERT INTO usage_history (
+         device_id, account_id, provider_id, metric_id, metric_title, kind, window_minutes,
+         remaining_percent, recorded_at, resets_at, seconds_until_reset, plan
+       ) VALUES (?, ?, 'chatgpt', ?, 'Weekly limit', 'weekly', 10080, 50, ?, ?, 3600, 'Plus')`
+    ).bind(deviceID, accountID, metricID, recordedAt, recordedAt + 3_600);
+    await env.DB.batch([
+      insert("expired", now - 86_401),
+      insert("boundary", now - 86_400),
+      insert("fresh", now - 60),
+    ]);
+
+    await testing.pruneHistory(env, now);
+
+    const remaining = await env.DB.prepare(
+      "SELECT metric_id FROM usage_history ORDER BY metric_id"
+    ).all<{ metric_id: string }>();
+    expect(remaining.results.map((row) => row.metric_id)).toEqual(["boundary", "fresh"]);
+  });
+});
 
 describe("one-use Worker linking", () => {
   it("serves a same-origin monitoring dashboard with no-store security headers", async () => {
