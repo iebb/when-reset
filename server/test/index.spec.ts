@@ -475,16 +475,24 @@ describe("history retention pruning", () => {
 
     const usageDetails = plans[0].results.map((row) => row.detail);
     expect(usageDetails).toContain("SCAN source");
-    expect(usageDetails.some((detail) =>
-      detail.includes("SEARCH history USING COVERING INDEX usage_history_account_time")
-    )).toBe(true);
+    expect(usageDetails).toContain(
+      "SEARCH usage_history USING INTEGER PRIMARY KEY (rowid=?)"
+    );
+    expect(usageDetails).toContain(
+      "SEARCH history USING COVERING INDEX usage_history_account_time "
+      + "(device_id=? AND account_id=? AND recorded_at<?)"
+    );
     expect(usageDetails).not.toContain("SCAN usage_history");
 
     const deviceDetails = plans[1].results.map((row) => row.detail);
     expect(deviceDetails).toContain("SCAN source");
-    expect(deviceDetails.some((detail) =>
-      detail.includes("SEARCH history USING COVERING INDEX device_snapshot_history_account_time")
-    )).toBe(true);
+    expect(deviceDetails).toContain(
+      "SEARCH device_snapshot_history USING INTEGER PRIMARY KEY (rowid=?)"
+    );
+    expect(deviceDetails).toContain(
+      "SEARCH history USING COVERING INDEX device_snapshot_history_account_time "
+      + "(device_id=? AND account_id=? AND recorded_at<?)"
+    );
     expect(deviceDetails).not.toContain("SCAN device_snapshot_history");
   });
 
