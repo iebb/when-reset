@@ -78,7 +78,7 @@ jobs:
             ONLY_ACTIVE_ARCH=NO
 
   worker:
-    name: Cloudflare Worker
+    name: Cloudflare Worker and Linux server
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -103,3 +103,14 @@ jobs:
 
       - name: Test
         run: npm test
+
+      - name: Check Linux runtime and installer
+        run: |
+          npm run check:linux
+          npm run test:linux
+          npm run build:linux
+          bash -n install.sh
+          shellcheck install.sh scripts/test-linux-install.sh
+
+      - name: Test Linux installation and upgrade
+        run: sudo env WHEN_RESET_INSTALL_TEST=1 bash scripts/test-linux-install.sh

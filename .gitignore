@@ -15,3 +15,6 @@ WhenReset.xcodeproj/xcshareddata/xcodecloud/
 node_modules/
 .wrangler/
 .dev.vars
+server/dist/
+server/data/
+server/.env

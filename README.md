@@ -86,6 +86,20 @@ The Grok provider mark is adapted from CodexBar’s MIT-licensed provider asset 
 
 ## Push refresh server
 
+Deploy the optional server on [Linux on your own network](server/README.md#deploy-on-linux)
+or [Cloudflare Workers](server/README.md#deploy-on-cloudflare-workers). Linux runs the same
+dashboard and monitoring API with local SQLite storage, persistent jobs and a systemd service.
+Provider requests use the Linux server's outbound IP; choose a static public IP or stable NAT
+to keep account checks on a consistent network. An [installation script](server/install.sh)
+sets it up and preserves configuration and data on updates:
+
+```bash
+sudo bash server/install.sh --origin https://reset.example.com
+```
+
+Follow the Linux guide to configure HTTPS and link the app. Both deployments require
+explicit account-by-account monitoring consent.
+
 The optional [Cloudflare Worker](server/README.md) is self-hosted in the user’s Cloudflare account. It sends hourly silent refresh hints and can, only for accounts individually opted in by the user, encrypt provider credentials in D1 and record quota every 5 minutes or longer. The app merges those server samples into its 24-hour, 7-day, and 30-day usage charts. Opaque, deployment-specific account references attach retained Worker history to the matching local account and collapse differently named copies of the same verified ChatGPT profile. The app shows whether the Worker’s last provider check found an active or expired session; a new sign-in can replace an expired credential directly on the Worker. Credential upload and replacement are strictly write-only: no API route downloads plaintext credentials, encrypted envelopes, or fingerprints. Overlapping client accounts are fetched once per credential scope and cron occurrence. When Reset does not operate an official server.
 
 After unlocking the Worker dashboard with `REGISTRATION_ACCESS_KEY`, the operator can optionally enroll a WebAuthn passkey for later access. Apple devices can store and synchronize that passkey through iCloud Keychain, but the passkey is scoped to the exact Worker hostname and is separate from the app's synchronized provider credentials. Its private key never leaves the authenticator or password manager. Keep the registration key as the recovery method: changing the hostname requires enrollment on the new hostname, and rotating the registration key invalidates existing dashboard sessions and passkeys. See [dashboard passkeys and recovery](server/README.md#dashboard-passkeys-and-icloud-keychain).

@@ -2,7 +2,12 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/iebb/when-reset/tree/master/server)
 
-This isolated Cloudflare Worker template can:
+Run this self-hosted server on **Cloudflare Workers** or on a **Linux server on your own
+network**. Both deployments use the same API, dashboard, account monitoring and device
+linking flow. The Linux deployment sends provider requests directly through the server's
+network, so a server with a static public IP (or static NAT egress) keeps a stable source IP.
+
+Either deployment can:
 
 - send hourly silent APNs refresh hints to your own devices;
 - optionally monitor selected linked accounts every 5 minutes or longer; and
@@ -10,7 +15,136 @@ This isolated Cloudflare Worker template can:
 - provide a responsive website for account health, quota windows, reset times,
   API balances, device health, collection runs, and retained history.
 
-When Reset does not operate an official server. Server monitoring is off for every account by default. When you enable it for an account, the app uploads that account’s Keychain credentials only to the self-hosted Worker URL you configured.
+When Reset does not operate an official server. Server monitoring is off for every account by default. When you enable it for an account, the app uploads that account’s Keychain credentials only to the self-hosted server URL you configured.
+
+## Deploy on Linux
+
+Use a systemd server running Debian/Ubuntu or Fedora/RHEL-family Linux on x86_64 or arm64.
+The installer provisions a private Node.js 24 runtime, a dedicated `when-reset` user,
+SQLite storage, a persistent queue, and a service that starts on boot. It does not require a
+Cloudflare account, D1 or Queues. Provider requests leave from this machine; the software
+does not assign a static IP, change your router, or pin a changing residential connection.
+Use a static address from your hosting provider/ISP, or run behind your own stable NAT.
+
+From a checkout:
+
+```bash
+git clone --branch master https://github.com/iebb/when-reset.git
+cd when-reset
+sudo bash server/install.sh --origin https://reset.example.com
+```
+
+Or download the standalone installer, review it, and run it. It downloads `master` when
+there is no checkout next to the script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/iebb/when-reset/master/server/install.sh -o install-when-reset.sh
+less install-when-reset.sh
+sudo bash install-when-reset.sh --origin https://reset.example.com
+```
+
+The server listens on `127.0.0.1:8787`. Put an HTTPS reverse proxy in front of it and point
+your hostname at the server. For example, with Caddy installed, add this site block to its
+configuration and reload Caddy:
+
+```caddyfile
+reset.example.com {
+    reverse_proxy 127.0.0.1:8787
+}
+```
+
+Use a certificate trusted by your Apple devices and browser. For a private LAN or VPN,
+use a hostname and trusted certificate reachable on that network, with DNS validation or
+your existing certificate setup. Public Internet access is not required for monitoring;
+devices must be able to reach the HTTPS address to link and sync. Outbound HTTPS must reach
+the provider APIs and Apple's APNs service. HTTPS is required by the app, dashboard cookies
+and passkeys; exposing the raw HTTP port is not a substitute.
+
+Open `https://reset.example.com`, retrieve `REGISTRATION_ACCESS_KEY` with
+`sudo cat /etc/when-reset/server.env`, and follow the device-linking steps below. The file
+also contains the separate credential encryption key: keep it private. Existing app screens
+may say “Worker”; enter your Linux server's HTTPS origin in those same controls. Monitoring
+must still be enabled per account. Attaching an account to a server subscription makes app
+refreshes read that server's samples; accounts left in local mode still use the device's
+own network.
+
+### Linux configuration and operations
+
+| Setting or path | Purpose |
+| --- | --- |
+| `/etc/when-reset/server.env` | Configuration and two independently generated secrets; readable only by root and the service group |
+| `PUBLIC_ORIGIN` | Exact external HTTPS origin; used for links, origin checks and passkeys; incoming forwarded headers cannot override it |
+| `HOST`, `PORT` | Listen address and port; installer defaults to `127.0.0.1:8787` |
+| `/var/lib/when-reset/when-reset.sqlite` | Accounts, encrypted credentials, history, sessions and persistent jobs |
+| `/opt/when-reset/current` | Active application release and private Node.js runtime |
+| `/var/backups/when-reset/` | Protected configuration/data backups made before installer updates |
+
+The managed installation keeps `DATA_DIR=/var/lib/when-reset` so service permissions and
+backups cover all state. Use the manual setup below if you need custom filesystem paths.
+
+```bash
+sudo systemctl status when-reset
+sudo journalctl -u when-reset -f
+curl --fail http://127.0.0.1:8787/healthz
+sudo systemctl restart when-reset
+```
+
+The scheduler runs on UTC five-minute boundaries and sends hourly refresh hints. Jobs and
+completed schedule intervals survive restarts; missed quota samples cannot be reconstructed.
+The queue processes providers sequentially and retries failed deliveries up to three times,
+as on Workers. APNs uses native HTTP/2. SQLite batches remain transactional, including
+consent changes and credential updates. Run one service instance per database, on local disk.
+The installed service uses a file lock to reject a second process using the same state path.
+
+To update a checkout install, pull `master` and rerun the installer; for a standalone install,
+download and rerun the installer. Omit `--origin` to keep the existing origin. The build finishes
+before the service stops. The installer then backs up configuration/data, applies new
+migrations transactionally, switches releases and checks `/healthz`. Existing keys and
+accounts are retained. Old releases/runtimes and backups are kept for operator recovery;
+remove older copies according to your retention policy. If an upgrade fails, inspect the logs
+and keep its pre-update backup before retrying. The installer does not configure DNS, TLS or
+firewall rules.
+
+For a manual backup, stop the service, archive `/etc/when-reset` and `/var/lib/when-reset`
+together, then start it again. Protect backups like provider credentials. Restore the data
+and its matching encryption key together. Do not rotate `CREDENTIAL_ENCRYPTION_KEY` while
+stored accounts need it. To uninstall the service without deleting data:
+
+```bash
+sudo systemctl disable --now when-reset
+sudo rm /etc/systemd/system/when-reset.service
+sudo systemctl daemon-reload
+```
+
+Linux and Workers installations have separate databases, secrets, account references and
+passkeys. Existing Worker data is not transferred automatically. Link the Linux server in the
+app and opt in the accounts there; disable monitoring on the old deployment if you want all
+server-side checks to use your own network. If credentials were removed from the device,
+sign in again to upload them to the new server; neither deployment exports stored credentials.
+
+### Run without the installer
+
+With Node.js 24 and npm installed, run these commands from `server/`:
+
+```bash
+npm ci
+npm run build:linux
+umask 077
+cat > .env <<EOF
+PUBLIC_ORIGIN=https://reset.example.com
+HOST=127.0.0.1
+PORT=8787
+DATA_DIR=./data
+REGISTRATION_ACCESS_KEY=$(openssl rand -hex 32)
+CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32)
+EOF
+npm run start:linux
+```
+
+Create `.env` only on the first run; preserve both secrets on updates. Configure HTTPS as
+above. The build in `dist/` is standalone and needs only Node.js 24, its included schema and
+migrations, and the configuration. `npm run check:linux` and `npm run test:linux` check the
+adapter and run the existing API/provider regression suite on Node and SQLite.
 
 ## Shared APNs key
 
@@ -29,7 +163,7 @@ The app labels each APNs token as development or production. App Store and TestF
 
 Bundled key SHA-256: `9512a4e0063a0aa9ca5974d458c0d4fff6abd936c0d97e97d1814cd919530917`.
 
-## Deploy
+## Deploy on Cloudflare Workers
 
 Click the button above, sign in to Cloudflare, and choose names for the Worker, D1 database, and Queue. Cloudflare provisions and binds those resources from `wrangler.jsonc`; the deploy script initializes a new D1 database from `schema.sql`, applies tracked D1 migrations, and then deploys the Worker. Existing deployments keep their data while migrations add new cloud-sync fields.
 

@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node", "./worker-configuration.d.ts"]
+  },
+  "include": ["src/**/*.ts", "linux/**/*.ts", "vitest.linux.config.ts"]
+}

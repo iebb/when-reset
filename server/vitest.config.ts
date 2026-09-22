@@ -7,6 +7,7 @@ process.env.REGISTRATION_ACCESS_KEY ??= testServerAccessKey;
 process.env.CREDENTIAL_ENCRYPTION_KEY ??= testCredentialEncryptionKey;
 
 export default defineConfig({
+  test: { include: ["test/**/*.spec.ts"] },
   plugins: [cloudflareTest({
     wrangler: { configPath: "./wrangler.jsonc" },
     miniflare: {

@@ -1,0 +1,33 @@
+[Unit]
+Description=When Reset account monitoring server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=when-reset
+Group=when-reset
+WorkingDirectory=/var/lib/when-reset
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/when-reset/server.env
+ExecStart=/usr/bin/flock --no-fork --exclusive --nonblock /var/lib/when-reset/runtime.lock /opt/when-reset/current/node/bin/node /opt/when-reset/current/app/server.mjs
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+StateDirectory=when-reset
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/when-reset
+
+[Install]
+WantedBy=multi-user.target

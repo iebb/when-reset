@@ -9,7 +9,11 @@
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "deploy": "npm run db:initialize && npm run db:migrate && wrangler deploy",
     "test": "vitest run",
-    "types": "wrangler types"
+    "types": "wrangler types",
+    "check:linux": "tsc --noEmit -p tsconfig.linux.json",
+    "build:linux": "node scripts/build-linux.mjs",
+    "start:linux": "node --env-file-if-exists=.env dist/server.mjs",
+    "test:linux": "vitest run --config vitest.linux.config.ts"
   },
   "cloudflare": {
     "bindings": {
@@ -29,6 +33,7 @@
     "@cloudflare/vitest-pool-workers": "0.18.8",
     "@cloudflare/workers-types": "5.20260724.1",
     "@types/node": "24.10.13",
+    "esbuild": "0.28.1",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
     "wrangler": "4.114.0"

@@ -1,4 +1,6 @@
 import APNSPrivateKey from "../apns/WhenResetSharedAPNs.p8";
+import { timingSafeEqual } from "node:crypto";
+import type { RuntimeEnv as Env } from "./runtime";
 import {
   fetchProviderUsage,
   normalizeFireworksAccountResource,
@@ -114,7 +116,7 @@ type MonitorRunTarget = {
   run_id: string;
 };
 
-type QueueTarget = PushTarget | MonitorRunTarget;
+export type QueueTarget = PushTarget | MonitorRunTarget;
 
 type AccountUpload = {
   provider_id: ProviderID;
@@ -453,7 +455,7 @@ type APNSTokenRow = {
 };
 
 export default {
-  async fetch(request, env): Promise<Response> {
+  async fetch(request: Request, env): Promise<Response> {
     try {
       return await route(request, env);
     } catch (error) {
@@ -4764,7 +4766,7 @@ async function loadAccountSyncSourceRow(
   ).bind(deviceID, accountID).first<AccountSyncSourceRow>();
 }
 
-async function runScheduledRefresh(env: Env, scheduledTime: number): Promise<void> {
+export async function runScheduledRefresh(env: Env, scheduledTime: number): Promise<void> {
   const now = Math.floor(scheduledTime / 1_000);
   await enqueueRecoverableMonitorRuns(env, now);
   await Promise.all([
@@ -5010,7 +5012,7 @@ async function enqueueActiveDevices(env: Env): Promise<void> {
   console.log(JSON.stringify({ event: "scheduled_push_enqueued", enqueued }));
 }
 
-async function processQueue(
+export async function processQueue(
   batch: MessageBatch<QueueTarget>,
   env: Env,
   refreshMonitor: typeof refreshMonitorRun = refreshMonitorRun,
@@ -5756,7 +5758,7 @@ async function sendSilentPush(
 ): Promise<APNSResult> {
   validateAPNSConfiguration();
   const host = environment === "development" ? APNS_DEVELOPMENT_HOST : APNS_PRODUCTION_HOST;
-  const response = await fetch(`${host}/3/device/${token}`, {
+  const response = await (env.APNS_FETCH ?? fetch)(`${host}/3/device/${token}`, {
     method: "POST",
     headers: {
       authorization: `bearer ${authorization}`,
@@ -6424,7 +6426,7 @@ async function secretsMatch(candidate: string, storedHash: string): Promise<bool
   const candidateHash = await hashSecret(candidate);
   if (candidateHash.length !== storedHash.length) return false;
   const encoder = new TextEncoder();
-  return crypto.subtle.timingSafeEqual(
+  return timingSafeEqual(
     encoder.encode(candidateHash),
     encoder.encode(storedHash)
   );
@@ -6433,7 +6435,9 @@ async function secretsMatch(candidate: string, storedHash: string): Promise<bool
 function timingSafeEqualStrings(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
   const encoder = new TextEncoder();
-  return crypto.subtle.timingSafeEqual(encoder.encode(left), encoder.encode(right));
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
 async function hashSecret(secret: string): Promise<string> {
