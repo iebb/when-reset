@@ -478,11 +478,20 @@ export default {
   },
 
   async scheduled(controller, env, context): Promise<void> {
-    context.waitUntil(runScheduledRefresh(env, controller.scheduledTime));
+    context.waitUntil(runScheduledRefresh(env, controller.scheduledTime).catch(() => {
+      // The platform records rejected handlers; never give it underlying errors
+      // that could include SQL bindings, upstream bodies or request credentials.
+      throw new Error("Scheduled refresh failed");
+    }));
   },
 
   async queue(batch, env): Promise<void> {
-    await processQueue(batch as MessageBatch<QueueTarget>, env);
+    try {
+      await processQueue(batch as MessageBatch<QueueTarget>, env);
+    } catch {
+      // Rejecting still retries unacknowledged messages without logging their body.
+      throw new Error("Queue processing failed");
+    }
   },
 } satisfies ExportedHandler<Env>;
 
@@ -5093,15 +5102,17 @@ export async function processQueue(
 ): Promise<void> {
   const pushMessages = batch.messages.filter((message) => message.body.kind === "push");
   const monitorMessages = batch.messages.filter((message) => message.body.kind === "monitor_run");
-  const pushDelivery = pushMessages.length
+  let pushFailed = false;
+  const pushDelivery = (pushMessages.length
     ? deliverQueuedPushes(pushMessages, env)
-    : Promise.resolve();
+    : Promise.resolve()).catch(() => { pushFailed = true; });
   try {
     // Provider quota endpoints commonly rate-limit by account or connector. Keep APNs fan-out
     // parallel, but never burst independent provider refreshes from the same queue invocation.
     for (const message of monitorMessages) await refreshMonitor(message, env);
   } finally {
     await pushDelivery;
+    if (pushFailed) throw new Error("Queued push delivery failed");
   }
 }
 

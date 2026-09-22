@@ -80,4 +80,27 @@ describe("secret disclosure boundaries", () => {
         env.CREDENTIAL_ENCRYPTION_KEY]) expect(logs).not.toContain(secret);
     } finally { errorLog.mockRestore(); }
   });
+
+  it("sanitizes rejected background handlers while preserving platform failure semantics", async () => {
+    const failure = new Error(canary, { cause: canary });
+    failure.name = canary;
+    const testEnv = { ...env, DB: { prepare() { throw failure; } } } as unknown as RuntimeEnv;
+    const background: Promise<unknown>[] = [];
+    await worker.scheduled({ scheduledTime: Date.now() } as never, testEnv, {
+      waitUntil(promise: Promise<unknown>) { background.push(promise.catch((error: unknown) => error)); },
+    } as never);
+    const scheduled = await background[0] as Error;
+    expect(scheduled.message).toBe("Scheduled refresh failed");
+    expect(scheduled.cause).toBeUndefined();
+    for (const body of [
+      { kind: "monitor_run", run_id: canary },
+      { kind: "push", device_id: deviceID, apns_token: deviceToken },
+    ]) {
+      const error = await worker.queue({ messages: [{ body }] } as never, testEnv)
+        .catch((error: unknown) => error) as Error;
+      expect(error.message).toBe("Queue processing failed");
+      expect(error.cause).toBeUndefined();
+      expect(error.stack).not.toContain(canary);
+    }
+  });
 });

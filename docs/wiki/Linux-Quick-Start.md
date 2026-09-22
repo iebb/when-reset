@@ -94,7 +94,7 @@ curl --fail http://127.0.0.1:8787/healthz
 sudo journalctl -u when-reset --since '10 minutes ago' --no-pager
 ```
 
-The health endpoint should return `{"ok":true}`. After opting in an account, wait for the
+The health endpoint should return JSON containing `"ok": true`. After opting in an account, wait for the
 next UTC five-minute boundary and check its last successful sample in the dashboard.
 Providers can require longer intervals or backoff after errors. Silent notifications depend
 on Apple/device delivery and are not proof that a provider check succeeded.
