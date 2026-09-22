@@ -15,6 +15,15 @@ WhenReset.xcodeproj/xcshareddata/xcodecloud/
 node_modules/
 .wrangler/
 .dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+server.env
+server.env.*
 server/dist/
 server/data/
-server/.env

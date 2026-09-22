@@ -285,6 +285,13 @@ type DashboardHistoryRow = {
   plan: string | null;
 };
 
+type DashboardPlanChangeRow = {
+  change_id: number;
+  previous_plan: string;
+  plan: string;
+  changed_at: number;
+};
+
 type DashboardWindow = {
   title: string;
   kind: string | null;
@@ -1589,6 +1596,10 @@ async function deleteDashboardAccount(
         );
       }
       statements.push(
+        ...(mode === "purge" ? [env.DB.prepare(
+          `DELETE FROM account_plan_changes
+           WHERE source_kind = 'worker' AND device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id)] : []),
         env.DB.prepare(
           `DELETE FROM usage_history WHERE device_id = ? AND account_id = ?`
         ).bind(source.device_id, source.account_id),
@@ -1601,6 +1612,10 @@ async function deleteDashboardAccount(
       );
     } else if (mode === "purge") {
       statements.push(
+        env.DB.prepare(
+          `DELETE FROM account_plan_changes
+           WHERE source_kind = 'device' AND device_id = ? AND account_id = ?`
+        ).bind(source.device_id, source.account_id),
         env.DB.prepare(
           `DELETE FROM device_snapshot_history WHERE device_id = ? AND account_id = ?`
         ).bind(source.device_id, source.account_id),
@@ -1832,8 +1847,9 @@ async function dashboardAccountHistory(
   const sources = JSON.stringify(group.rows.map((source) => [
     source.source_kind, source.device_id, source.account_id,
   ]));
-  const historyResult = await env.DB.prepare(
-    `WITH requested_sources AS (
+  const [historyResult, planChangeResult] = await Promise.all([
+    env.DB.prepare(
+      `WITH requested_sources AS (
        SELECT json_extract(value, '$[0]') AS source_kind,
               json_extract(value, '$[1]') AS device_id,
               json_extract(value, '$[2]') AS account_id
@@ -1877,11 +1893,31 @@ async function dashboardAccountHistory(
             recorded_at, resets_at, plan
      FROM ranked_history
      WHERE duplicate_rank = 1
-     ORDER BY recorded_at DESC, metric_id LIMIT ?`
-  ).bind(sources, since, DASHBOARD_HISTORY_LIMIT + 1).all<DashboardHistoryRow>();
+       ORDER BY recorded_at DESC, metric_id LIMIT ?`
+    ).bind(sources, since, DASHBOARD_HISTORY_LIMIT + 1).all<DashboardHistoryRow>(),
+    env.DB.prepare(
+      `WITH requested_sources AS (
+         SELECT json_extract(value, '$[0]') AS source_kind,
+                json_extract(value, '$[1]') AS device_id,
+                json_extract(value, '$[2]') AS account_id
+         FROM json_each(?)
+       )
+       SELECT account_plan_changes.change_id, account_plan_changes.previous_plan,
+              account_plan_changes.plan, account_plan_changes.changed_at
+       FROM account_plan_changes
+       INNER JOIN requested_sources
+         ON requested_sources.source_kind = account_plan_changes.source_kind
+        AND requested_sources.device_id = account_plan_changes.device_id
+        AND requested_sources.account_id = account_plan_changes.account_id
+       WHERE account_plan_changes.changed_at >= ?
+       ORDER BY account_plan_changes.changed_at DESC, account_plan_changes.change_id DESC
+       LIMIT ?`
+    ).bind(sources, since, DASHBOARD_HISTORY_LIMIT + 1).all<DashboardPlanChangeRow>(),
+  ]);
 
   const rawRows = historyResult.results;
-  const truncated = rawRows.length > DASHBOARD_HISTORY_LIMIT;
+  const truncated = rawRows.length > DASHBOARD_HISTORY_LIMIT
+    || planChangeResult.results.length > DASHBOARD_HISTORY_LIMIT;
   const deduplicated = new Map<string, DashboardHistoryRow>();
   for (const row of rawRows.slice(0, DASHBOARD_HISTORY_LIMIT)) {
     if (!Number.isFinite(row.recorded_at) || !Number.isFinite(row.remaining_percent)
@@ -1927,6 +1963,22 @@ async function dashboardAccountHistory(
   const series = [...seriesByMetric.values()]
     .map((item) => ({ ...item, points: item.points.sort((a, b) => a.recorded_at - b.recorded_at) }))
     .sort((a, b) => a.title.localeCompare(b.title));
+  const planChanges: Array<{
+    previous_plan: string;
+    plan: string;
+    changed_at: number;
+  }> = [];
+  const seenPlanChanges = new Set<string>();
+  for (const change of planChangeResult.results.slice(0, DASHBOARD_HISTORY_LIMIT).reverse()) {
+    const previousPlan = safeDashboardText(change.previous_plan, 200);
+    const plan = safeDashboardText(change.plan, 200);
+    const changedAt = safeDashboardTimestamp(change.changed_at);
+    if (!previousPlan || !plan || previousPlan === plan || changedAt === null) continue;
+    const key = `${changedAt}\u0000${previousPlan}\u0000${plan}`;
+    if (seenPlanChanges.has(key)) continue;
+    seenPlanChanges.add(key);
+    planChanges.push({ previous_plan: previousPlan, plan, changed_at: changedAt });
+  }
   const row = group.representative;
   return dashboardJSON({
     account: {
@@ -1941,6 +1993,7 @@ async function dashboardAccountHistory(
     from: since,
     to: now,
     series,
+    plan_changes: planChanges,
     truncated,
   }, "history");
 }
@@ -3624,7 +3677,7 @@ async function uploadDeviceSnapshot(
     ),
   );
   const results = await env.DB.batch(statements);
-  if ((results[updateIndex]?.meta.changes ?? 0) !== 1) {
+  if ((results[updateIndex]?.meta.changes ?? 0) < 1) {
     const current = await loadDeviceSnapshotSource(env, deviceID, accountID);
     if (!current || current.consent_revision !== upload.consent_revision) {
       return json({ error: "consent_revision_conflict" }, 409, {
@@ -3669,6 +3722,15 @@ async function disableDeviceSnapshotSource(
           OR (excluded.consent_revision = device_snapshot_consent.consent_revision
               AND device_snapshot_consent.enabled = 0)`
     ).bind(deviceID, accountID, consentRevision, now),
+    env.DB.prepare(
+      `DELETE FROM account_plan_changes
+       WHERE source_kind = 'device' AND device_id = ? AND account_id = ?
+         AND EXISTS (
+           SELECT 1 FROM device_snapshot_consent
+           WHERE device_id = ? AND account_id = ?
+             AND consent_revision = ? AND enabled = 0
+         )`
+    ).bind(deviceID, accountID, deviceID, accountID, consentRevision),
     env.DB.prepare(
       `DELETE FROM device_snapshot_sources
        WHERE device_id = ? AND account_id = ?
@@ -3884,7 +3946,7 @@ async function upsertMonitoredAccount(
       "cache-control": "no-store",
     });
   }
-  if (consentChanges !== 1 || accountChanges !== 1) {
+  if (consentChanges !== 1 || accountChanges < 1) {
     throw new Error("Could not atomically save monitored account consent");
   }
   if (archived) {
@@ -3929,6 +3991,10 @@ async function upsertMonitoredAccount(
         ).bind(deviceID, accountID),
         env.DB.prepare(
           `DELETE FROM dashboard_account_archives WHERE device_id = ? AND account_id = ?`
+        ).bind(deviceID, accountID),
+        env.DB.prepare(
+          `DELETE FROM account_plan_changes
+           WHERE source_kind = 'worker' AND device_id = ? AND account_id = ?`
         ).bind(deviceID, accountID),
       ]);
     }
@@ -4250,7 +4316,7 @@ async function applyVerifiedCredentialResult(
     ),
   );
   const results = await env.DB.batch(statements);
-  const applied = (results[credentialUpdateIndex]?.meta.changes ?? 0) === 1;
+  const applied = (results[credentialUpdateIndex]?.meta.changes ?? 0) >= 1;
   if (applied) {
     if (remoteAuthorization) {
       await enqueueAccountRefreshHints(env, target.device_id, target.account_id);
@@ -4287,6 +4353,14 @@ async function disableMonitoredAccount(
          updated_at = excluded.updated_at
        WHERE excluded.consent_revision >= account_monitoring_consent.consent_revision`
     ).bind(deviceID, accountID, consentRevision, now),
+    env.DB.prepare(
+      `DELETE FROM account_plan_changes
+       WHERE source_kind = 'worker' AND device_id = ? AND account_id = ?
+         AND EXISTS (
+           SELECT 1 FROM account_monitoring_consent
+           WHERE device_id = ? AND account_id = ? AND consent_revision = ? AND enabled = 0
+         )`
+    ).bind(deviceID, accountID, deviceID, accountID, consentRevision),
     env.DB.prepare(
       `DELETE FROM usage_history
        WHERE device_id = ? AND account_id = ?
@@ -5203,7 +5277,7 @@ async function refreshMonitorRun(
       event: "account_monitor_failed",
       provider: source.provider_id,
       retryable: providerError?.retryable === true,
-      status: providerError?.status ?? 0,
+      status: safeHTTPStatus(providerError?.status),
     }));
     message.ack();
     return;
@@ -5419,7 +5493,7 @@ async function applyMonitorResultToTarget(
     ),
   ];
   const results = await env.DB.batch(statements);
-  if ((results[0]?.meta.changes ?? 0) === 1) {
+  if ((results[0]?.meta.changes ?? 0) >= 1) {
     await enqueueAccountRefreshHints(env, row.device_id, row.account_id);
     await propagateVerifiedCredentialToSameAccount(env, row, {
       credentials: targetCredentials,
@@ -5683,11 +5757,37 @@ const PRUNE_DEVICE_SNAPSHOT_HISTORY_SQL = `DELETE FROM device_snapshot_history
   )`;
 
 async function pruneHistory(env: Env, now: number): Promise<void> {
-  await env.DB.prepare(PRUNE_USAGE_HISTORY_SQL).bind(now).run();
+  await env.DB.batch([
+    env.DB.prepare(PRUNE_USAGE_HISTORY_SQL).bind(now),
+    env.DB.prepare(
+      `DELETE FROM account_plan_changes
+       WHERE change_id IN (
+         SELECT history.change_id FROM monitored_accounts AS source
+         CROSS JOIN account_plan_changes AS history INDEXED BY account_plan_changes_source_time
+         WHERE history.source_kind = 'worker'
+           AND history.device_id = source.device_id
+           AND history.account_id = source.account_id
+           AND history.changed_at < ? - source.history_retention_days * 86400
+       )`
+    ).bind(now),
+  ]);
 }
 
 async function pruneDeviceSnapshotHistory(env: Env, now: number): Promise<void> {
-  await env.DB.prepare(PRUNE_DEVICE_SNAPSHOT_HISTORY_SQL).bind(now).run();
+  await env.DB.batch([
+    env.DB.prepare(PRUNE_DEVICE_SNAPSHOT_HISTORY_SQL).bind(now),
+    env.DB.prepare(
+      `DELETE FROM account_plan_changes
+       WHERE change_id IN (
+         SELECT history.change_id FROM device_snapshot_sources AS source
+         CROSS JOIN account_plan_changes AS history INDEXED BY account_plan_changes_source_time
+         WHERE history.source_kind = 'device'
+           AND history.device_id = source.device_id
+           AND history.account_id = source.account_id
+           AND history.changed_at < ? - source.history_retention_days * 86400
+       )`
+    ).bind(now),
+  ]);
 }
 
 async function pruneLinkSessions(env: Env, now: number): Promise<void> {
@@ -5760,6 +5860,8 @@ async function sendSilentPush(
   const host = environment === "development" ? APNS_DEVELOPMENT_HOST : APNS_PRODUCTION_HOST;
   const response = await (env.APNS_FETCH ?? fetch)(`${host}/3/device/${token}`, {
     method: "POST",
+    redirect: "manual",
+    signal: AbortSignal.timeout(30_000),
     headers: {
       authorization: `bearer ${authorization}`,
       "apns-topic": APNS_TOPIC,
@@ -5773,11 +5875,47 @@ async function sendSilentPush(
   });
 
   if (response.ok) return { ok: true, status: response.status };
-  const body = (await response.text()).slice(0, 512);
-  let reason: string | undefined;
-  try { reason = (JSON.parse(body) as { reason?: string }).reason; } catch { reason = undefined; }
+  const reason = await safeAPNSReason(response);
   console.warn(JSON.stringify({ event: "apns_rejected", status: response.status, reason }));
   return { ok: false, status: response.status, reason };
+}
+
+// Only known protocol codes may cross the log/API boundary. Never echo upstream
+// bodies, which can include tokens, proxy diagnostics or arbitrary JSON values.
+const APNS_REASONS = new Set([
+  "BadDeviceToken", "Unregistered", "BadEnvironmentKeyInToken", "DeviceTokenNotForTopic",
+  "TopicDisallowed", "BadTopic", "MissingTopic", "InvalidProviderToken", "ExpiredProviderToken",
+  "MissingProviderToken", "TooManyProviderTokenUpdates", "TooManyRequests", "IdleTimeout",
+  "InternalServerError", "ServiceUnavailable", "Shutdown", "BadPriority", "BadExpirationDate",
+  "BadCollapseId", "BadMessageId", "BadPath", "MethodNotAllowed", "DuplicateHeaders",
+  "PayloadEmpty", "PayloadTooLarge", "Forbidden",
+]);
+
+async function safeAPNSReason(response: Response): Promise<string | undefined> {
+  if (!response.body) return undefined;
+  const reader = response.body.getReader();
+  try {
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > 1_024) return undefined;
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const body: unknown = JSON.parse(new TextDecoder().decode(bytes));
+    return isRecord(body) && typeof body.reason === "string" && APNS_REASONS.has(body.reason)
+      ? body.reason : undefined;
+  } catch {
+    return undefined;
+  } finally {
+    try { await reader.cancel(); } catch { /* Never log response errors. */ }
+    reader.releaseLock();
+  }
 }
 
 function isPermanentAPNSRejection(result: APNSResult): boolean {
@@ -6397,7 +6535,12 @@ function decodeHistoryCursor(value: string | null): { recordedAt: number; metric
 function monitorError(error: unknown, providerID: ProviderID): string {
   const credentialFailure = providerCredentialFailureCode(error, providerID);
   if (credentialFailure !== "provider_check_failed") return credentialFailure;
-  if (error instanceof ProviderFetchError) return error.message.slice(0, 240);
+  if (error instanceof ProviderFetchError) {
+    const status = safeHTTPStatus(error.status);
+    if (status === 429) return "Provider rate limit reached; retrying later.";
+    if (status) return `Provider request failed (HTTP ${status}).`;
+    return error.retryable ? "Provider request failed; retrying later." : "Provider returned unreadable data.";
+  }
   return "Server monitoring failed.";
 }
 
@@ -6477,13 +6620,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function safeError(error: unknown): string {
-  if (error instanceof ProviderFetchError) return `ProviderFetchError:${error.status}`;
-  if (error instanceof Error) return error.name.slice(0, 80) || "Error";
+  if (error instanceof ProviderFetchError) return `ProviderFetchError:${safeHTTPStatus(error.status)}`;
+  // Error.name, message, stack and cause may contain request or provider secrets.
+  if (error instanceof TypeError) return "TypeError";
+  if (error instanceof Error) return "Error";
   return "unknown_error";
 }
 
+function safeHTTPStatus(status: unknown): number {
+  return typeof status === "number" && Number.isInteger(status) && status >= 100 && status <= 599
+    ? status : 0;
+}
+
 function json(body: unknown, status = 200, headers: HeadersInit = {}): Response {
-  return Response.json(body, { status, headers });
+  return Response.json(body, { status, headers: linkSecurityHeaders(headers) });
 }
 
 function linkJSON(body: unknown, status = 200, headers: HeadersInit = {}): Response {
@@ -6518,8 +6668,10 @@ function assertDashboardResponseSafe(value: unknown, kind: DashboardResponseKind
     value,
     kind === "overview"
       ? ["version", "generated_at", "summary", "devices", "runs", "accounts"]
-      : ["account", "range", "from", "to", "series", "truncated"],
-    kind === "overview" ? ["summary", "devices", "runs", "accounts"] : ["account", "series"],
+      : ["account", "range", "from", "to", "series", "plan_changes", "truncated"],
+    kind === "overview"
+      ? ["summary", "devices", "runs", "accounts"]
+      : ["account", "series", "plan_changes"],
   );
   if (kind === "overview") {
     dashboardAllowedObject(root.summary, [
@@ -6574,6 +6726,9 @@ function assertDashboardResponseSafe(value: unknown, kind: DashboardResponseKind
         "recorded_at", "remaining_percent", "resets_at", "plan",
       ]);
     }
+  }
+  for (const change of dashboardAllowedArray(root.plan_changes)) {
+    dashboardAllowedObject(change, ["previous_plan", "plan", "changed_at"]);
   }
 }
 

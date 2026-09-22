@@ -15,4 +15,5 @@ await build({
   banner: { js: 'import { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
 });
 await cp("schema.sql", "dist/schema.sql");
+await cp("scripts/show-access-key.mjs", "dist/show-access-key.mjs");
 await cp("migrations", "dist/migrations", { recursive: true });

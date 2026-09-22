@@ -1,0 +1,17 @@
+title = "When Reset secret scanning"
+
+[extend]
+useDefault = true
+
+# This one APNs key is intentionally distributed with the official app's server.
+# check-public-secrets.mjs verifies its exact bytes in both the checkout and history.
+[[allowlists]]
+description = "Intentional shared APNs key, fingerprint checked separately"
+targetRules = ["private-key"]
+paths = ['''^server/apns/WhenResetSharedAPNs\.p8$''']
+
+[[allowlists]]
+description = "Documented SHA-256 of the intentional shared APNs key"
+targetRules = ["generic-api-key"]
+regexTarget = "secret"
+regexes = ['''^9512a4e0063a0aa9ca5974d458c0d4fff6abd936c0d97e97d1814cd919530917$''']

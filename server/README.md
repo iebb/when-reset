@@ -7,6 +7,13 @@ network**. Both deployments use the same API, dashboard, account monitoring and 
 linking flow. The Linux deployment sends provider requests directly through the server's
 network, so a server with a static public IP (or static NAT egress) keeps a stable source IP.
 
+Start with the [Linux quick start](../docs/wiki/Linux-Quick-Start.md). Detailed guides cover
+[HTTPS and private networks](../docs/wiki/HTTPS-and-Private-Networks.md),
+[upgrades and backups](../docs/wiki/Operations-and-Backups.md),
+[secret handling](../docs/wiki/Security-and-Secrets.md), and
+[moving from Workers](../docs/wiki/Moving-from-Cloudflare-Workers.md).
+These guides are also published in the [GitHub wiki](https://github.com/iebb/when-reset/wiki).
+
 Either deployment can:
 
 - send hourly silent APNs refresh hints to your own devices;
@@ -60,9 +67,16 @@ devices must be able to reach the HTTPS address to link and sync. Outbound HTTPS
 the provider APIs and Apple's APNs service. HTTPS is required by the app, dashboard cookies
 and passkeys; exposing the raw HTTP port is not a substitute.
 
-Open `https://reset.example.com`, retrieve `REGISTRATION_ACCESS_KEY` with
-`sudo cat /etc/when-reset/server.env`, and follow the device-linking steps below. The file
-also contains the separate credential encryption key: keep it private. Existing app screens
+Open `https://reset.example.com` and use this command in a private interactive terminal to
+view only the dashboard access key (redirected output is refused):
+
+```bash
+sudo /opt/when-reset/current/node/bin/node --env-file=/etc/when-reset/server.env /opt/when-reset/current/app/show-access-key.mjs
+```
+
+Keep the key in your password manager, unlock the dashboard, and follow the device-linking
+steps below. Do not print or share the environment file: it also holds the separate
+credential encryption key. Existing app screens
 may say “Worker”; enter your Linux server's HTTPS origin in those same controls. Monitoring
 must still be enabled per account. Attaching an account to a server subscription makes app
 refreshes read that server's samples; accounts left in local mode still use the device's
@@ -336,7 +350,8 @@ Cron enqueues push-enabled devices seen within the last 45 days. Provider-monito
 - `GET /v1/dashboard` — return only allowlisted account/quota summaries and aggregate
   device/run health; credentials and internal identifiers are never returned
 - `GET /v1/dashboard/accounts/:opaque/history?range=24h|7d|30d` — return bounded,
-  allowlisted quota history using opaque keyed account and series identifiers
+  allowlisted quota history and timestamped plan transitions using opaque keyed account and
+  series identifiers; chart lines break across sampling gaps longer than 12 hours
 - `DELETE /v1/dashboard/accounts/:opaque?mode=preserve|purge` — remove one logical account;
   preserve archives sanitized history for a future re-add, while purge removes all stored data
 - `GET /v1/dashboard/devices` — list linked devices behind opaque keyed handles, with a short

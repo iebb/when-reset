@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "check": "tsc --noEmit",
+    "check:secrets": "node scripts/check-public-secrets.mjs",
     "db:initialize": "wrangler d1 execute DB --remote --file=./schema.sql",
     "db:migrate": "wrangler d1 migrations apply DB --remote",
     "deploy": "npm run db:initialize && npm run db:migrate && wrangler deploy",

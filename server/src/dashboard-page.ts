@@ -3,6 +3,7 @@ const DASHBOARD_SCRIPT = String.raw`
   "use strict";
 
   const AUTO_REFRESH_MS = 60_000;
+  const MAX_CHART_GAP_MS = 12 * 60 * 60 * 1000;
   const els = {
     html: document.documentElement,
     locked: document.querySelector("#locked-view"),
@@ -44,6 +45,8 @@ const DASHBOARD_SCRIPT = String.raw`
     historyStatus: document.querySelector("#history-status"),
     historyCanvas: document.querySelector("#history-canvas"),
     historyLegend: document.querySelector("#history-legend"),
+    historyPlanChanges: document.querySelector("#history-plan-changes"),
+    historyPlanList: document.querySelector("#history-plan-list"),
     historySummary: document.querySelector("#history-summary"),
     historyClose: document.querySelector("#history-close"),
     rangeButtons: Array.from(document.querySelectorAll("[data-history-range]")),
@@ -493,6 +496,7 @@ const DASHBOARD_SCRIPT = String.raw`
     clear(els.devicesList);
     clear(els.runsSummary);
     clear(els.historyLegend);
+    clear(els.historyPlanList);
     clear(els.qrCode);
     clearCanvas();
     setText(els.historyTitle, "Account history");
@@ -513,6 +517,7 @@ const DASHBOARD_SCRIPT = String.raw`
     els.accountsEmpty.hidden = true;
     els.globalNotice.hidden = true;
     els.historyPanel.hidden = true;
+    els.historyPlanChanges.hidden = true;
     els.linkResult.hidden = true;
     els.openLink.removeAttribute("href");
     state.passkeySettingsLoaded = false;
@@ -1743,6 +1748,8 @@ const DASHBOARD_SCRIPT = String.raw`
     state.historyReturnFocus = null;
     els.historyPanel.hidden = true;
     clear(els.historyLegend);
+    clear(els.historyPlanList);
+    els.historyPlanChanges.hidden = true;
     clearCanvas();
     if (returnFocus && returnFocus.isConnected) returnFocus.focus();
   }
@@ -1766,6 +1773,8 @@ const DASHBOARD_SCRIPT = String.raw`
     setText(els.historyStatus, "Loading history…");
     els.historyCanvas.hidden = true;
     clear(els.historyLegend);
+    clear(els.historyPlanList);
+    els.historyPlanChanges.hidden = true;
     setText(els.historySummary, "");
     try {
       const response = await fetch(
@@ -1799,19 +1808,52 @@ const DASHBOARD_SCRIPT = String.raw`
   function renderHistory(payload) {
     const series = arrayValue(payload.series).filter(isObject);
     const pointCount = series.reduce((total, item) => total + arrayValue(item.points).length, 0);
+    const planChangeCount = renderPlanChanges(payload);
     if (series.length === 0 || pointCount === 0) {
-      setText(els.historyStatus, "No retained samples are available for this range yet.");
-      setText(els.historySummary, "No history points were reported for the selected range.");
+      const planSuffix = planChangeCount === 0
+        ? ""
+        : " " + formatInteger(planChangeCount) + " plan change" + (planChangeCount === 1 ? " is" : "s are") + " shown below.";
+      setText(els.historyStatus, "No retained quota samples are available for this range yet." + planSuffix);
+      renderHistorySummary(payload, []);
       els.historyCanvas.hidden = true;
       clear(els.historyLegend);
       return;
     }
     const suffix = payload.truncated === true ? " Some older points were omitted to keep this response bounded." : "";
-    setText(els.historyStatus, formatInteger(pointCount) + " samples across " + formatInteger(series.length) + " metric" + (series.length === 1 ? "" : "s") + "." + suffix);
+    const planSuffix = planChangeCount === 0
+      ? ""
+      : " " + formatInteger(planChangeCount) + " plan change" + (planChangeCount === 1 ? "" : "s") + ".";
+    setText(els.historyStatus, formatInteger(pointCount) + " samples across " + formatInteger(series.length) + " metric" + (series.length === 1 ? "" : "s") + "." + planSuffix + suffix);
     els.historyCanvas.hidden = false;
     renderLegend(series);
     renderHistorySummary(payload, series);
     drawHistory(payload, series);
+  }
+
+  function renderPlanChanges(payload) {
+    clear(els.historyPlanList);
+    const changes = arrayValue(payload.plan_changes).filter((change) => {
+      if (!isObject(change)) return false;
+      const previousPlan = stringValue(change.previous_plan, "");
+      const plan = stringValue(change.plan, "");
+      return previousPlan && plan && previousPlan !== plan
+        && timestampMilliseconds(change.changed_at) !== null;
+    });
+    els.historyPlanChanges.hidden = changes.length === 0;
+    changes.forEach((change) => {
+      const item = element("li", "plan-change");
+      const transition = element(
+        "span",
+        "plan-change__transition",
+        stringValue(change.previous_plan, "Plan not reported") + " → " + stringValue(change.plan, "Plan not reported")
+      );
+      const changedAt = element("time", "plan-change__time", formatDateTime(change.changed_at));
+      const milliseconds = timestampMilliseconds(change.changed_at);
+      if (milliseconds !== null) changedAt.dateTime = new Date(milliseconds).toISOString();
+      item.append(transition, changedAt);
+      els.historyPlanList.append(item);
+    });
+    return changes.length;
   }
 
   const chartColors = ["#0a7aff", "#b35c00", "#008a65", "#aa3a79", "#6957d2", "#67717e", "#c33f2f", "#2c7a37"];
@@ -1845,6 +1887,13 @@ const DASHBOARD_SCRIPT = String.raw`
       pieces.push(
         stringValue(item.title, "Quota metric") + " ranged from " + formatPercent(minimum) + " to " + formatPercent(maximum) + ", latest " + formatPercent(latest) + "."
       );
+    });
+    arrayValue(payload.plan_changes).filter(isObject).forEach((change) => {
+      const previousPlan = stringValue(change.previous_plan, "");
+      const plan = stringValue(change.plan, "");
+      if (previousPlan && plan && previousPlan !== plan) {
+        pieces.push("Plan changed from " + previousPlan + " to " + plan + " at " + formatDateTime(change.changed_at) + ".");
+      }
     });
     if (payload.truncated === true) pieces.push("The response was truncated.");
     setText(els.historySummary, pieces.join(" "));
@@ -1902,6 +1951,22 @@ const DASHBOARD_SCRIPT = String.raw`
     context.textAlign = "right";
     context.fillText(endLabel, left + width, top + height + 9);
 
+    context.save();
+    context.strokeStyle = labelColor;
+    context.globalAlpha = 0.45;
+    context.lineWidth = 1;
+    context.setLineDash([4, 4]);
+    arrayValue(payload.plan_changes).filter(isObject).forEach((change) => {
+      const changedAt = timestampMilliseconds(change.changed_at);
+      if (changedAt === null || changedAt < from || changedAt > to) return;
+      const x = left + ((changedAt - from) / (to - from)) * width;
+      context.beginPath();
+      context.moveTo(x, top);
+      context.lineTo(x, top + height);
+      context.stroke();
+    });
+    context.restore();
+
     series.forEach((item, seriesIndex) => {
       const points = arrayValue(item.points)
         .filter(isObject)
@@ -1918,7 +1983,8 @@ const DASHBOARD_SCRIPT = String.raw`
       points.forEach((point, pointIndex) => {
         const x = left + ((point.time - from) / (to - from)) * width;
         const y = top + height - (point.value / 100) * height;
-        if (pointIndex === 0) context.moveTo(x, y);
+        if (pointIndex === 0
+            || point.time - points[pointIndex - 1].time > MAX_CHART_GAP_MS) context.moveTo(x, y);
         else context.lineTo(x, y);
       });
       context.stroke();
@@ -2543,6 +2609,12 @@ export function renderDashboardPage(origin: string, displayName: string, nonce: 
     .chart-color-5 { background: #b32a24; }
     .chart-color-6 { background: #5b6472; }
     .chart-color-7 { background: #2f7d32; }
+    .plan-changes { margin-top: 1rem; border-top: 1px solid var(--line-soft); padding-top: .8rem; }
+    .plan-changes h3 { margin: 0; font-size: .78rem; font-weight: 650; letter-spacing: .01em; }
+    .plan-change-list { display: grid; gap: .4rem; margin: .55rem 0 0; padding: 0; list-style: none; }
+    .plan-change { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: .3rem 1rem; color: var(--muted); font-size: .75rem; }
+    .plan-change__transition { color: var(--text); font-weight: 590; }
+    .plan-change__time { color: var(--faint); font-variant-numeric: tabular-nums; }
 
     /* ---------- operations, link, passkeys, security ---------- */
     .operations-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; align-items: start; }
@@ -2788,6 +2860,10 @@ export function renderDashboardPage(origin: string, displayName: string, nonce: 
           <canvas id="history-canvas" role="img" aria-label="Quota history chart" aria-describedby="history-summary" hidden></canvas>
           <p id="history-summary" class="visually-hidden"></p>
           <ul id="history-legend" class="chart-legend" aria-label="Chart metrics"></ul>
+          <section id="history-plan-changes" class="plan-changes" aria-labelledby="history-plan-title" hidden>
+            <h3 id="history-plan-title">Plan changes</h3>
+            <ol id="history-plan-list" class="plan-change-list"></ol>
+          </section>
         </div>
       </section>
 

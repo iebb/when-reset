@@ -4,7 +4,10 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-26",
   "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true,
+    "logs": { "invocation_logs": false }
+  },
   "triggers": { "crons": ["*/5 * * * *"] },
   "rules": [
     { "type": "Text", "globs": ["**/*.p8"], "fallthrough": true }

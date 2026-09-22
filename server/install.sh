@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Disable inherited tracing before generating or reading deployment secrets.
+set +x +v
 set -euo pipefail
 umask 077
 

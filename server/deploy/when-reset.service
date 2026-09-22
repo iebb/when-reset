@@ -17,6 +17,7 @@ TimeoutStopSec=90
 StateDirectory=when-reset
 StateDirectoryMode=0700
 UMask=0077
+LimitCORE=0
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

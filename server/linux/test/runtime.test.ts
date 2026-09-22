@@ -2,6 +2,8 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { connect, createServer as createHTTP2Server } from "node:http2";
+import { request as httpRequest } from "node:http";
+import { spawnSync } from "node:child_process";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker, { processQueue, runScheduledRefresh, type QueueTarget } from "../../src/index";
@@ -150,6 +152,19 @@ describe("persistent jobs and scheduling", () => {
 });
 
 describe("Linux network transports", () => {
+  it("refuses to print access keys to redirected output", () => {
+    const result = spawnSync(process.execPath, ["scripts/show-access-key.mjs"], {
+      encoding: "utf8", env: {
+        ...process.env, REGISTRATION_ACCESS_KEY: "dashboard-canary".repeat(4),
+        CREDENTIAL_ENCRYPTION_KEY: "encryption-canary".repeat(4),
+      },
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Redirected output is refused");
+    expect(result.stderr).not.toContain("canary");
+  });
+
   it("serves the app protocol, protects the public origin and records a scheduled provider sample", async () => {
     const db = database();
     const queue = new SQLiteQueue<QueueTarget>(db);
@@ -164,6 +179,15 @@ describe("Linux network transports", () => {
     const request = (path: string, init?: RequestInit) => httpFetch(origin + path, init);
     try {
       expect((await request("/healthz")).status).toBe(200);
+      for (const path of ["/.env", "/server.env", "/data/when-reset.sqlite", "/schema.sql",
+        "/apns/WhenResetSharedAPNs.p8", "/%2e%2e/%2e%2e/etc/when-reset/server.env"]) {
+        const response = await request(path);
+        expect(response.status).toBe(404);
+        expect(response.headers.get("cache-control")).toBe("no-store");
+        const text = await response.text();
+        expect(text).not.toContain(env.REGISTRATION_ACCESS_KEY);
+        expect(text).not.toContain(env.CREDENTIAL_ENCRYPTION_KEY);
+      }
       expect((await request("/v1/dashboard")).status).toBe(401);
       const loginHeaders = { origin: "https://reset.example", "x-when-reset-server-key": env.REGISTRATION_ACCESS_KEY };
       expect((await request("/v1/dashboard/session", {
@@ -212,8 +236,18 @@ describe("Linux network transports", () => {
       expect(await dashboard.text()).not.toContain(credentials);
       const sync = await request(`/v1/devices/${deviceID}/accounts/${accountID}/sync`, { headers: { authorization: `Bearer ${secret}` } });
       expect(sync.status).toBe(200);
+      expect(sync.headers.get("cache-control")).toBe("no-store");
       expect(await sync.text()).not.toContain(credentials);
-      expect((await request("/v1/devices", { method: "POST", body: "x".repeat(512 * 1024 + 1) })).status).toBe(413);
+      // Send the declared size before the body so an early 413 does not race the
+      // client's large upload and turn into an OS-dependent broken-pipe error.
+      const oversizedStatus = await new Promise<number | undefined>((resolve, reject) => {
+        const oversized = httpRequest(`${origin}/v1/devices`, {
+          method: "POST", headers: { "content-length": String(512 * 1024 + 1) },
+        }, (response) => { response.resume(); resolve(response.statusCode); });
+        oversized.on("error", reject);
+        oversized.end();
+      });
+      expect(oversizedStatus).toBe(413);
     } finally {
       await new Promise<void>((resolve) => { server.close(() => resolve()); server.closeAllConnections(); });
     }

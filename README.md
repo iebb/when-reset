@@ -29,8 +29,8 @@ A small SwiftUI iOS monitor for AI coding usage limits and reset times.
 - Home Screen widgets in selectable Market chart, Quota ring, Quota board, Gauge, and Heatmap styles, with automatic family-aware layouts
 - Small, medium, and large Home Screen widgets on iOS and macOS, plus Lock Screen, Dynamic Island, and Live Activity views
 - Accounts and tokens synchronized through iCloud Keychain; sanitized snapshots in an App Group
-- Optional encrypted server-side quota monitoring and hourly silent refresh hints through a self-hosted Cloudflare Worker
-- Optional WebAuthn passkey access to the Worker's private dashboard, including iCloud Keychain-backed passkeys on Apple devices
+- Optional encrypted server-side quota monitoring and hourly silent refresh hints through Cloudflare Workers or your own Linux server
+- Optional WebAuthn passkey access to the private dashboard, including iCloud Keychain-backed passkeys on Apple devices
 - Per-quota usage charts for the last 24 hours, 7 days, or 30 days
 
 ## Build
@@ -85,6 +85,11 @@ The OpenAI Blossom is used only to identify the ChatGPT provider. OpenAI, ChatGP
 The Grok provider mark is adapted from CodexBar’s MIT-licensed provider asset and is used only for identification. Grok and xAI are trademarks of xAI; this project is not endorsed by or affiliated with xAI.
 
 ## Push refresh server
+
+**[Linux quick start](docs/wiki/Linux-Quick-Start.md)** ·
+[Deployment guides](docs/wiki/Home.md) ·
+[GitHub wiki](https://github.com/iebb/when-reset/wiki) ·
+[Security and secrets](SECURITY.md)
 
 Deploy the optional server on [Linux on your own network](server/README.md#deploy-on-linux)
 or [Cloudflare Workers](server/README.md#deploy-on-cloudflare-workers). Linux runs the same

@@ -1,6 +1,6 @@
 import { env, SELF } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
-import { testing } from "../src/index";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import worker, { testing } from "../src/index";
 import { ProviderFetchError } from "../src/providers";
 
 const deviceID = "019f724a-3414-4d52-ae37-0c7024a1ab97";
@@ -11,6 +11,7 @@ const FIVE_MINUTES_MILLISECONDS = FIVE_MINUTES_SECONDS * 1_000;
 
 beforeEach(async () => {
   await env.DB.batch([
+    env.DB.prepare("DROP TABLE IF EXISTS account_plan_changes"),
     env.DB.prepare("DROP TABLE IF EXISTS device_snapshot_history"),
     env.DB.prepare("DROP TABLE IF EXISTS device_snapshot_sources"),
     env.DB.prepare("DROP TABLE IF EXISTS device_snapshot_consent"),
@@ -276,6 +277,43 @@ beforeEach(async () => {
       ON usage_history(device_id, account_id, row_tag)`),
     env.DB.prepare(`CREATE INDEX usage_history_account_time
       ON usage_history(device_id, account_id, recorded_at, metric_id)`),
+    env.DB.prepare(`CREATE TABLE account_plan_changes (
+      change_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_kind TEXT NOT NULL CHECK(source_kind IN ('worker', 'device')),
+      device_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      previous_plan TEXT NOT NULL,
+      plan TEXT NOT NULL,
+      changed_at INTEGER NOT NULL,
+      FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE
+    )`),
+    env.DB.prepare(`CREATE INDEX account_plan_changes_source_time
+      ON account_plan_changes(source_kind, device_id, account_id, changed_at)`),
+    env.DB.prepare(`CREATE TRIGGER monitored_account_plan_changed
+      AFTER UPDATE OF plan ON monitored_accounts
+      WHEN OLD.plan IS NOT NEW.plan
+        AND OLD.plan IS NOT NULL AND trim(OLD.plan) <> ''
+        AND NEW.plan IS NOT NULL AND trim(NEW.plan) <> ''
+      BEGIN
+        INSERT INTO account_plan_changes (
+          source_kind, device_id, account_id, previous_plan, plan, changed_at
+        ) VALUES (
+          'worker', NEW.device_id, NEW.account_id, OLD.plan, NEW.plan, NEW.updated_at
+        );
+      END`),
+    env.DB.prepare(`CREATE TRIGGER device_snapshot_plan_changed
+      AFTER UPDATE OF plan ON device_snapshot_sources
+      WHEN OLD.plan IS NOT NEW.plan
+        AND OLD.plan IS NOT NULL AND trim(OLD.plan) <> ''
+        AND NEW.plan IS NOT NULL AND trim(NEW.plan) <> ''
+      BEGIN
+        INSERT INTO account_plan_changes (
+          source_kind, device_id, account_id, previous_plan, plan, changed_at
+        ) VALUES (
+          'device', NEW.device_id, NEW.account_id, OLD.plan, NEW.plan,
+          COALESCE(NEW.last_observed_at, NEW.updated_at)
+        );
+      END`),
     env.DB.prepare(`CREATE TABLE device_snapshot_history (
       device_id TEXT NOT NULL,
       account_id TEXT NOT NULL,
@@ -836,6 +874,9 @@ describe("credential-safe monitoring dashboard", () => {
     expect(page.headers.get("content-security-policy")).toContain("default-src 'none'");
     expect(page.headers.get("x-robots-tag")).toBe("noindex, nofollow, noarchive");
     expect(html).toContain("When Reset");
+    expect(html).toContain("const MAX_CHART_GAP_MS = 12 * 60 * 60 * 1000");
+    expect(html).toContain("point.time - points[pointIndex - 1].time > MAX_CHART_GAP_MS");
+    expect(html).toContain('id="history-plan-changes"');
     expect(html).toContain("dashboard");
     expect(html).toContain("Device upload");
     expect(html).toContain("Worker polling");
@@ -1453,6 +1494,47 @@ describe("credential-safe monitoring dashboard", () => {
     expect(serializedHistory).not.toContain(deviceID);
     expect(serializedHistory).not.toContain(accountID);
     expect(serializedHistory).not.toContain("workspace-123");
+  });
+
+  it("tracks sanitized plan changes even when an account has no quota samples", async () => {
+    const accountID = "019f724a-3414-4d52-ae37-0c7024a1ab98";
+    const accountURL = `https://push.example/v1/devices/${deviceID}/accounts/${accountID}`;
+    await registerDevice();
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(accountRequestBody("chatgpt", 1)),
+    })).status).toBe(201);
+    const changed = accountRequestBody("chatgpt", 1);
+    changed.plan = "Pro";
+    expect((await SELF.fetch(accountURL, {
+      method: "PUT",
+      headers: { authorization: `Bearer ${deviceSecret}` },
+      body: JSON.stringify(changed),
+    })).status).toBe(200);
+
+    const cookie = await createDashboardSessionCookie();
+    const overview = await SELF.fetch("https://push.example/v1/dashboard", {
+      headers: { cookie },
+    });
+    const overviewPayload = await overview.json<{ accounts: Array<{ id: string }> }>();
+    const history = await SELF.fetch(
+      `https://push.example/v1/dashboard/accounts/${overviewPayload.accounts[0].id}/history?range=24h`,
+      { headers: { cookie } },
+    );
+    expect(history.status).toBe(200);
+    const payload = await history.json<{
+      series: unknown[];
+      plan_changes: Array<Record<string, unknown>>;
+    }>();
+    expect(payload.series).toEqual([]);
+    expect(payload.plan_changes).toEqual([
+      expect.objectContaining({ previous_plan: "Plus", plan: "Pro" }),
+    ]);
+    const serialized = JSON.stringify(payload.plan_changes);
+    expect(serialized).not.toContain(deviceID);
+    expect(serialized).not.toContain(accountID);
+    expect(serialized).not.toContain("workspace-123");
   });
 
   it("groups duplicate account sources and deduplicates history before applying its limit", async () => {
@@ -2459,6 +2541,45 @@ describe("credential-free device snapshot publishing", () => {
     });
     expect(rejected.status).toBe(400);
     expect(await rejected.json()).toEqual({ error: "invalid_device_snapshot" });
+  });
+
+  it("tracks device-published plan changes in dashboard history", async () => {
+    await registerDevice();
+    expect((await SELF.fetch(url, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify(sourceBody()),
+    })).status).toBe(201);
+    const first = snapshotBody(1);
+    expect((await SELF.fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(first),
+    })).status).toBe(200);
+    const second = snapshotBody(2, 1, first.observed_at + 1);
+    second.snapshot.plan = "Pro";
+    expect((await SELF.fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(second),
+    })).status).toBe(200);
+
+    const cookie = await createDashboardSessionCookie();
+    const overview = await SELF.fetch("https://push.example/v1/dashboard", {
+      headers: { cookie },
+    });
+    const overviewPayload = await overview.json<{ accounts: Array<{ id: string }> }>();
+    const history = await SELF.fetch(
+      `https://push.example/v1/dashboard/accounts/${overviewPayload.accounts[0].id}/history?range=24h`,
+      { headers: { cookie } },
+    );
+    expect(await history.json()).toMatchObject({
+      plan_changes: [{
+        previous_plan: "Plus",
+        plan: "Pro",
+        changed_at: second.observed_at,
+      }],
+    });
   });
 
   it("surfaces device-published usage in the dashboard without duplicating an exact-PK Worker source", async () => {
@@ -5095,7 +5216,12 @@ describe("self-hosted account monitoring API", () => {
     expect(JSON.stringify(pushes)).not.toContain("access-secret");
   });
 
-  it("marks a scheduled ChatGPT 403 as forbidden without leaking provider details", async () => {
+  it.each([
+    [403, "provider_request_forbidden"],
+    [500, "Provider request failed (HTTP 500)."],
+    [429, "Provider rate limit reached; retrying later."],
+    [0, "Provider returned unreadable data."],
+  ])("sanitizes scheduled provider errors with HTTP %s", async (status, expectedError) => {
     await registerDevice();
     expect((await SELF.fetch(accountURL, {
       method: "PUT",
@@ -5124,7 +5250,7 @@ describe("self-hosted account monitoring API", () => {
     const forbidden: Parameters<typeof testing.refreshMonitorRun>[2] = async () => {
       throw new ProviderFetchError(
         "provider-body-canary-that-must-not-be-stored",
-        403,
+        status as number,
         false,
       );
     };
@@ -5138,7 +5264,7 @@ describe("self-hosted account monitoring API", () => {
       `SELECT last_error FROM monitored_accounts
        WHERE device_id = ? AND account_id = ?`
     ).bind(deviceID, accountID).first()).toEqual({
-      last_error: "provider_request_forbidden",
+      last_error: expectedError,
     });
     const sync = await SELF.fetch(`${accountURL}/sync?since=0`, {
       headers: { authorization: `Bearer ${deviceSecret}` },
