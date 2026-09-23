@@ -28,6 +28,12 @@ for attempt in 1 2 3; do
     status=$?
   fi
 
+  if [[ -n "${RELEASE_DIAGNOSTICS_PUBLIC_KEY:-}" && -n "${RELEASE_DIAGNOSTICS_DIRECTORY:-}" ]]; then
+    if "${RELEASE_DIAGNOSTICS_NODE:-node}" "$(dirname "$0")/seal-release-log.mjs" "$log" "$RELEASE_DIAGNOSTICS_DIRECTORY/export-$attempt.sealed.json"; then
+      printf 'Encrypted export diagnostics saved for the configured recipient.\n'
+    fi
+  fi
+
   # Never retry validation failures or an upload that may already have reached
   # Apple. The observed transient failure happens before upload, when Xcode
   # cannot parse the cloud-signing response and then finds no local certificate.

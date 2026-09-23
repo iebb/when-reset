@@ -69,6 +69,13 @@ The release workflow reads these encrypted GitHub Actions repository secrets:
 
 The private key exists only in the runner’s temporary directory for the duration of the job. Trigger `App Store Release` from the Actions tab and select `both`, `ios`, or `macos`. Pushing a `testflight-*` tag uploads iOS only. After Apple finishes processing the iOS build, the workflow adds it to the `Internal Testers` group.
 
+Raw Xcode export diagnostics stay out of public logs. To investigate an export failure,
+an operator can temporarily set the `RELEASE_DIAGNOSTICS_PUBLIC_KEY` repository variable
+to an RSA public key of at least 3072 bits, keeping its private key locally. Failed
+exports then produce an artifact encrypted with AES-256-GCM and RSA-OAEP-SHA256,
+retained for one day. Only that private key can decrypt the diagnostic file. Remove
+the variable after investigating; never put the private key in the variable or repository.
+
 ## Provider notes
 
 - ChatGPT reads private `wham` usage and banked-reset endpoints.

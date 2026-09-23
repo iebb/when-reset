@@ -20,6 +20,9 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
       - uses: ruby/setup-ruby@v1
         with:
           ruby-version: '3.3'
@@ -28,6 +31,7 @@ jobs:
       - name: Test version selection and safe signing retries
         run: |
           ruby .github/scripts/test-app-store-release.rb
+          node --test .github/scripts/test-release-diagnostics.mjs
           bash -n .github/scripts/export-app-store.sh
           shellcheck .github/scripts/export-app-store.sh
 

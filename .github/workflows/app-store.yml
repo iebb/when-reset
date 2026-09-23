@@ -130,6 +130,12 @@ jobs:
       - name: Verify toolchain
         run: xcodebuild -version
 
+      - name: Set up encrypted diagnostics runtime
+        if: vars.RELEASE_DIAGNOSTICS_PUBLIC_KEY != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
       - name: Prepare App Store Connect credential
         id: credential
         env:
@@ -234,6 +240,8 @@ jobs:
           ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
           ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          RELEASE_DIAGNOSTICS_PUBLIC_KEY: ${{ vars.RELEASE_DIAGNOSTICS_PUBLIC_KEY }}
+          RELEASE_DIAGNOSTICS_DIRECTORY: ${{ runner.temp }}/release-diagnostics
         run: |
           export_options="$RUNNER_TEMP/ExportOptions.plist"
           export_path="$RUNNER_TEMP/AppStoreExport"
@@ -246,10 +254,20 @@ jobs:
           plutil -insert manageAppVersionAndBuildNumber -bool NO "$export_options"
           plutil -insert uploadSymbols -bool YES "$export_options"
 
-          PATH=/usr/bin:/bin:/usr/sbin:/sbin bash .github/scripts/export-app-store.sh \
+          RELEASE_DIAGNOSTICS_NODE="$(command -v node || true)" \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin bash .github/scripts/export-app-store.sh \
             "$archive_path" "$export_path" "$export_options"
 
           echo "Uploaded ${{ matrix.platform }} archive ${{ needs.prepare.outputs.marketing_version }} (${{ needs.prepare.outputs.build_number }}) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Save encrypted export diagnostics
+        if: failure() && vars.RELEASE_DIAGNOSTICS_PUBLIC_KEY != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-release-diagnostics-${{ matrix.platform }}
+          path: ${{ runner.temp }}/release-diagnostics/*.sealed.json
+          if-no-files-found: ignore
+          retention-days: 1
 
       - name: Read archived iOS version
         if: matrix.platform == 'ios'
