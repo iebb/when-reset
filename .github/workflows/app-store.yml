@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_release: ${{ steps.release_guard.outputs.should_release }}
-      marketing_version: ${{ steps.version.outputs.marketing_version }}
+      marketing_version: ${{ steps.next_build.outputs.marketing_version }}
       build_number: ${{ steps.next_build.outputs.build_number }}
     steps:
       - name: Check out source
@@ -92,7 +92,7 @@ jobs:
           printf '%s' "$PRIVATE_KEY" > "$key_path"
           echo "path=$key_path" >> "$GITHUB_OUTPUT"
 
-      - name: Select next App Store build number
+      - name: Select uploadable App Store version and build number
         if: steps.release_guard.outputs.should_release == 'true'
         id: next_build
         env:
@@ -101,6 +101,7 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_BUNDLE_ID: ad.neko.when
           MARKETING_VERSION: ${{ steps.version.outputs.marketing_version }}
+          RELEASE_PLATFORMS: ${{ github.event_name == 'schedule' && 'IOS' || inputs.platform == 'both' && 'IOS,MAC_OS' || inputs.platform == 'macos' && 'MAC_OS' || 'IOS' }}
         run: ruby .github/scripts/next-app-store-build.rb
 
       - name: Remove temporary credential
@@ -245,14 +246,8 @@ jobs:
           plutil -insert manageAppVersionAndBuildNumber -bool NO "$export_options"
           plutil -insert uploadSymbols -bool YES "$export_options"
 
-          PATH=/usr/bin:/bin:/usr/sbin:/sbin xcodebuild -exportArchive \
-            -archivePath "$archive_path" \
-            -exportPath "$export_path" \
-            -exportOptionsPlist "$export_options" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$ASC_KEY_PATH" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          PATH=/usr/bin:/bin:/usr/sbin:/sbin bash .github/scripts/export-app-store.sh \
+            "$archive_path" "$export_path" "$export_options"
 
           echo "Uploaded ${{ matrix.platform }} archive ${{ needs.prepare.outputs.marketing_version }} (${{ needs.prepare.outputs.build_number }}) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
 

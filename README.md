@@ -51,7 +51,15 @@ OAuth succeeds.
 GitHub Actions replaces Xcode Cloud for this repository:
 
 - `CI` tests the iOS app, builds unsigned iOS and universal macOS release configurations, and checks the Cloudflare Worker on every push and pull request targeting `master`.
-- `App Store Release` is a manual workflow that uploads the iOS app, macOS app, or both to App Store Connect. It uses Xcode cloud signing, so signing certificates and provisioning profiles are created or downloaded by Xcode on the ephemeral runner.
+- `App Store Release` uploads iOS daily when the current commit has no successful release tag, and supports manual iOS/macOS uploads. It uses Xcode cloud signing, so signing certificates and provisioning profiles are created or downloaded by Xcode on the ephemeral runner.
+
+Release preparation checks App Store Connect before archiving. It treats the checked-in
+marketing version as a minimum: if Apple has approved that version on a selected platform,
+the upload uses the next patch version after the latest approved release. Build numbers
+increase across all app versions and platforms, including paginated build history. Xcode's
+specific unreadable cloud-signing response is retried up to three times before upload;
+version-validation failures and potentially completed uploads are not retried. App Store
+review submission remains an explicit manual option, separate from TestFlight uploads.
 
 The release workflow reads these encrypted GitHub Actions repository secrets:
 
