@@ -1,0 +1,5 @@
+Optional self-hosted monitoring now supports Linux servers on your own network, alongside Cloudflare Workers.
+
+Monitoring history includes clearer chart gaps and account plan change tracking, with more efficient history cleanup.
+
+Improved privacy protection in background error reporting and added Linux deployment and security guides.
