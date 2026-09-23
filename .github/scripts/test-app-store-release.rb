@@ -129,6 +129,9 @@ class AppStoreExportTest < Minitest::Test
         calls_path = ENV.fetch("FAKE_CALLS_PATH")
         calls = File.exist?(calls_path) ? File.readlines(calls_path) : []
         File.open(calls_path, "a") { |file| file.puts(JSON.generate(ARGV)) }
+        File.open(ENV.fetch("FAKE_MODES_PATH"), "a") do |file|
+          file.puts(JSON.generate(umask: File.umask, log_mode: STDOUT.stat.mode & 0o777))
+        end
         response = JSON.parse(ENV.fetch("FAKE_RESPONSES")).fetch(calls.length)
         puts "private-diagnostic-canary"
         puts response.fetch("log", "")
@@ -146,10 +149,14 @@ class AppStoreExportTest < Minitest::Test
         "ASC_KEY_ID" => "synthetic-key-id",
         "ASC_ISSUER_ID" => "synthetic-issuer-id",
         "FAKE_CALLS_PATH" => File.join(directory, "calls.jsonl"),
+        "FAKE_MODES_PATH" => File.join(directory, "modes.jsonl"),
         "FAKE_RESPONSES" => JSON.generate(responses)
       }
       stdout, stderr, status = Open3.capture3(env, "bash", SCRIPT, "archive with spaces", "export directory", "options.plist")
       calls = File.readlines(env.fetch("FAKE_CALLS_PATH")).map { |line| JSON.parse(line) }
+      modes = File.readlines(env.fetch("FAKE_MODES_PATH")).map { |line| JSON.parse(line) }
+      assert_equal Array.new(calls.length) { { "umask" => 0o022, "log_mode" => 0o600 } }, modes,
+        "Distribution files must be readable while diagnostic logs stay private"
       refute_includes stdout + stderr, PRIVATE_DIAGNOSTIC
       refute_includes stdout + stderr, env.fetch("ASC_KEY_PATH")
       assert_empty Dir.children(private_logs), "Private logs must be removed on success and failure"

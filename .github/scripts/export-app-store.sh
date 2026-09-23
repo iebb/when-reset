@@ -14,14 +14,20 @@ trap 'rm -rf -- "$log_directory"' EXIT
 for attempt in 1 2 3; do
   log="$log_directory/export-$attempt.log"
   printf 'Exporting signed archive (attempt %s of 3)...\n' "$attempt"
-  if xcodebuild -exportArchive \
-    -archivePath "$1" \
-    -exportPath "$2/attempt-$attempt" \
-    -exportOptionsPlist "$3" \
-    -allowProvisioningUpdates \
-    -authenticationKeyPath "$ASC_KEY_PATH" \
-    -authenticationKeyID "$ASC_KEY_ID" \
-    -authenticationKeyIssuerID "$ASC_ISSUER_ID" > "$log" 2>&1; then
+  # macOS installer contents must be readable by their eventual users. Open the
+  # private log under our restrictive umask, then use normal distribution modes
+  # only inside Xcode. Existing 0600 credentials retain their permissions.
+  if (
+    umask 022
+    xcodebuild -exportArchive \
+      -archivePath "$1" \
+      -exportPath "$2/attempt-$attempt" \
+      -exportOptionsPlist "$3" \
+      -allowProvisioningUpdates \
+      -authenticationKeyPath "$ASC_KEY_PATH" \
+      -authenticationKeyID "$ASC_KEY_ID" \
+      -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+  ) > "$log" 2>&1; then
     printf 'Archive signing and App Store Connect upload succeeded.\n'
     exit 0
   else
