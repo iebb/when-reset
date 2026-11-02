@@ -314,10 +314,10 @@ final class ForecastLogicTests: XCTestCase {
             now: now
         ))
         XCTAssertNil(BurnRate.reading(
-            for: window("window", used: 0.06, omitReset: true, reportsLength: false), now: now
+            for: window("window", used: 0.06, reportsLength: false, omitReset: true), now: now
         ))
         XCTAssertEqual(
-            BurnRate.reading(for: window("window", used: 0.04, omitReset: true, reportsLength: false), now: now)?
+            BurnRate.reading(for: window("window", used: 0.04, reportsLength: false, omitReset: true), now: now)?
                 .exhaustsBeforeReset,
             false
         )
