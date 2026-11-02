@@ -4,6 +4,8 @@ import SwiftUI
 struct ContentView: View {
     private enum Tab: Hashable { case usage, settings }
 
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var updates = UpdateCheckController()
     @State private var selectedTab = Tab.usage
     @State private var pendingWorkerLink: WorkerLinkDraft?
     @State private var workerLinkError: String?
@@ -17,6 +19,7 @@ struct ContentView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 .tag(Tab.settings)
         }
+        .environment(updates)
         .environment(ForecastSettingsStore.shared)
         .environment(CodexResetStore.shared)
         .onAppear {
@@ -47,11 +50,66 @@ struct ContentView: View {
         } message: {
             Text(workerLinkError ?? "The Worker link is invalid.")
         }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if let banner = updates.banner, updates.preferences.remindWhenAvailable {
+                UpdateAvailableBanner(
+                    message: UpdateCopy.available(version: banner.version, build: banner.build),
+                    openTitle: openTitle(for: banner),
+                    onOpen: {
+                        if let url = banner.openURL { updates.open(url) }
+                    },
+                    onDismiss: { updates.dismissBanner() }
+                )
+            }
+        }
+        .task { await updates.prepare() }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await updates.softCheckIfNeeded() }
+        }
     }
 
     private func stageWorkerLink(_ draft: WorkerLinkDraft) {
         selectedTab = .settings
         pendingWorkerLink = draft
+    }
+
+    private func openTitle(for banner: UpdateBanner) -> LocalizedStringKey? {
+        guard banner.openURL != nil else { return nil }
+        switch updates.channel {
+        case .appStore: return "Open App Store"
+        case .testFlight: return "Open TestFlight"
+        case .development: return nil
+        }
+    }
+}
+
+private struct UpdateAvailableBanner: View {
+    var message: String
+    var openTitle: LocalizedStringKey?
+    var onOpen: () -> Void
+    var onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(message)
+                .font(.subheadline)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            HStack(spacing: 8) {
+                if let openTitle {
+                    Button(openTitle, action: onOpen)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+                Button("Not now", action: onDismiss)
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(.bar)
+        .accessibilityIdentifier("update-available-banner")
     }
 }
 

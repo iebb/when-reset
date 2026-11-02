@@ -27,11 +27,11 @@ private actor TestEventRecorder {
 }
 
 final class ParsingTests: XCTestCase {
-    func testPublicGitHubLinksTargetWhenResetRepository() {
+    func testPublicGitHubLinksTargetBlinkyRepository() {
         XCTAssertEqual(AppLinks.sourceCode.scheme, "https")
         XCTAssertEqual(AppLinks.sourceCode.host, "github.com")
-        XCTAssertEqual(AppLinks.sourceCode.path, "/iebb/when-reset")
-        XCTAssertEqual(AppLinks.issues.path, "/iebb/when-reset/issues")
+        XCTAssertEqual(AppLinks.sourceCode.path, "/harrisliangsu/blinky-ios")
+        XCTAssertEqual(AppLinks.issues.path, "/harrisliangsu/blinky-ios/issues")
     }
 
     func testRemainingPercentIsClamped() {

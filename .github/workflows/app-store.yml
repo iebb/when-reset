@@ -340,6 +340,51 @@ jobs:
             rm -f "$ASC_KEY_PATH"
           fi
 
+  # iTunes Lookup cannot see TestFlight builds. After the iOS binary is already on
+  # App Store Connect, publish the version and build to master so installed TestFlight
+  # clients can compare against it. This job writes update-check.json only. It does not
+  # download, archive, or upload an app binary.
+  publish-update-feed:
+    name: Publish TestFlight update feed
+    needs: [prepare, upload]
+    if: needs.prepare.outputs.should_release == 'true' && (github.event_name != 'workflow_dispatch' || inputs.platform != 'macos')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out release commit
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Commit update-check.json on master
+        env:
+          MARKETING_VERSION: ${{ needs.prepare.outputs.marketing_version }}
+          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f Scripts/bump-update-check.sh ]]; then
+            echo "Scripts/bump-update-check.sh is missing from this release commit." >&2
+            exit 1
+          fi
+          script_path="$(mktemp)"
+          cp Scripts/bump-update-check.sh "$script_path"
+          git fetch origin master
+          git checkout -B master origin/master
+          bash "$script_path" "$MARKETING_VERSION" "$BUILD_NUMBER" update-check.json
+          git add update-check.json
+          if git diff --cached --quiet; then
+            echo "update-check.json already matches ${MARKETING_VERSION} (${BUILD_NUMBER})." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Update iOS update-check feed to ${MARKETING_VERSION} (${BUILD_NUMBER})"
+          git push origin master
+          echo "Published update-check.json ${MARKETING_VERSION} (${BUILD_NUMBER}) to master." >> "$GITHUB_STEP_SUMMARY"
+
   # Submission is deliberately manual-only: neither the daily cron nor a testflight-* tag can
   # reach it, so a routine TestFlight build never turns into an App Store review submission.
   submit:

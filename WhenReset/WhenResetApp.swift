@@ -22,6 +22,16 @@ final class WhenResetAppDelegate: NSObject, UIApplicationDelegate, UNUserNotific
         [.banner, .list, .sound]
     }
 
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            didReceive response: UNNotificationResponse) async {
+        let info = response.notification.request.content.userInfo
+        guard let raw = info[UpdateNotification.urlUserInfoKey] as? String,
+              let url = URL(string: raw) else { return }
+        await MainActor.run {
+            UIApplication.shared.open(url)
+        }
+    }
+
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         RemotePushCoordinator.shared.didRegister(deviceToken: deviceToken)
