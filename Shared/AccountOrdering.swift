@@ -3,10 +3,9 @@ import Foundation
 enum ZhipuAccountMigration {
     static let legacyTitle = "智谱 GLM"
 
-    static func migrate(_ account: MonitoredAccount, credentials: AccountCredentials?) -> MonitoredAccount {
+    static func migrate(_ account: MonitoredAccount, region: String?, host: String?) -> MonitoredAccount {
         guard account.providerID == .zai else { return account }
-        let region = credentials?.serviceRegion
-        let host = credentials?.serviceHost?.lowercased() ?? ""
+        let host = host?.lowercased() ?? ""
         let mainland = region == "mainland" || host.contains("bigmodel.cn")
         guard mainland else {
             var global = account

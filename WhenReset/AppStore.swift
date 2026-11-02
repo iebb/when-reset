@@ -1358,7 +1358,11 @@ final class AppStore {
         }
         updatedAccounts = updatedAccounts.map { account in
             let credentials = try? KeychainStore.load(for: account.id)
-            let migrated = ZhipuAccountMigration.migrate(account, credentials: credentials)
+            let migrated = ZhipuAccountMigration.migrate(
+                account,
+                region: credentials?.serviceRegion,
+                host: credentials?.serviceHost
+            )
             if migrated != account { try? KeychainStore.saveAccount(migrated) }
             return migrated
         }

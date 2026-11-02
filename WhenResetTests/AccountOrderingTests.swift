@@ -29,18 +29,20 @@ final class AccountOrderingTests: XCTestCase {
 
     func testMainlandAccountMigratesToZhipu() {
         var account = account(.zai, name: "智谱 GLM", at: 1)
-        let credentials = AccountCredentials(accessToken: "key", refreshToken: "", idToken: "",
-                                             serviceHost: "https://open.bigmodel.cn/api/monitor/usage/quota/limit",
-                                             serviceRegion: "mainland")
-        let migrated = ZhipuAccountMigration.migrate(account, credentials: credentials)
+        let migrated = ZhipuAccountMigration.migrate(
+            account,
+            region: "mainland",
+            host: "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
+        )
         XCTAssertEqual(migrated.providerID, .zhipu)
         XCTAssertEqual(migrated.displayName, "智谱")
         account.displayName = "Work"
-        let kept = ZhipuAccountMigration.migrate(account, credentials: credentials)
+        let kept = ZhipuAccountMigration.migrate(account, region: "mainland", host: "https://open.bigmodel.cn")
         XCTAssertEqual(kept.displayName, "Work")
         let global = ZhipuAccountMigration.migrate(
             self.account(.zai, name: "智谱 GLM", at: 2),
-            credentials: AccountCredentials(accessToken: "key", refreshToken: "", idToken: "", serviceRegion: "global")
+            region: "global",
+            host: nil
         )
         XCTAssertEqual(global.providerID, .zai)
         XCTAssertEqual(global.displayName, "z.ai")
