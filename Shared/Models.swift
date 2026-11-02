@@ -7,6 +7,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     case kimi = "kimi"
     case githubCopilot = "github_copilot"
     case zai = "zai"
+    case zhipu = "zhipu"
     case miniMax = "minimax"
     case synthetic = "synthetic"
     case ollamaCloud = "ollama_cloud"
@@ -28,7 +29,8 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .grok: "Grok"
         case .kimi: "Kimi Code"
         case .githubCopilot: "GitHub Copilot"
-        case .zai: "智谱 GLM"
+        case .zai: "z.ai"
+        case .zhipu: "智谱"
         case .miniMax: "MiniMax Token Plan"
         case .synthetic: "Synthetic"
         case .ollamaCloud: "Ollama Cloud"
@@ -88,7 +90,8 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .grok: "Weekly Grok credit pool"
         case .kimi: "5-hour and weekly coding limits"
         case .githubCopilot: "Chat and premium request quotas"
-        case .zai: "智谱 BigModel / Z.AI · 5h, weekly, monthly"
+        case .zai: "z.ai Coding Plan · 5h and weekly"
+        case .zhipu: "智谱 Coding Plan · 5h and weekly"
         case .miniMax: "5-hour and weekly coding limits"
         case .synthetic: "Rolling 5-hour and weekly limits"
         case .ollamaCloud: "Session and weekly Cloud limits"
@@ -112,7 +115,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .grok: "GrokLogo"
         case .kimi: "KimiLogo"
         case .githubCopilot: "CopilotLogo"
-        case .zai: "ZAILogo"
+        case .zai, .zhipu: "ZAILogo"
         case .miniMax: "MiniMaxLogo"
         case .openAIAPI: "ChatGPTLogo"
         case .anthropicAPI: "ClaudeLogo"
@@ -127,7 +130,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .grok: "sparkle"
         case .kimi: "moon.stars.fill"
         case .githubCopilot: "chevron.left.forwardslash.chevron.right"
-        case .zai: "z.square.fill"
+        case .zai, .zhipu: "z.square.fill"
         case .miniMax: "waveform"
         case .synthetic: "atom"
         case .ollamaCloud: "cloud.fill"
@@ -433,12 +436,15 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
     var mode: LiveActivityMode = .automatic
     var showRemainingPercentage = true
     var showBankedResets = true
+    /// Nil means every account, in Usage order. An empty list shows none.
+    var includedAccountIDs: [UUID]? = nil
 
     init(mode: LiveActivityMode = .automatic, showRemainingPercentage: Bool = true,
-         showBankedResets: Bool = true) {
+         showBankedResets: Bool = true, includedAccountIDs: [UUID]? = nil) {
         self.mode = mode
         self.showRemainingPercentage = showRemainingPercentage
         self.showBankedResets = showBankedResets
+        self.includedAccountIDs = includedAccountIDs
     }
 
     init(from decoder: Decoder) throws {
@@ -447,6 +453,12 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
         showRemainingPercentage = try values.decodeIfPresent(Bool.self,
                                                              forKey: .showRemainingPercentage) ?? true
         showBankedResets = try values.decodeIfPresent(Bool.self, forKey: .showBankedResets) ?? true
+        includedAccountIDs = try values.decodeIfPresent([UUID].self, forKey: .includedAccountIDs)
+    }
+
+    func includes(_ accountID: UUID) -> Bool {
+        guard let includedAccountIDs else { return true }
+        return includedAccountIDs.contains(accountID)
     }
 }
 
@@ -646,8 +658,49 @@ struct UsageWindow: Codable, Hashable, Sendable {
     var windowMinutes: Int?
     var kind: UsageWindowKind? = nil
     var identifier: String? = nil
+    /// False when the provider reported a percent but no future reset time.
+    var reportsReset: Bool = true
+
+    init(title: String, usedPercent: Double, resetsAt: Date, windowMinutes: Int? = nil,
+         kind: UsageWindowKind? = nil, identifier: String? = nil, reportsReset: Bool = true) {
+        self.title = title
+        self.usedPercent = usedPercent
+        self.resetsAt = resetsAt
+        self.windowMinutes = windowMinutes
+        self.kind = kind
+        self.identifier = identifier
+        self.reportsReset = reportsReset
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        title = try values.decode(String.self, forKey: .title)
+        usedPercent = try values.decode(Double.self, forKey: .usedPercent)
+        resetsAt = try values.decode(Date.self, forKey: .resetsAt)
+        windowMinutes = try values.decodeIfPresent(Int.self, forKey: .windowMinutes)
+        kind = try values.decodeIfPresent(UsageWindowKind.self, forKey: .kind)
+        identifier = try values.decodeIfPresent(String.self, forKey: .identifier)
+        reportsReset = try values.decodeIfPresent(Bool.self, forKey: .reportsReset) ?? true
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(title, forKey: .title)
+        try values.encode(usedPercent, forKey: .usedPercent)
+        try values.encode(resetsAt, forKey: .resetsAt)
+        try values.encodeIfPresent(windowMinutes, forKey: .windowMinutes)
+        try values.encodeIfPresent(kind, forKey: .kind)
+        try values.encodeIfPresent(identifier, forKey: .identifier)
+        try values.encode(reportsReset, forKey: .reportsReset)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case title, usedPercent, resetsAt, windowMinutes, kind, identifier, reportsReset
+    }
 
     var remainingPercent: Double { max(0, min(100, 100 - usedPercent)) }
+
+    var showsCountdown: Bool { reportsReset }
 
     var displayTitle: String {
         if kind == .additional { return title }
@@ -784,6 +837,21 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
     var resolvedAccountName: String {
         let name = accountName.trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty ? providerName : name
+    }
+
+    func headlineWindow(pinnedMetricID: String?) -> UsageWindow? {
+        let windows = usageWindows.filter { $0.kind != .additional }
+        let pool = windows.isEmpty ? usageWindows : windows
+        if let pinnedMetricID, let pinned = pool.first(where: { $0.metricID == pinnedMetricID }) {
+            return pinned
+        }
+        return pool.max { $0.usedPercent < $1.usedPercent }
+    }
+
+    func secondaryLimit(after headline: UsageWindow) -> UsageWindow? {
+        usageWindows.first { window in
+            window.metricID != headline.metricID && window.kind != .additional && window.kind != headline.kind
+        } ?? usageWindows.first { $0.metricID != headline.metricID && $0.kind != .additional }
     }
 
     var usageWindows: [UsageWindow] {

@@ -87,21 +87,53 @@ struct UsageActivityTarget: Codable, Hashable, Identifiable, Sendable {
     }
 }
 
+struct UsageActivityAccountRow: Codable, Hashable, Identifiable, Sendable {
+    var id: String
+    var accountName: String
+    var providerID: ProviderID
+    var symbolName: String?
+    var headlineTitle: String
+    var headlineRemainingPercent: Double
+    var secondaryTitle: String?
+    var secondaryRemainingPercent: Double?
+    var headlineResetsAt: Date?
+    var isSoonestReset: Bool
+
+    init(id: String, accountName: String, providerID: ProviderID, symbolName: String?,
+         headlineTitle: String, headlineRemainingPercent: Double,
+         secondaryTitle: String? = nil, secondaryRemainingPercent: Double? = nil,
+         headlineResetsAt: Date? = nil, isSoonestReset: Bool = false) {
+        self.id = id
+        self.accountName = String(accountName.prefix(64))
+        self.providerID = providerID
+        self.symbolName = symbolName
+        self.headlineTitle = String(headlineTitle.prefix(80))
+        self.headlineRemainingPercent = min(100, max(0, headlineRemainingPercent))
+        self.secondaryTitle = secondaryTitle.map { String($0.prefix(80)) }
+        self.secondaryRemainingPercent = secondaryRemainingPercent.map { min(100, max(0, $0)) }
+        self.headlineResetsAt = headlineResetsAt
+        self.isSoonestReset = isSoonestReset
+    }
+}
+
 struct UsageActivityAttributes: ActivityAttributes {
     struct ContentState: Codable, Hashable {
         var targets: [UsageActivityTarget]
+        var accounts: [UsageActivityAccountRow]
         var updatedAt: Date
 
-        init(targets: [UsageActivityTarget], updatedAt: Date) {
+        init(targets: [UsageActivityTarget], accounts: [UsageActivityAccountRow] = [], updatedAt: Date) {
             self.targets = UsageActivityTarget.ordered(targets)
+            self.accounts = accounts
             self.updatedAt = updatedAt
         }
 
         init(from decoder: Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
             let updatedAt = try values.decodeIfPresent(Date.self, forKey: .updatedAt) ?? .now
+            let accounts = try values.decodeIfPresent([UsageActivityAccountRow].self, forKey: .accounts) ?? []
             if let targets = try values.decodeIfPresent([UsageActivityTarget].self, forKey: .targets) {
-                self.init(targets: targets, updatedAt: updatedAt)
+                self.init(targets: targets, accounts: accounts, updatedAt: updatedAt)
                 return
             }
 
@@ -153,11 +185,12 @@ struct UsageActivityAttributes: ActivityAttributes {
         func encode(to encoder: Encoder) throws {
             var values = encoder.container(keyedBy: CodingKeys.self)
             try values.encode(targets, forKey: .targets)
+            try values.encode(accounts, forKey: .accounts)
             try values.encode(updatedAt, forKey: .updatedAt)
         }
 
         private enum CodingKeys: String, CodingKey {
-            case targets, updatedAt
+            case targets, accounts, updatedAt
             case primaryTitle, primaryAccountName, primaryAccountSymbolName, primaryProviderID
             case primaryUsedPercent, primaryResetsAt
             case secondaryTitle, secondaryAccountName, secondaryAccountSymbolName, secondaryProviderID

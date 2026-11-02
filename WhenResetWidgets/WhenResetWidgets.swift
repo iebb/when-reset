@@ -101,6 +101,7 @@ enum HomeWidgetDisplayStyle: String, AppEnum, Sendable {
     case board
     case gauge
     case heatmap
+    case usageList
 
     static let typeDisplayRepresentation: TypeDisplayRepresentation = "Widget appearance"
     static let caseDisplayRepresentations: [HomeWidgetDisplayStyle: DisplayRepresentation] = [
@@ -109,7 +110,8 @@ enum HomeWidgetDisplayStyle: String, AppEnum, Sendable {
         .ring: "Quota ring",
         .board: "Quota board",
         .gauge: "Quota gauge",
-        .heatmap: "Quota heatmap"
+        .heatmap: "Quota heatmap",
+        .usageList: "Usage list"
     ]
 }
 
@@ -150,7 +152,7 @@ private enum WidgetDataCatalog {
         snapshots().map {
             WidgetAccountEntity(id: $0.accountID.uuidString, name: $0.resolvedAccountName,
                                 providerName: $0.providerName)
-        }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        }
     }
 
     static func metrics(accountID: String? = nil) -> [WidgetMetricEntity] {
@@ -365,6 +367,7 @@ private struct UsageEntry: TimelineEntry {
     var homeStyle: HomeWidgetDisplayStyle
     var displayStyle: LockScreenDisplayStyle
     var history: [UsageHistoryPoint]
+    var orderedSnapshots: [UsageSnapshot] = []
 }
 
 private enum WidgetEntryResolver {
@@ -414,9 +417,7 @@ private enum WidgetEntryResolver {
             }
             snapshot = requestedSnapshot
         } else {
-            snapshot = stored.min {
-                nearestDate(in: $0, after: now) < nearestDate(in: $1, after: now)
-            } ?? stored[0]
+            snapshot = stored[0]
         }
 
         let futureTargets = WidgetMetricTarget.targets(for: snapshot, after: now)
@@ -443,7 +444,8 @@ private enum WidgetEntryResolver {
         )
         return UsageEntry(date: now, snapshot: snapshot, target: target,
                           homeStyle: homeStyle,
-                          displayStyle: displayStyle, history: history)
+                          displayStyle: displayStyle, history: history,
+                          orderedSnapshots: stored)
     }
 
     private static func unavailableEntry(
@@ -573,7 +575,9 @@ struct UsageWidget: Widget {
     var body: some WidgetConfiguration {
         AppIntentConfiguration(kind: "UsageWidget", intent: UsageWidgetConfigurationIntent.self,
                                provider: UsageWidgetProvider()) { entry in
-            HomeWidgetView(entry: entry).containerBackground(.fill.tertiary, for: .widget)
+            HomeWidgetView(entry: entry)
+                .environment(\.locale, AppLanguage.current.locale)
+                .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Usage limits")
         .description("Choose an account, quota, and market-inspired presentation.")
@@ -587,7 +591,10 @@ private struct HomeWidgetView: View {
 
     private var resolvedStyle: HomeWidgetDisplayStyle {
         guard entry.homeStyle == .automatic else { return entry.homeStyle }
-        return family == .systemLarge ? .board : .market
+        switch family {
+        case .systemMedium, .systemLarge: return .usageList
+        default: return .market
+        }
     }
 
     @ViewBuilder
@@ -607,6 +614,8 @@ private struct HomeWidgetView: View {
             GaugeHomeWidgetView(entry: entry, family: family)
         case .heatmap:
             HeatmapHomeWidgetView(entry: entry, family: family)
+        case .usageList:
+            UsageListHomeWidget(entry: entry, family: family)
         case .automatic:
             EmptyView()
         }
@@ -656,6 +665,62 @@ private extension WidgetMetricTarget {
         if remainingPercent <= 20 { return .red }
         if remainingPercent <= 50 { return .orange }
         return .green
+    }
+}
+
+private struct UsageListHomeWidget: View {
+    let entry: UsageEntry
+    let family: WidgetFamily
+
+    private var rows: [UsageSnapshot] {
+        let source = entry.orderedSnapshots.isEmpty ? [entry.snapshot] : entry.orderedSnapshots
+        return family == .systemMedium ? Array(source.prefix(4)) : Array(source.prefix(8))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Usage")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            ForEach(rows, id: \.accountID) { snapshot in
+                usageRow(snapshot)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private func usageRow(_ snapshot: UsageSnapshot) -> some View {
+        let headline = snapshot.headlineWindow(pinnedMetricID: nil)
+        let secondary = headline.flatMap { snapshot.secondaryLimit(after: $0) }
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                SnapshotAccountIcon(snapshot: snapshot).frame(width: 16, height: 16)
+                Text(snapshot.resolvedAccountName).font(.caption.weight(.semibold)).lineLimit(1)
+                Spacer(minLength: 4)
+                if let headline {
+                    Text(UsageText.remainingPercent(headline.remainingPercent))
+                        .font(.caption.monospacedDigit())
+                }
+            }
+            if let headline {
+                ProgressView(value: headline.remainingPercent, total: 100)
+                    .tint(.blue)
+                if family == .systemLarge, let secondary {
+                    HStack {
+                        Text(secondary.displayTitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Text(UsageText.remainingPercent(secondary.remainingPercent))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if headline.showsCountdown {
+                    Text(CountdownDisplay.compactString(until: headline.resetsAt))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.tertiary)
+                }
+            }
+        }
     }
 }
 
@@ -1853,21 +1918,36 @@ struct UsageLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: UsageActivityAttributes.self) { context in
             LiveLockView(state: context.state)
+                .environment(\.locale, AppLanguage.current.locale)
                 .activityBackgroundTint(.black)
                 .activitySystemActionForegroundColor(.white)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    if let target = context.state.targets.first { LiveProviderStack(target: target, expanded: true) }
+                    if let account = context.state.accounts.first {
+                        ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
+                            .frame(width: 20, height: 20)
+                    } else if let target = context.state.targets.first {
+                        LiveProviderStack(target: target, expanded: true)
+                    }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    if let target = context.state.targets.first {
+                    if let reset = context.state.accounts.first?.headlineResetsAt {
+                        LiveActivityCountdown(expiry: reset)
+                            .font(.headline).foregroundStyle(.white)
+                    } else if let target = context.state.targets.first {
                         LiveActivityCountdown(expiry: target.expiresAt)
                             .font(.headline).foregroundStyle(.white)
                     }
                 }
                 DynamicIslandExpandedRegion(.bottom) {
-                    if let target = context.state.targets.first {
+                    if !context.state.accounts.isEmpty {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(context.state.accounts.prefix(4)) { account in
+                                LiveAccountBar(account: account)
+                            }
+                        }
+                    } else if let target = context.state.targets.first {
                         VStack(alignment: .leading, spacing: 7) {
                             LivePrimaryIslandDetail(target: target)
                             let secondary = Array(context.state.targets.dropFirst().prefix(3))
@@ -1880,9 +1960,11 @@ struct UsageLiveActivity: Widget {
                     }
                 }
             } compactLeading: {
-                if let target = context.state.targets.first { LiveProviderStack(target: target) }
+                if !context.state.accounts.isEmpty {
+                    LiveAccountStrip(accounts: context.state.accounts)
+                } else if let target = context.state.targets.first { LiveProviderStack(target: target) }
             } compactTrailing: {
-                if let target = context.state.targets.first {
+                if context.state.accounts.isEmpty, let target = context.state.targets.first {
                     LiveActivityCountdown(expiry: target.expiresAt)
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .minimumScaleFactor(0.78)
@@ -1890,7 +1972,9 @@ struct UsageLiveActivity: Widget {
                         .foregroundStyle(.white)
                 }
             } minimal: {
-                if let target = context.state.targets.first {
+                if let account = context.state.accounts.first {
+                    ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
+                } else if let target = context.state.targets.first {
                     ProviderMark(providerID: target.providerID, symbolName: target.accountSymbolName)
                 }
             }
@@ -2024,6 +2108,15 @@ private struct LiveLockView: View {
     let state: UsageActivityAttributes.ContentState
 
     var body: some View {
+        if !state.accounts.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                ForEach(state.accounts.prefix(dynamicTypeSize.isAccessibilitySize ? 2 : 4)) { account in
+                    LiveAccountBar(account: account)
+                }
+            }
+            .padding(.horizontal, 12).padding(.vertical, 10)
+            .foregroundStyle(.white)
+        } else {
         let ordered = UsageActivityTarget.ordered(state.targets)
         VStack(spacing: 8) {
             if let primary = ordered.first {
@@ -2044,6 +2137,66 @@ private struct LiveLockView: View {
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
+        .foregroundStyle(.white)
+        }
+    }
+}
+
+private struct LiveAccountStrip: View {
+    let accounts: [UsageActivityAccountRow]
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(accounts.prefix(3)) { account in
+                VStack(spacing: 1) {
+                    ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
+                        .frame(width: 12, height: 12)
+                    Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                        .font(.system(size: 8, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                }
+            }
+        }
+        .foregroundStyle(.white)
+    }
+}
+
+private struct LiveAccountBar: View {
+    let account: UsageActivityAccountRow
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 6) {
+                ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
+                    .frame(width: 14, height: 14)
+                Text(account.accountName).font(.caption.weight(.semibold)).lineLimit(1)
+                if account.isSoonestReset {
+                    Text(UsageText.soonestBadge())
+                        .font(.caption2.weight(.bold))
+                        .padding(.horizontal, 4)
+                        .background(.orange.opacity(0.35), in: .capsule)
+                }
+                Spacer(minLength: 4)
+                Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                    .font(.caption.monospacedDigit())
+            }
+            ProgressView(value: account.headlineRemainingPercent, total: 100)
+            HStack {
+                if let secondary = account.secondaryTitle, let percent = account.secondaryRemainingPercent {
+                    Text("\(secondary) \(UsageText.remainingPercent(percent))")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if let reset = account.headlineResetsAt {
+                    LiveActivityCountdown(expiry: reset)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
         .foregroundStyle(.white)
     }
 }

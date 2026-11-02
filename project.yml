@@ -1,5 +1,6 @@
 name: WhenReset
 options:
+  developmentLanguage: en
   bundleIdPrefix: com.harrisliangsu
   deploymentTarget:
     iOS: "17.0"

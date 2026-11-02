@@ -3722,6 +3722,25 @@ final class MacUsageHistoryPresentationTests: XCTestCase {
         XCTAssertEqual(series.points.map(\.recordedAt), [recent, latest])
     }
 
+    func testCodexDevicePageStaysBareUnlessOpenAISuppliesACompleteURL() {
+        XCTAssertEqual(
+            ChatGPTProvider.verificationURL(from: ["user_code": "UZNS-UK0TP"]).absoluteString,
+            "https://auth.openai.com/codex/device"
+        )
+        XCTAssertEqual(
+            ChatGPTProvider.verificationURL(from: [
+                "verification_uri_complete": "https://auth.openai.com/codex/device?user_code=UZNS-UK0TP"
+            ]).absoluteString,
+            "https://auth.openai.com/codex/device?user_code=UZNS-UK0TP"
+        )
+        XCTAssertEqual(
+            ChatGPTProvider.verificationURL(from: [
+                "verification_uri_complete": "https://evil.example/device?user_code=UZNS-UK0TP"
+            ]).absoluteString,
+            "https://auth.openai.com/codex/device"
+        )
+    }
+
     func testCodexCLICredentialParserReadsChatGPTAuthSchema() throws {
         let data = try JSONSerialization.data(withJSONObject: [
             "auth_mode": "chatgpt",

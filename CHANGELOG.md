@@ -1,4 +1,11 @@
-# Changelog / 更新说明
+# Changelog
+
+## Unreleased
+
+- Usage is the subject: account order is saved and synced, medium and large widgets default to a multi-account list, and Live Activity shows each included account's remaining percent. The soonest reset is a badge.
+- 智谱 and z.ai are separate providers. Domestic Coding Plan keys that report `CREDIT_LIMIT` link and show remaining percent even when a reset time is missing. Browser sign-in can create a Coding Plan key. Existing mainland accounts move to 智谱.
+- Codex device sign-in copies the code and opens the bare device page unless OpenAI returns `verification_uri_complete`.
+- Simplified Chinese and English follow the system language, with an in-app override.
 
 ## 1.8
 

@@ -303,6 +303,19 @@ enum KeychainStore {
         accounts.sorted(by: accountOrder)
     }
 
+    private static let displayOrderAccount = "display-order"
+
+    static func loadDisplayOrder() -> [UUID]? {
+        guard let data = try? loadData(service: accountsService, account: displayOrderAccount, synchronizable: true),
+              let ids = try? JSONDecoder().decode([UUID].self, from: data),
+              !ids.isEmpty else { return nil }
+        return ids
+    }
+
+    static func saveDisplayOrder(_ ids: [UUID]) throws {
+        try saveSynchronizable(try JSONEncoder().encode(ids), service: accountsService, account: displayOrderAccount)
+    }
+
     private static func saveSynchronizable(_ data: Data, service: String, account: String) throws {
         var query = baseQuery(service: service, account: account)
         query[kSecAttrSynchronizable as String] = true

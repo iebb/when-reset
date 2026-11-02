@@ -3099,7 +3099,8 @@ function providerDisplayName(providerID: ProviderID): string {
     case "grok": return "Grok";
     case "kimi": return "Kimi Code";
     case "github_copilot": return "GitHub Copilot";
-    case "zai": return "智谱 GLM";
+    case "zai": return "z.ai";
+    case "zhipu": return "智谱";
     case "minimax": return "MiniMax Token Plan";
     case "synthetic": return "Synthetic";
     case "warp": return "Warp";
@@ -3663,8 +3664,8 @@ async function uploadDeviceSnapshot(
     ).bind(
       deviceID, accountID, historyRowTag(accountID, window.metric_id, upload.observed_at),
       source.provider_id, window.metric_id, window.title, window.kind,
-      window.window_minutes, window.remaining_percent, upload.observed_at, window.resets_at,
-      Math.max(0, window.resets_at - upload.observed_at), upload.snapshot.plan,
+      window.window_minutes, window.remaining_percent, upload.observed_at, window.resets_at ?? upload.observed_at,
+      window.resets_at == null ? 0 : Math.max(0, window.resets_at - upload.observed_at), upload.snapshot.plan,
       deviceID, accountID, source.provider_id, upload.sequence, upload.consent_revision,
     )
   );
@@ -4314,8 +4315,8 @@ async function applyVerifiedCredentialResult(
       historyRowTag(target.account_id, window.metric_id, snapshot.fetched_at),
       snapshot.provider_id, window.metric_id,
       window.title, window.kind, window.window_minutes, window.remaining_percent,
-      snapshot.fetched_at, window.resets_at,
-      Math.max(0, window.resets_at - snapshot.fetched_at), effectivePlan,
+      snapshot.fetched_at, window.resets_at ?? snapshot.fetched_at,
+      window.resets_at == null ? 0 : Math.max(0, window.resets_at - snapshot.fetched_at), effectivePlan,
       target.device_id, target.account_id, ...targetGuardBindings,
     )),
   );
@@ -5491,7 +5492,8 @@ async function applyMonitorResultToTarget(
       historyRowTag(row.account_id, window.metric_id, snapshot.fetched_at),
       snapshot.provider_id, window.metric_id, window.title,
       window.kind, window.window_minutes, window.remaining_percent, snapshot.fetched_at,
-      window.resets_at, Math.max(0, window.resets_at - snapshot.fetched_at),
+      window.resets_at ?? snapshot.fetched_at,
+      window.resets_at == null ? 0 : Math.max(0, window.resets_at - snapshot.fetched_at),
       effectivePlan, row.device_id, row.account_id, nextFingerprint, run.occurrence_at,
       row.target_consent_revision,
     )),
@@ -6411,7 +6413,7 @@ function decodeBase64URL(value: string): Uint8Array<ArrayBuffer> {
 
 function isProviderID(value: unknown): value is ProviderID {
   return typeof value === "string"
-    && ["chatgpt", "claude", "grok", "kimi", "github_copilot", "zai", "minimax", "synthetic", "warp",
+    && ["chatgpt", "claude", "grok", "kimi", "github_copilot", "zai", "zhipu", "minimax", "synthetic", "warp",
       "openai_api", "anthropic_api", "openrouter", "fireworks", "deepseek", "poe"]
       .includes(value);
 }

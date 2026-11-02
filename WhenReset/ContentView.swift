@@ -2,6 +2,7 @@
 import Charts
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 enum AppLinks {
     static let sourceCode = URL(string: "https://github.com/iebb/when-reset")!
@@ -76,6 +77,9 @@ private struct UsageTabView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     if !store.accounts.isEmpty {
+                        Button(editingAccountOrder ? "Done" : "Edit") {
+                            editingAccountOrder.toggle()
+                        }
                         Button("Add", systemImage: "plus") { showingAddAccount = true }
                     }
                 }
@@ -119,6 +123,8 @@ private struct UsageTabView: View {
         )
     }
 
+    @State private var editingAccountOrder = false
+
     private var accountList: some View {
         List {
             ForEach(store.accounts) { account in
@@ -153,8 +159,26 @@ private struct UsageTabView: View {
                 .swipeActions {
                     Button("Remove", role: .destructive) { accountPendingRemoval = account }
                 }
+                .onDrag {
+                    NSItemProvider(object: account.id.uuidString as NSString)
+                }
+                .onDrop(of: [.text], isTargeted: nil) { providers in
+                    guard let provider = providers.first else { return false }
+                    _ = provider.loadObject(ofClass: NSString.self) { value, _ in
+                        guard let raw = value as? String, let dragged = UUID(uuidString: raw) else { return }
+                        Task { @MainActor in
+                            store.moveAccount(dragged, before: account.id)
+                        }
+                    }
+                    return true
+                }
             }
-        }.listStyle(.insetGrouped)
+            .onMove { offsets, destination in
+                store.moveAccounts(from: offsets, to: destination)
+            }
+        }
+        .listStyle(.insetGrouped)
+        .environment(\.editMode, .constant(editingAccountOrder ? .active : .inactive))
     }
 }
 
@@ -183,10 +207,10 @@ private struct FirstRunExperienceView: View {
                         .padding(.vertical, 7)
                         .background(Color.accentColor.opacity(0.11), in: .capsule)
 
-                    Text("Know what resets next.")
+                    Text("See usage across your coding plans.")
                         .font(.system(size: 36, weight: .bold, design: .rounded))
                         .tracking(-0.7)
-                    Text("See every quota, countdown, and trend in one calm, native dashboard.")
+                    Text("Each provider's remaining allowance, with the next reset as a detail.")
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -826,7 +850,7 @@ struct AccountSettingsView: View {
         switch currentAccount.providerID {
         case .chatGPT, .claude, .grok, .kimi:
             "this account’s access token, refresh token, and ID token when available"
-        case .zai, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
+        case .zai, .zhipu, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
              .deepSeek, .poe:
             "this account’s API key"
         case .openAIAPI, .anthropicAPI:
@@ -1368,10 +1392,27 @@ struct SettingsView: View {
     @State private var showingRemoteWorkerAccounts = false
     @State private var stagedLinkFromEntry: WorkerLinkDraft?
     @State private var pushServerActionError: String?
+    @State private var language = AppLanguage.current
+
+    private var languageSelection: Binding<AppLanguage> {
+        Binding {
+            language
+        } set: { newValue in
+            language = newValue
+            AppLanguage.choose(newValue)
+        }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section("Language") {
+                    Picker("Interface language", selection: languageSelection) {
+                        ForEach(AppLanguage.allCases) { language in
+                            Text(language.title).tag(language)
+                        }
+                    }
+                }
                 Section("Notifications") {
                     Toggle("Notify About Unexpected Resets",
                            isOn: $notificationSettings.notifyAboutUnexpectedResets)
@@ -1461,6 +1502,9 @@ struct SettingsView: View {
                 Section("Content") {
                     Toggle("Show percentage remaining", isOn: $settings.showRemainingPercentage)
                     Toggle("Show banked resets", isOn: $settings.showBankedResets)
+                    ForEach(store.accounts) { account in
+                        Toggle(account.resolvedDisplayName, isOn: liveActivityInclusion(account.id))
+                    }
                 }
                 Section("About") {
                     LabeledContent("App", value: "Blinky")
@@ -1514,6 +1558,20 @@ struct SettingsView: View {
             } message: {
                 Text(pushServerActionError ?? "The Worker settings could not be updated.")
             }
+        }
+    }
+
+    private func liveActivityInclusion(_ id: UUID) -> Binding<Bool> {
+        Binding {
+            settings.includes(id)
+        } set: { included in
+            var ids = settings.includedAccountIDs ?? store.accounts.map(\.id)
+            if included {
+                if !ids.contains(id) { ids.append(id) }
+            } else {
+                ids.removeAll { $0 == id }
+            }
+            settings.includedAccountIDs = ids
         }
     }
 
@@ -1849,7 +1907,7 @@ private struct WorkerLinkReviewView: View {
         switch providerID {
         case .chatGPT, .claude, .grok, .kimi:
             "Access token, refresh token, and ID token when available"
-        case .zai, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
+        case .zai, .zhipu, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
              .deepSeek, .poe:
             "API key"
         case .openAIAPI, .anthropicAPI:
@@ -2362,16 +2420,18 @@ struct LimitRow: View {
                 HStack(spacing: 8) {
                     Text(window.displayTitle).font(.headline).lineLimit(1)
                     Spacer()
-                    Text(CountdownDisplay.usageString(until: window.resetsAt, from: context.date))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.75)
-                        .layoutPriority(1)
+                    if window.showsCountdown {
+                        Text(CountdownDisplay.usageString(until: window.resetsAt, from: context.date))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.75)
+                            .layoutPriority(1)
+                    }
                 }
                 HStack(spacing: 10) {
                     ProgressView(value: window.remainingPercent, total: 100).tint(color)
-                    Text("\(Int(window.remainingPercent.rounded()))% left")
+                    Text(UsageText.remainingPercent(window.remainingPercent))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }

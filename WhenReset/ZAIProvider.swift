@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Security
 
 enum ZAIRegion: String, Codable, CaseIterable, Identifiable, Sendable {
     case automatic
@@ -42,7 +43,7 @@ enum ZAIProviderError: LocalizedError {
         case .invalidResponse:
             "智谱 GLM returned unreadable Coding Plan quota data."
         case .noResettableQuota:
-            "智谱 GLM did not report any resettable Coding Plan limits for this key."
+            String.localized("This key has no Coding Plan limits. Pay-as-you-go and general API keys are outside Blinky. Use a Coding Plan key, or sign in with the browser.")
         case let .authorizationFailed(host):
             Self.authorizationMessage(host: host)
         case let .server(code, message):
@@ -68,7 +69,8 @@ struct ZAIUsageResult: Sendable {
 }
 
 struct ZAIProvider {
-    static let providerTitle = "智谱 GLM"
+    static let providerTitle = "z.ai"
+    static let mainlandTitle = "智谱"
     static let globalHost = "api.z.ai"
     static let mainlandHost = "open.bigmodel.cn"
     static let quotaPath = "/api/monitor/usage/quota/limit"
@@ -81,12 +83,14 @@ struct ZAIProvider {
         self.session = session
     }
 
-    func link(apiKey rawAPIKey: String, region: ZAIRegion = .automatic) async throws -> LinkedIdentity {
+    func link(apiKey rawAPIKey: String, provider: ProviderID = .zai,
+              region: ZAIRegion = .automatic) async throws -> LinkedIdentity {
         let apiKey = try Self.normalizedKey(rawAPIKey)
+        let storefront = ZAIStorefront(provider: provider, region: region)
         let account = MonitoredAccount(
             id: UUID(),
-            providerID: .zai,
-            displayName: Self.providerTitle,
+            providerID: storefront.providerID,
+            displayName: storefront.title,
             workspaceID: "pending",
             plan: nil,
             addedAt: .now
@@ -116,14 +120,15 @@ struct ZAIProvider {
     }
 
     static func candidateURLs(region: ZAIRegion, pinnedHost: String?) -> [URL] {
-        if let pinned = quotaURL(forHost: pinnedHost) {
+        candidateURLs(provider: region == .mainland ? .zhipu : .zai, region: region, pinnedHost: pinnedHost)
+    }
+
+    static func candidateURLs(provider: ProviderID, region: ZAIRegion, pinnedHost: String?) -> [URL] {
+        let storefront = ZAIStorefront(provider: provider, region: region)
+        if let pinned = quotaURL(forHost: pinnedHost), pinned.host == storefront.quotaURL.host {
             return [pinned]
         }
-        switch region {
-        case .global: return [globalQuotaURL]
-        case .mainland: return [mainlandQuotaURL]
-        case .automatic: return [globalQuotaURL, mainlandQuotaURL]
-        }
+        return [storefront.quotaURL]
     }
 
     static func quotaURL(forHost host: String?) -> URL? {
@@ -172,11 +177,12 @@ struct ZAIProvider {
             ?? string(payload["plan"])
             ?? string(payload["plan_type"])
             ?? string(payload["packageName"])
+            ?? string(payload["level"]).map { $0.capitalized }
             ?? account.plan
 
         return UsageSnapshot(
             accountID: account.id,
-            providerName: providerTitle,
+            providerName: ZAIStorefront(provider: account.providerID, region: .automatic).title,
             accountName: account.displayName,
             accountProviderID: account.providerID,
             accountSymbolName: account.customSymbolName,
@@ -193,7 +199,7 @@ struct ZAIProvider {
     private func load(account: MonitoredAccount, credentials: AccountCredentials) async throws -> ZAIUsageResult {
         let apiKey = try Self.normalizedKey(credentials.accessToken)
         let region = Self.region(from: credentials)
-        let urls = Self.candidateURLs(region: region, pinnedHost: credentials.serviceHost)
+        let urls = Self.candidateURLs(provider: account.providerID, region: region, pinnedHost: credentials.serviceHost)
         var mostRecentRetryableError: Error?
 
         for url in urls {
@@ -202,7 +208,7 @@ struct ZAIProvider {
                 let snapshot = try Self.parseUsage(account: account, data: data)
                 var pinned = credentials
                 pinned.accessToken = apiKey
-                pinned.serviceRegion = region.rawValue
+                pinned.serviceRegion = ZAIStorefront(provider: account.providerID, region: region).region.rawValue
                 pinned.serviceHost = url.absoluteString
                 return ZAIUsageResult(snapshot: snapshot, credentials: pinned)
             } catch let error as ZAIProviderError {
@@ -262,39 +268,44 @@ struct ZAIProvider {
 
     private static func usageWindow(_ raw: [String: Any], now: Date) -> UsageWindow? {
         guard let type = string(raw["type"])?.uppercased(),
-              type == "TOKENS_LIMIT" || type == "TIME_LIMIT",
-              let reset = resetDate(raw["nextResetTime"] ?? raw["next_reset_time"]),
-              reset > now else { return nil }
+              type == "TOKENS_LIMIT" || type == "CREDIT_LIMIT" || type == "TIME_LIMIT" else { return nil }
+        let reportedReset = resetDate(raw["nextResetTime"] ?? raw["next_reset_time"])
+        let reportsReset = reportedReset.map { $0 > now } ?? false
+        let reset = reportedReset ?? now.addingTimeInterval(60)
 
         let unit = integer(raw["unit"])
         let number = integer(raw["number"]) ?? 0
         let minutes = windowMinutes(unit: unit, number: number)
         let usedPercent = percentage(raw)
 
-        if type == "TOKENS_LIMIT" {
-            switch minutes {
-            case 300:
-                return UsageWindow(title: "5h limit", usedPercent: usedPercent, resetsAt: reset,
-                                   windowMinutes: minutes, kind: .fiveHour, identifier: "zai:five_hour")
-            case 10_080:
-                return UsageWindow(title: "Weekly limit", usedPercent: usedPercent, resetsAt: reset,
-                                   windowMinutes: minutes, kind: .weekly, identifier: "zai:weekly")
-            default:
-                let title = windowTitle(unit: unit, number: number) ?? "Coding limit"
-                return UsageWindow(title: title, usedPercent: usedPercent, resetsAt: reset,
-                                   windowMinutes: minutes, kind: .additional,
-                                   identifier: "zai:coding:\(unit ?? -1):\(number)")
-            }
+        if type == "TIME_LIMIT" {
+            return UsageWindow(
+                title: "Monthly MCP limit",
+                usedPercent: usedPercent,
+                resetsAt: reset,
+                windowMinutes: minutes,
+                kind: .additional,
+                identifier: "zai:mcp:\(unit ?? -1):\(number)",
+                reportsReset: reportsReset
+            )
         }
 
-        return UsageWindow(
-            title: "Monthly MCP limit",
-            usedPercent: usedPercent,
-            resetsAt: reset,
-            windowMinutes: minutes,
-            kind: .additional,
-            identifier: "zai:mcp:\(unit ?? -1):\(number)"
-        )
+        switch minutes {
+        case 300:
+            return UsageWindow(title: "5h limit", usedPercent: usedPercent, resetsAt: reset,
+                               windowMinutes: minutes, kind: .fiveHour, identifier: "zai:five_hour",
+                               reportsReset: reportsReset)
+        case 10_080:
+            return UsageWindow(title: "Weekly limit", usedPercent: usedPercent, resetsAt: reset,
+                               windowMinutes: minutes, kind: .weekly, identifier: "zai:weekly",
+                               reportsReset: reportsReset)
+        default:
+            let title = windowTitle(unit: unit, number: number) ?? "Coding limit"
+            return UsageWindow(title: title, usedPercent: usedPercent, resetsAt: reset,
+                               windowMinutes: minutes, kind: .additional,
+                               identifier: "zai:coding:\(unit ?? -1):\(number)",
+                               reportsReset: reportsReset)
+        }
     }
 
     private static func percentage(_ raw: [String: Any]) -> Double {
@@ -361,4 +372,266 @@ struct ZAIProvider {
         }
         return "The quota service is unavailable."
     }
+}
+
+enum ZAIStorefront: Sendable {
+    case mainland
+    case global
+
+    init(provider: ProviderID, region: ZAIRegion) {
+        if provider == .zhipu || region == .mainland {
+            self = .mainland
+        } else {
+            self = .global
+        }
+    }
+
+    var providerID: ProviderID { self == .mainland ? .zhipu : .zai }
+    var title: String { self == .mainland ? ZAIProvider.mainlandTitle : ZAIProvider.providerTitle }
+    var region: ZAIRegion { self == .mainland ? .mainland : .global }
+    var quotaURL: URL { self == .mainland ? ZAIProvider.mainlandQuotaURL : ZAIProvider.globalQuotaURL }
+    var apiOrigin: String { self == .mainland ? "https://open.bigmodel.cn" : "https://api.z.ai" }
+    var oauthProvider: String { self == .mainland ? "bigmodel" : "zai" }
+}
+
+struct ZAIWebLink: Sendable {
+    var verificationURL: URL
+    var flowID: String
+    var pollToken: String
+    var interval: TimeInterval
+    var expiresAt: Date
+    var storefront: ZAIStorefront
+}
+
+extension ZAIProvider {
+    static let oauthInitURL = URL(string: "https://zcode.z.ai/api/v1/oauth/cli/init")!
+
+    func beginWebLink(storefront: ZAIStorefront, now: Date = .now) async throws -> ZAIWebLink {
+        let pollToken = Self.randomToken()
+        var request = URLRequest(url: Self.oauthInitURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["provider": storefront.oauthProvider])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(pollToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw ZAIProviderError.server(status, "Web sign-in could not start.")
+        }
+        return try Self.webLink(from: data, pollToken: pollToken, storefront: storefront, now: now)
+    }
+
+    func finishWebLink(_ link: ZAIWebLink) async throws -> LinkedIdentity {
+        let ready = try await pollWebLink(link)
+        let apiKey = try await codingPlanKey(storefront: link.storefront, session: ready)
+        return try await self.link(apiKey: apiKey, provider: link.storefront.providerID, region: link.storefront.region)
+    }
+
+    static func webLink(from data: Data, pollToken: String, storefront: ZAIStorefront, now: Date = .now) throws -> ZAIWebLink {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              integer(root["code"]) == 0,
+              let payload = root["data"] as? [String: Any],
+              let flowID = string(payload["flow_id"]), !flowID.isEmpty,
+              let rawURL = string(payload["authorize_url"]),
+              let verificationURL = URL(string: rawURL),
+              isAllowedAuthorizeURL(verificationURL, storefront: storefront) else {
+            throw ZAIProviderError.invalidResponse
+        }
+        let expiresAt = number(payload["expires_at"]).map { value in
+            Date(timeIntervalSince1970: value > 10_000_000_000 ? value / 1_000 : value)
+        } ?? now.addingTimeInterval(10 * 60)
+        let interval = max(1, number(payload["poll_interval_sec"]) ?? 2)
+        return ZAIWebLink(verificationURL: verificationURL, flowID: flowID, pollToken: pollToken,
+                          interval: interval, expiresAt: expiresAt, storefront: storefront)
+    }
+
+    static func isAllowedAuthorizeURL(_ url: URL, storefront: ZAIStorefront) -> Bool {
+        guard url.scheme?.lowercased() == "https" else { return false }
+        switch (storefront, url.host?.lowercased()) {
+        case (.mainland, "bigmodel.cn"), (.mainland, "www.bigmodel.cn"):
+            return url.path == "/login"
+        case (.global, "chat.z.ai"):
+            return url.path == "/api/oauth/authorize"
+        default:
+            return false
+        }
+    }
+
+    private func pollWebLink(_ link: ZAIWebLink) async throws -> ZAIWebSession {
+        guard let pollURL = URL(string: "https://zcode.z.ai/api/v1/oauth/cli/poll/\(link.flowID)") else {
+            throw ZAIProviderError.invalidResponse
+        }
+        while Date.now < link.expiresAt {
+            try Task.checkCancellation()
+            try await Task.sleep(for: .seconds(link.interval))
+            var request = URLRequest(url: pollURL)
+            request.timeoutInterval = 20
+            request.setValue("Bearer \(link.pollToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+            let (data, response) = try await session.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            guard (200..<300).contains(status),
+                  let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  Self.integer(root["code"]) == 0,
+                  let payload = root["data"] as? [String: Any],
+                  let state = Self.string(payload["status"]) else { continue }
+            switch state {
+            case "pending":
+                continue
+            case "failed":
+                throw ZAIProviderError.authorizationFailed(link.storefront.quotaURL.host ?? "zcode.z.ai")
+            case "ready":
+                guard let session = Self.webSession(from: payload, storefront: link.storefront) else {
+                    throw ZAIProviderError.invalidResponse
+                }
+                return session
+            default:
+                continue
+            }
+        }
+        throw ZAIProviderError.server(408, "Web sign-in timed out.")
+    }
+
+    static func webSession(from payload: [String: Any], storefront: ZAIStorefront) -> ZAIWebSession? {
+        let bucketKey = storefront == .mainland ? "bigmodel" : "zai"
+        let bucket = payload[bucketKey] as? [String: Any] ?? [:]
+        let access = string(bucket["access_token"]) ?? string(bucket["accessToken"]) ?? string(payload["token"])
+        guard let access, !access.isEmpty else { return nil }
+        let refresh = string(bucket["refresh_token"]) ?? string(bucket["refreshToken"]) ?? ""
+        let user = payload["user"] as? [String: Any]
+        return ZAIWebSession(accessToken: access, refreshToken: refresh,
+                             name: string(user?["name"]), email: string(user?["email"]))
+    }
+
+    private func codingPlanKey(storefront: ZAIStorefront, session: ZAIWebSession) async throws -> String {
+        if await quotaAccepts(session.accessToken, url: storefront.quotaURL) {
+            return session.accessToken
+        }
+        let business = await businessToken(origin: storefront.apiOrigin, oauthToken: session.accessToken) ?? session.accessToken
+        if await quotaAccepts(business, url: storefront.quotaURL) {
+            return business
+        }
+        if let existing = await readableProjectKey(origin: storefront.apiOrigin, token: business) {
+            return existing
+        }
+        if let created = await createProjectKey(origin: storefront.apiOrigin, token: business) {
+            return created
+        }
+        throw ZAIProviderError.server(0, String.localized("Browser sign-in finished, but Blinky could not read or create a Coding Plan key."))
+    }
+
+    private func quotaAccepts(_ token: String, url: URL) async -> Bool {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await session.data(for: request),
+              let status = (response as? HTTPURLResponse)?.statusCode,
+              (200..<300).contains(status) else { return false }
+        return Self.envelopeAccepted(data)
+    }
+
+    private func businessToken(origin: String, oauthToken: String) async -> String? {
+        guard let url = URL(string: origin + "/api/auth/z/login") else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 15
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["token": oauthToken])
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let payload = root["data"] as? [String: Any] ?? root
+        return Self.string(payload["access_token"]) ?? Self.string(payload["accessToken"])
+    }
+
+    private func readableProjectKey(origin: String, token: String) async -> String? {
+        guard let context = await projectContext(origin: origin, token: token) else { return nil }
+        return await copyKey(origin: origin, token: token, context: context, createIfMissing: false)
+    }
+
+    private func createProjectKey(origin: String, token: String) async -> String? {
+        guard let context = await projectContext(origin: origin, token: token) else { return nil }
+        return await copyKey(origin: origin, token: token, context: context, createIfMissing: true)
+    }
+
+    private func projectContext(origin: String, token: String) async -> (org: String, project: String)? {
+        guard let url = URL(string: origin + "/api/biz/customer/getCustomerInfo") else { return nil }
+        guard let root = await authorizedJSON(url, token: token) else { return nil }
+        let data = (root["data"] as? [String: Any]) ?? root
+        guard let orgs = data["organizations"] as? [[String: Any]],
+              let org = orgs.first else { return nil }
+        let orgID = Self.string(org["organizationId"]) ?? Self.string(org["id"])
+        let projects = org["projects"] as? [[String: Any]]
+        let project = projects?.first
+        let projectID = Self.string(project?["projectId"]) ?? Self.string(project?["id"]) ?? "default"
+        guard let orgID else { return nil }
+        return (orgID, projectID)
+    }
+
+    private func copyKey(origin: String, token: String, context: (org: String, project: String),
+                         createIfMissing: Bool) async -> String? {
+        let keysURL = origin + "/api/biz/v1/organization/\(context.org)/projects/\(context.project)/api_keys"
+        guard let url = URL(string: keysURL), let root = await authorizedJSON(url, token: token) else { return nil }
+        var items = root["data"] as? [[String: Any]] ?? []
+        if items.isEmpty, createIfMissing {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 15
+            request.httpBody = try? JSONSerialization.data(withJSONObject: ["name": "blinky-usage"])
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            if let (data, response) = try? await session.data(for: request),
+               (response as? HTTPURLResponse)?.statusCode == 200,
+               let created = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let item = created["data"] as? [String: Any] {
+                items = [item]
+            }
+        }
+        let preferred = items.first { Self.string($0["name"]) == "blinky-usage" } ?? items.first
+        guard let preferred else { return nil }
+        if let secret = Self.unmaskedSecret(preferred), let id = Self.string(preferred["apiKey"] ?? preferred["id"]) {
+            return secret.contains(".") ? secret : "\(id).\(secret)"
+        }
+        guard let id = Self.string(preferred["apiKey"] ?? preferred["id"]),
+              let copyURL = URL(string: keysURL + "/copy/\(id)"),
+              let copied = await authorizedJSON(copyURL, token: token) else { return nil }
+        let payload = copied["data"] as? [String: Any] ?? copied
+        guard let secret = Self.string(payload["secretKey"] ?? payload["secret"]), !secret.contains("*") else { return nil }
+        return "\(id).\(secret)"
+    }
+
+    private func authorizedJSON(_ url: URL, token: String) async -> [String: Any]? {
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await session.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    private static func unmaskedSecret(_ item: [String: Any]) -> String? {
+        guard let secret = string(item["secretKey"] ?? item["secret"]), !secret.contains("*"), secret.count >= 8 else {
+            return nil
+        }
+        return secret
+    }
+
+    private static func randomToken() -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+struct ZAIWebSession: Sendable {
+    var accessToken: String
+    var refreshToken: String
+    var name: String?
+    var email: String?
 }

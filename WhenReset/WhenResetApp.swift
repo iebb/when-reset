@@ -164,6 +164,7 @@ struct WhenResetApp: App {
 #endif
     @Environment(\.scenePhase) private var scenePhase
     @State private var store: AppStore
+    @State private var interfaceLanguage = AppLanguage.current
 
     init() {
         let store = AppStore()
@@ -178,6 +179,10 @@ struct WhenResetApp: App {
 #if os(iOS)
         WindowGroup {
             ContentView().environment(store)
+                .environment(\.locale, interfaceLanguage.locale)
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
+                    if let language = note.object as? AppLanguage { interfaceLanguage = language }
+                }
                 .task { await startStore() }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }
@@ -208,6 +213,10 @@ struct WhenResetApp: App {
         Window("Blinky", id: "main") {
             MacContentView()
                 .environment(store)
+                .environment(\.locale, interfaceLanguage.locale)
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
+                    if let language = note.object as? AppLanguage { interfaceLanguage = language }
+                }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }
                     await store.synchronizeAccountsFromICloudKeychain()
