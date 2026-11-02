@@ -546,7 +546,7 @@ enum CodexResetRequest {
         )
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Blinky", forHTTPHeaderField: "User-Agent")
-        if let etag, !etag.isEmpty {
+        if let etag = etag?.trimmingCharacters(in: .whitespacesAndNewlines), !etag.isEmpty {
             request.setValue(etag, forHTTPHeaderField: "If-None-Match")
         }
         return request
