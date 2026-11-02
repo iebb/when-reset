@@ -36,6 +36,8 @@ jobs:
           shellcheck .github/scripts/export-app-store.sh
           bash -n Scripts/bump-update-check.sh
           shellcheck Scripts/bump-update-check.sh
+          bash .github/scripts/check-version-source.sh
+          shellcheck .github/scripts/check-version-source.sh
           python3 -c 'import json; d=json.load(open("update-check.json", encoding="utf-8")); ios=d["ios"]; assert ios["version"] and str(ios["build"]).isdigit() and "T" in ios["updatedAt"]'
           tmp="$(mktemp)"
           bash Scripts/bump-update-check.sh 1.2.3 45 "$tmp"

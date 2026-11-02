@@ -67,12 +67,11 @@ jobs:
         if: steps.release_guard.outputs.should_release == 'true'
         id: version
         run: |
-          marketing_version=$(awk '/MARKETING_VERSION = / { gsub(/[";]/, "", $3); print $3; exit }' WhenReset.xcodeproj/project.pbxproj)
+          # project.yml is the only version a bump edits. xcodegen writes the
+          # same values into project.pbxproj; do not read that file here.
+          marketing_version=$(awk -F'"' '/^[[:space:]]*MARKETING_VERSION:/ { print $2; exit }' project.yml)
           if [[ -z "$marketing_version" ]]; then
-            marketing_version=$(awk '/^MARKETING_VERSION[[:space:]]*=/ { print $3; exit }' Config/WhenReset.xcconfig)
-          fi
-          if [[ -z "$marketing_version" ]]; then
-            echo "Could not read MARKETING_VERSION." >&2
+            echo "Could not read MARKETING_VERSION from project.yml." >&2
             exit 1
           fi
           echo "marketing_version=$marketing_version" >> "$GITHUB_OUTPUT"

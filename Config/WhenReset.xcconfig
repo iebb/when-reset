@@ -8,7 +8,8 @@ APP_BUNDLE_IDENTIFIER = com.harrisliangsu.whenreset
 WIDGET_BUNDLE_IDENTIFIER = com.harrisliangsu.whenreset.widgets
 APP_GROUP_IDENTIFIER = group.com.harrisliangsu.whenreset
 KEYCHAIN_GROUP_SUFFIX = com.harrisliangsu.whenreset.shared
-MARKETING_VERSION = 1.9
-CURRENT_PROJECT_VERSION = 34
+// Marketing version and build number are set only in project.yml.
+// After changing them, run `xcodegen generate --spec project.yml` and commit
+// WhenReset.xcodeproj. CI rejects a project that does not match project.yml.
 DEVELOPMENT_TEAM =
 CODE_SIGN_STYLE = Automatic

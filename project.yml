@@ -12,6 +12,8 @@ configFiles:
   Release: Config/WhenReset.xcconfig
 settings:
   base:
+    # Bump the marketing version and build number only here, then run
+    # `xcodegen generate --spec project.yml` and commit the Xcode project.
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "1.9"

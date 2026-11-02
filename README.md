@@ -102,13 +102,22 @@ Push from the self-hosted server is separate. The vendored APNs key under `serve
 
 中文对照：PR 上的 CI 不需要 Apple 密钥。模拟器测试在 runner 上做 ad-hoc 签名，这样钥匙串测试才能通过；Release 构建保持未签名。打上 `v*` 版本标签后，TestFlight 工作流才会用 Apple 团队签名上传；缺上面四个 secret 时，该工作流会直接失败并列出缺哪几个，不会假成功。开发者网站要先建好 App ID、Widget ID、App Group，并打开主 App 的 Push Notifications。上游的 APNs 密钥不能给这个新 Bundle ID 发推送。应用内检查更新只比较版本并打开 App Store 或 TestFlight，不会下载安装包。App Store 用 iTunes Lookup（id `6829609877`）；TestFlight 读 `master` 上的 `update-check.json`。iOS 上传成功后，`publish-update-feed` 会运行 `Scripts/bump-update-check.sh` 并把该文件推到 `master`。
 
-Release preparation checks App Store Connect before archiving. It treats the checked-in
-marketing version as a minimum: if Apple has approved that version on a selected platform,
-the upload uses the next patch version after the latest approved release. Build numbers
-increase across all app versions and platforms, including paginated build history. Xcode's
-specific unreadable cloud-signing response is retried up to three times before upload;
-version-validation failures and potentially completed uploads are not retried. App Store
-review submission remains an explicit manual option, separate from TestFlight uploads.
+Release preparation reads `MARKETING_VERSION` only from `project.yml`. That file is
+the only place to bump the marketing version and build number. `xcodegen generate --spec project.yml`
+writes the same values into `WhenReset.xcodeproj/project.pbxproj`, and CI rejects a
+project file or `Config/WhenReset.xcconfig` that disagrees. The checked-in version is
+a minimum: if Apple has approved that version on a selected platform, the upload uses
+the next patch version after the latest approved release. Build numbers increase across
+all app versions and platforms, including paginated build history. The number App Store
+Connect already has can be higher than the checked-in build; the workflow still picks
+one above that. Xcode's specific unreadable cloud-signing response is retried up to
+three times before upload; version-validation failures and potentially completed uploads
+are not retried. App Store review submission remains an explicit manual option, separate
+from TestFlight uploads.
+
+`update-check.json` on `master` records the iOS build that was actually uploaded, not
+the next checked-in version. It stays at that live TestFlight build until another
+upload finishes.
 
 iOS update checks never download an app binary. App Store installs compare the installed
 version with iTunes Lookup for app id `6829609877`. That lookup does not include TestFlight
