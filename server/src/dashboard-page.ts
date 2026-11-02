@@ -1622,7 +1622,7 @@ const DASHBOARD_SCRIPT = String.raw`
     }
 
     const reset = element("span", "quota__reset");
-    addCountdown(reset, window.resets_at);
+    if (window.reports_reset !== false && window.resets_at) addCountdown(reset, window.resets_at);
     wrapper.append(reset);
     return wrapper;
   }

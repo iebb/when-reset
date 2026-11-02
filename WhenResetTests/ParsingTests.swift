@@ -27,11 +27,11 @@ private actor TestEventRecorder {
 }
 
 final class ParsingTests: XCTestCase {
-    func testPublicGitHubLinksTargetWhenResetRepository() {
+    func testPublicGitHubLinksTargetBlinkyRepository() {
         XCTAssertEqual(AppLinks.sourceCode.scheme, "https")
         XCTAssertEqual(AppLinks.sourceCode.host, "github.com")
-        XCTAssertEqual(AppLinks.sourceCode.path, "/iebb/when-reset")
-        XCTAssertEqual(AppLinks.issues.path, "/iebb/when-reset/issues")
+        XCTAssertEqual(AppLinks.sourceCode.path, "/harrisliangsu/blinky-ios")
+        XCTAssertEqual(AppLinks.issues.path, "/harrisliangsu/blinky-ios/issues")
     }
 
     func testRemainingPercentIsClamped() {
@@ -3720,6 +3720,25 @@ final class MacUsageHistoryPresentationTests: XCTestCase {
         XCTAssertEqual(selected.upperBound, latest)
         XCTAssertEqual(selected.lowerBound, latest.addingTimeInterval(-7 * 24 * 60 * 60))
         XCTAssertEqual(series.points.map(\.recordedAt), [recent, latest])
+    }
+
+    func testCodexDevicePageStaysBareUnlessOpenAISuppliesACompleteURL() {
+        XCTAssertEqual(
+            ChatGPTProvider.verificationURL(from: ["user_code": "UZNS-UK0TP"]).absoluteString,
+            "https://auth.openai.com/codex/device"
+        )
+        XCTAssertEqual(
+            ChatGPTProvider.verificationURL(from: [
+                "verification_uri_complete": "https://auth.openai.com/codex/device?user_code=UZNS-UK0TP"
+            ]).absoluteString,
+            "https://auth.openai.com/codex/device?user_code=UZNS-UK0TP"
+        )
+        XCTAssertEqual(
+            ChatGPTProvider.verificationURL(from: [
+                "verification_uri_complete": "https://evil.example/device?user_code=UZNS-UK0TP"
+            ]).absoluteString,
+            "https://auth.openai.com/codex/device"
+        )
     }
 
     func testCodexCLICredentialParserReadsChatGPTAuthSchema() throws {

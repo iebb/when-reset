@@ -7,6 +7,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
     case kimi = "kimi"
     case githubCopilot = "github_copilot"
     case zai = "zai"
+    case zhipu = "zhipu"
     case miniMax = "minimax"
     case synthetic = "synthetic"
     case ollamaCloud = "ollama_cloud"
@@ -28,7 +29,8 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .grok: "Grok"
         case .kimi: "Kimi Code"
         case .githubCopilot: "GitHub Copilot"
-        case .zai: "智谱 GLM"
+        case .zai: "z.ai"
+        case .zhipu: "智谱"
         case .miniMax: "MiniMax Token Plan"
         case .synthetic: "Synthetic"
         case .ollamaCloud: "Ollama Cloud"
@@ -83,25 +85,26 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
 
     var accountDescription: String {
         switch self {
-        case .chatGPT: "Usage limits and banked resets"
-        case .claude: "Session and weekly reset times"
-        case .grok: "Weekly Grok credit pool"
-        case .kimi: "5-hour and weekly coding limits"
-        case .githubCopilot: "Chat and premium request quotas"
-        case .zai: "智谱 BigModel / Z.AI · 5h, weekly, monthly"
-        case .miniMax: "5-hour and weekly coding limits"
-        case .synthetic: "Rolling 5-hour and weekly limits"
-        case .ollamaCloud: "Session and weekly Cloud limits"
-        case .warp: "Monthly request credits"
-        case .antigravity: "Gemini, Claude, and GPT quota pools"
-        case .compatibleAPI: "Reset windows from a compatible endpoint"
-        case .openAIAPI: "Organization API spend and budget balance"
-        case .anthropicAPI: "Organization API spend and budget balance"
-        case .newAPI: "API-key balance from a compatible gateway"
-        case .openRouter: "API-key spending limit and reset"
-        case .fireworksAI: "Monthly API spend limit"
-        case .deepSeek: "Available API wallet balance"
-        case .poe: "Available API point balance"
+        case .chatGPT: String.localized("Usage limits and banked resets")
+        case .claude: String.localized("Session and weekly reset times")
+        case .grok: String.localized("Weekly Grok credit pool")
+        case .kimi: String.localized("5-hour and weekly coding limits")
+        case .githubCopilot: String.localized("Chat and premium request quotas")
+        case .zai: String.localized("z.ai Coding Plan · 5h and weekly")
+        case .zhipu: String.localized("智谱 Coding Plan · 5h and weekly")
+        case .miniMax: String.localized("5-hour and weekly coding limits")
+        case .synthetic: String.localized("Rolling 5-hour and weekly limits")
+        case .ollamaCloud: String.localized("Session and weekly Cloud limits")
+        case .warp: String.localized("Monthly request credits")
+        case .antigravity: String.localized("Gemini, Claude, and GPT quota pools")
+        case .compatibleAPI: String.localized("Reset windows from a compatible endpoint")
+        case .openAIAPI: String.localized("Organization API spend and budget balance")
+        case .anthropicAPI: String.localized("Organization API spend and budget balance")
+        case .newAPI: String.localized("API-key balance from a compatible gateway")
+        case .openRouter: String.localized("API-key spending limit and reset")
+        case .fireworksAI: String.localized("Monthly API spend limit")
+        case .deepSeek: String.localized("Available API wallet balance")
+        case .poe: String.localized("Available API point balance")
         }
     }
 
@@ -112,7 +115,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .grok: "GrokLogo"
         case .kimi: "KimiLogo"
         case .githubCopilot: "CopilotLogo"
-        case .zai: "ZAILogo"
+        case .zai, .zhipu: "ZAILogo"
         case .miniMax: "MiniMaxLogo"
         case .openAIAPI: "ChatGPTLogo"
         case .anthropicAPI: "ClaudeLogo"
@@ -127,7 +130,7 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .grok: "sparkle"
         case .kimi: "moon.stars.fill"
         case .githubCopilot: "chevron.left.forwardslash.chevron.right"
-        case .zai: "z.square.fill"
+        case .zai, .zhipu: "z.square.fill"
         case .miniMax: "waveform"
         case .synthetic: "atom"
         case .ollamaCloud: "cloud.fill"
@@ -172,9 +175,9 @@ enum LiveActivityMode: String, Codable, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .automatic: "Automatic"
-        case .always: "Always"
-        case .disabled: "Do not show Live Activity"
+        case .automatic: String.localized("Automatic")
+        case .always: String.localized("Always")
+        case .disabled: String.localized("Do not show Live Activity")
         }
     }
 
@@ -202,10 +205,10 @@ enum LiveActivityTrigger: String, Codable, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .remainingPercent: "Percentage remaining"
-        case .remainingHours: "Hours remaining"
-        case .exhausted: "When exhausted"
-        case .never: "Never"
+        case .remainingPercent: String.localized("Percentage remaining")
+        case .remainingHours: String.localized("Hours remaining")
+        case .exhausted: String.localized("When exhausted")
+        case .never: String.localized("Never")
         }
     }
 }
@@ -433,12 +436,15 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
     var mode: LiveActivityMode = .automatic
     var showRemainingPercentage = true
     var showBankedResets = true
+    /// Nil means every account, in Usage order. An empty list shows none.
+    var includedAccountIDs: [UUID]? = nil
 
     init(mode: LiveActivityMode = .automatic, showRemainingPercentage: Bool = true,
-         showBankedResets: Bool = true) {
+         showBankedResets: Bool = true, includedAccountIDs: [UUID]? = nil) {
         self.mode = mode
         self.showRemainingPercentage = showRemainingPercentage
         self.showBankedResets = showBankedResets
+        self.includedAccountIDs = includedAccountIDs
     }
 
     init(from decoder: Decoder) throws {
@@ -447,6 +453,12 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
         showRemainingPercentage = try values.decodeIfPresent(Bool.self,
                                                              forKey: .showRemainingPercentage) ?? true
         showBankedResets = try values.decodeIfPresent(Bool.self, forKey: .showBankedResets) ?? true
+        includedAccountIDs = try values.decodeIfPresent([UUID].self, forKey: .includedAccountIDs)
+    }
+
+    func includes(_ accountID: UUID) -> Bool {
+        guard let includedAccountIDs else { return true }
+        return includedAccountIDs.contains(accountID)
     }
 }
 
@@ -599,15 +611,15 @@ enum RefreshInterval: Int, Codable, CaseIterable, Hashable, Sendable {
 
     var title: String {
         switch self {
-        case .off: "Off"
-        case .fiveMinutes: "5 minutes"
-        case .tenMinutes: "10 minutes"
-        case .fifteenMinutes: "15 minutes"
-        case .thirtyMinutes: "30 minutes"
-        case .oneHour: "1 hour"
-        case .twoHours: "2 hours"
-        case .fourHours: "4 hours"
-        case .eightHours: "8 hours"
+        case .off: String.localized("Off")
+        case .fiveMinutes: String.localized("5 minutes")
+        case .tenMinutes: String.localized("10 minutes")
+        case .fifteenMinutes: String.localized("15 minutes")
+        case .thirtyMinutes: String.localized("30 minutes")
+        case .oneHour: String.localized("1 hour")
+        case .twoHours: String.localized("2 hours")
+        case .fourHours: String.localized("4 hours")
+        case .eightHours: String.localized("8 hours")
         }
     }
 
@@ -646,15 +658,56 @@ struct UsageWindow: Codable, Hashable, Sendable {
     var windowMinutes: Int?
     var kind: UsageWindowKind? = nil
     var identifier: String? = nil
+    /// False when the provider reported a percent but no future reset time.
+    var reportsReset: Bool = true
+
+    init(title: String, usedPercent: Double, resetsAt: Date, windowMinutes: Int? = nil,
+         kind: UsageWindowKind? = nil, identifier: String? = nil, reportsReset: Bool = true) {
+        self.title = title
+        self.usedPercent = usedPercent
+        self.resetsAt = resetsAt
+        self.windowMinutes = windowMinutes
+        self.kind = kind
+        self.identifier = identifier
+        self.reportsReset = reportsReset
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        title = try values.decode(String.self, forKey: .title)
+        usedPercent = try values.decode(Double.self, forKey: .usedPercent)
+        resetsAt = try values.decode(Date.self, forKey: .resetsAt)
+        windowMinutes = try values.decodeIfPresent(Int.self, forKey: .windowMinutes)
+        kind = try values.decodeIfPresent(UsageWindowKind.self, forKey: .kind)
+        identifier = try values.decodeIfPresent(String.self, forKey: .identifier)
+        reportsReset = try values.decodeIfPresent(Bool.self, forKey: .reportsReset) ?? true
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(title, forKey: .title)
+        try values.encode(usedPercent, forKey: .usedPercent)
+        try values.encode(resetsAt, forKey: .resetsAt)
+        try values.encodeIfPresent(windowMinutes, forKey: .windowMinutes)
+        try values.encodeIfPresent(kind, forKey: .kind)
+        try values.encodeIfPresent(identifier, forKey: .identifier)
+        try values.encode(reportsReset, forKey: .reportsReset)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case title, usedPercent, resetsAt, windowMinutes, kind, identifier, reportsReset
+    }
 
     var remainingPercent: Double { max(0, min(100, 100 - usedPercent)) }
 
+    var showsCountdown: Bool { reportsReset }
+
     var displayTitle: String {
         if kind == .additional { return title }
-        return switch windowMinutes {
-        case 300: "5h limit"
-        case 10_080: "Weekly limit"
-        default: title
+        switch windowMinutes {
+        case 300: return String.localized("5h limit")
+        case 10_080: return String.localized("Weekly limit")
+        default: return title
         }
     }
 
@@ -714,7 +767,13 @@ enum CountdownDisplay {
         let minutes = (remaining % 3_600) / 60
         let seconds = remaining % 60
         let clock = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-        return days > 0 ? "\(days) day\(days == 1 ? "" : "s"), \(clock)" : clock
+        if days == 1 {
+            return String(format: String.localized("1 day, %@"), locale: AppLanguage.current.locale, clock)
+        }
+        if days > 1 {
+            return String(format: String.localized("%lld days, %@"), locale: AppLanguage.current.locale, Int64(days), clock)
+        }
+        return clock
     }
 
     static func usageString(until expiry: Date, from date: Date = .now) -> String {
@@ -723,10 +782,15 @@ enum CountdownDisplay {
 
     static func compactString(until expiry: Date, from date: Date = .now) -> String {
         let remainingSeconds = max(0, Int(expiry.timeIntervalSince(date).rounded(.down)))
-        if remainingSeconds > 48 * 3_600 { return "\(remainingSeconds / 86_400)d" }
+        let locale = AppLanguage.current.locale
+        if remainingSeconds > 48 * 3_600 {
+            return String(format: String.localized("%lldd"), locale: locale, Int64(remainingSeconds / 86_400))
+        }
         let remainingMinutes = remainingSeconds / 60
-        if remainingMinutes < 100 { return "\(remainingMinutes)m" }
-        return "\(remainingMinutes / 60)h"
+        if remainingMinutes < 100 {
+            return String(format: String.localized("%lldm"), locale: locale, Int64(remainingMinutes))
+        }
+        return String(format: String.localized("%lldh"), locale: locale, Int64(remainingMinutes / 60))
     }
 
     static func liveActivityValue(until expiry: Date, from date: Date = .now) -> LiveActivityCountdownValue {
@@ -784,6 +848,21 @@ struct UsageSnapshot: Codable, Hashable, Sendable {
     var resolvedAccountName: String {
         let name = accountName.trimmingCharacters(in: .whitespacesAndNewlines)
         return name.isEmpty ? providerName : name
+    }
+
+    func headlineWindow(pinnedMetricID: String?) -> UsageWindow? {
+        let windows = usageWindows.filter { $0.kind != .additional }
+        let pool = windows.isEmpty ? usageWindows : windows
+        if let pinnedMetricID, let pinned = pool.first(where: { $0.metricID == pinnedMetricID }) {
+            return pinned
+        }
+        return pool.max { $0.usedPercent < $1.usedPercent }
+    }
+
+    func secondaryLimit(after headline: UsageWindow) -> UsageWindow? {
+        usageWindows.first { window in
+            window.metricID != headline.metricID && window.kind != .additional && window.kind != headline.kind
+        } ?? usageWindows.first { $0.metricID != headline.metricID && $0.kind != .additional }
     }
 
     var usageWindows: [UsageWindow] {

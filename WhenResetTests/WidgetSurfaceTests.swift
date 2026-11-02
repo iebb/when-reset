@@ -9,7 +9,8 @@ final class WidgetSurfaceTests: XCTestCase {
                            secondary: "chatgpt:weekly", now: now),
             codingSnapshot(.kimi, name: "Kimi", primary: "kimi:five_hour",
                            secondary: "kimi:weekly", now: now),
-            try zaiSnapshot(now: now),
+            try zaiSnapshot(now: now, provider: .zai),
+            try zaiSnapshot(now: now, provider: .zhipu),
             try grokSnapshot(now: now),
         ]
 
@@ -70,7 +71,7 @@ final class WidgetSurfaceTests: XCTestCase {
         )
     }
 
-    private func zaiSnapshot(now: Date) throws -> UsageSnapshot {
+    private func zaiSnapshot(now: Date, provider: ProviderID) throws -> UsageSnapshot {
         let data = Data(#"""
         {
           "code": 200,
@@ -88,7 +89,7 @@ final class WidgetSurfaceTests: XCTestCase {
           }
         }
         """#.utf8)
-        let account = MonitoredAccount(id: UUID(), providerID: .zai, displayName: "智谱 GLM",
+        let account = MonitoredAccount(id: UUID(), providerID: provider, displayName: provider.displayName,
                                        workspaceID: "zai-widget", plan: nil, addedAt: now)
         return try ZAIProvider.parseUsage(account: account, data: data, now: now)
     }

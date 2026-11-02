@@ -434,7 +434,7 @@ private struct MacAccountDetailView: View {
         switch currentAccount.providerID {
         case .chatGPT, .claude, .grok, .kimi:
             "this account’s access token, refresh token, and ID token when available"
-        case .zai, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
+        case .zai, .zhipu, .miniMax, .synthetic, .warp, .openRouter, .fireworksAI,
              .deepSeek, .poe:
             "this account’s API key"
         case .openAIAPI, .anthropicAPI:
@@ -2412,7 +2412,7 @@ private struct MacAddAccountView: View {
             antigravityLinker
         case "compatible_api":
             compatibleLinker
-        case "zai", "minimax", "synthetic", "ollama_cloud", "warp", "openrouter",
+        case "zai", "zhipu", "minimax", "synthetic", "ollama_cloud", "warp", "openrouter",
              "fireworks", "deepseek", "poe":
             apiKeyLinker(provider)
         default:
@@ -2615,7 +2615,9 @@ private struct MacAddAccountView: View {
                 completionTask = Task {
                     let success: Bool
                     switch provider.rawValue {
-                    case "zai": success = await store.addZAIAccount(apiKey: secret, region: zaiRegion,
+                    case "zai": success = await store.addZAIAccount(apiKey: secret, provider: .zai, region: .global,
+                                                                     replacing: relinkingAccount)
+                    case "zhipu": success = await store.addZAIAccount(apiKey: secret, provider: .zhipu, region: .mainland,
                                                                      replacing: relinkingAccount)
                     case "minimax": success = await store.addMiniMaxAccount(apiKey: secret,
                                                                              replacing: relinkingAccount)
@@ -2681,6 +2683,10 @@ private struct MacAddAccountView: View {
             guard !Task.isCancelled,
                   let link = store.deviceLink,
                   link.providerID == provider else { return }
+            if provider == .chatGPT, !link.userCode.isEmpty {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(link.userCode, forType: .string)
+            }
             NSWorkspace.shared.open(link.verificationURL)
             if await store.completeDeviceLink(replacing: relinkingAccount) {
                 dismissAfterSuccess()

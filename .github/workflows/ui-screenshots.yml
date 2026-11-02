@@ -1,0 +1,120 @@
+name: UI screenshots
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  screenshots:
+    name: Simulator screenshots
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Generate the Xcode project
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew install xcodegen
+          xcodegen generate --spec project.yml
+
+      - name: Capture screenshots
+        run: |
+          set -euo pipefail
+          run_shots() {
+            local attempt="$1"
+            xcodebuild test \
+              -project WhenReset.xcodeproj \
+              -scheme Screenshots \
+              -configuration Debug \
+              -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest' \
+              -derivedDataPath "$RUNNER_TEMP/DerivedData-Screenshots" \
+              -resultBundlePath "$RUNNER_TEMP/Screenshots-${attempt}.xcresult" \
+              -only-testing:WhenResetUITests \
+              -only-testing:WhenResetTests/ScreenshotRenderTests \
+              CODE_SIGN_STYLE=Manual \
+              "CODE_SIGN_IDENTITY=-" \
+              CODE_SIGNING_ALLOWED=YES \
+              CODE_SIGNING_REQUIRED=YES \
+              DEVELOPMENT_TEAM= \
+              PROVISIONING_PROFILE_SPECIFIER=
+          }
+
+          set +e
+          run_shots 1
+          status=$?
+          if [[ "$status" -ne 0 ]]; then
+            echo "Simulator capture failed (exit $status); resetting simulators and retrying once."
+            xcrun simctl shutdown all || true
+            run_shots 2
+            status=$?
+          fi
+          set -e
+          # Export reads a single result bundle. Keep the later attempt when it exists.
+          if [[ -d "$RUNNER_TEMP/Screenshots-2.xcresult" ]]; then
+            rm -rf "$RUNNER_TEMP/Screenshots.xcresult"
+            cp -R "$RUNNER_TEMP/Screenshots-2.xcresult" "$RUNNER_TEMP/Screenshots.xcresult"
+          elif [[ -d "$RUNNER_TEMP/Screenshots-1.xcresult" ]]; then
+            rm -rf "$RUNNER_TEMP/Screenshots.xcresult"
+            cp -R "$RUNNER_TEMP/Screenshots-1.xcresult" "$RUNNER_TEMP/Screenshots.xcresult"
+          fi
+          exit "$status"
+
+      - name: Export screenshot attachments
+        if: always()
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/ui-screenshots"
+          rm -rf "$out"
+          mkdir -p "$out"
+          if xcrun xcresulttool export attachments --help >/dev/null 2>&1; then
+            xcrun xcresulttool export attachments \
+              --path "$RUNNER_TEMP/Screenshots.xcresult" \
+              --output-path "$out" || true
+          fi
+          find "$RUNNER_TEMP/Screenshots.xcresult" -type f \
+            \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
+            -exec cp {} "$out" \; || true
+          OUT="$out" python3 - << 'PY'
+          import json, os, shutil
+          from pathlib import Path
+          out = Path(os.environ["OUT"])
+          manifest = out / "manifest.json"
+          if manifest.exists():
+              named = out / "named"
+              named.mkdir(exist_ok=True)
+              for group in json.loads(manifest.read_text()):
+                  for item in group.get("attachments", []):
+                      source = out / item["exportedFileName"]
+                      label = item["suggestedHumanReadableName"].split("_0_")[0]
+                      label = "".join(
+                          char if char not in '\"<>:|?*\r\n' else "-"
+                          for char in label
+                      )
+                      if not label.endswith(".png"):
+                          label += ".png"
+                      if source.exists():
+                          shutil.copy(source, named / label)
+              print("named", len(list(named.glob('*.png'))))
+          PY
+          find "$out" -type f | sort
+          test -n "$(find "$out" -type f -print -quit)"
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: ${{ runner.temp }}/ui-screenshots/named
+          if-no-files-found: error

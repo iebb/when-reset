@@ -13,8 +13,8 @@ enum PushServerMode: String, Codable, CaseIterable, Hashable, Sendable {
 
     var title: String {
         switch self {
-        case .disabled: "Off"
-        case .custom: "Self-hosted server"
+        case .disabled: String.localized("Off")
+        case .custom: String.localized("Self-hosted server")
         }
     }
 }

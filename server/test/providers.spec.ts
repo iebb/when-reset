@@ -218,6 +218,31 @@ describe("server-side provider adapters", () => {
     });
   });
 
+  it("parses Zhipu CREDIT_LIMIT windows and omits a reset the payload does not state", () => {
+    expect(providerTesting.zaiWindow({
+      type: "CREDIT_LIMIT",
+      unit: 3,
+      number: 5,
+      percentage: 9,
+      nextResetTime: 2_000_003_600_000,
+    }, 0, 2_000_000_000)).toMatchObject({
+      kind: "fiveHour",
+      window_minutes: 300,
+      reports_reset: true,
+    });
+    expect(providerTesting.zaiWindow({
+      type: "CREDIT_LIMIT",
+      unit: 6,
+      number: 1,
+      percentage: 41,
+    }, 1, 2_000_000_000)).toMatchObject({
+      kind: "weekly",
+      resets_at: null,
+      reports_reset: false,
+      remaining_percent: 59,
+    });
+  });
+
   it("parses additional Z.AI duration quotas with bounded percentages", () => {
     expect(providerTesting.zaiWindow({
       type: "TOKENS_LIMIT",

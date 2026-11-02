@@ -47,7 +47,7 @@ final class ZAIProviderTests: XCTestCase {
 
         let snapshot = try ZAIProvider.parseUsage(account: account, data: data, now: now)
 
-        XCTAssertEqual(snapshot.providerName, "智谱 GLM")
+        XCTAssertEqual(snapshot.providerName, "z.ai")
         XCTAssertEqual(snapshot.accountProviderID, .zai)
         XCTAssertEqual(snapshot.plan, "Pro")
         XCTAssertEqual(snapshot.primary?.metricID, "zai:five_hour")
@@ -59,6 +59,58 @@ final class ZAIProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.extraWindows?.first?.displayTitle, "Monthly MCP limit")
         XCTAssertEqual(snapshot.extraWindows?.first?.metricID, "zai:mcp:5:1")
         XCTAssertEqual(snapshot.extraWindows?.first?.usedPercent, 40)
+    }
+
+    func testCreditLimitRowsBecomeFiveHourAndWeeklyWindows() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let data = Data(#"""
+        {
+          "code": 200,
+          "success": true,
+          "data": {
+            "level": "max",
+            "limits": [
+              {
+                "type": "CREDIT_LIMIT",
+                "unit": 3,
+                "number": 5,
+                "usage": 28000,
+                "currentValue": 2585,
+                "percentage": 9,
+                "nextResetTime": 1800000000000
+              },
+              {
+                "type": "CREDIT_LIMIT",
+                "unit": 6,
+                "number": 1,
+                "percentage": 41
+              }
+            ]
+          }
+        }
+        """#.utf8)
+        let account = MonitoredAccount(id: UUID(), providerID: .zhipu, displayName: "智谱",
+                                       workspaceID: "zhipu-test", plan: nil, addedAt: now)
+        let snapshot = try ZAIProvider.parseUsage(account: account, data: data, now: now)
+        XCTAssertEqual(snapshot.providerName, "智谱")
+        XCTAssertEqual(snapshot.plan, "Max")
+        XCTAssertEqual(snapshot.primary?.metricID, "zai:five_hour")
+        XCTAssertTrue(snapshot.primary?.reportsReset == true)
+        XCTAssertEqual(snapshot.secondary?.metricID, "zai:weekly")
+        XCTAssertEqual(snapshot.secondary?.reportsReset, false)
+        XCTAssertEqual(snapshot.secondary?.usedPercent, 41)
+    }
+
+    func testWebAuthorizeURLStaysOnTheStorefront() throws {
+        let mainland = Data(#"""
+        {"code":0,"data":{"flow_id":"abc","authorize_url":"https://bigmodel.cn/login?appId=zcode","poll_interval_sec":2,"expires_at":1793596569}}
+        """#.utf8)
+        let link = try ZAIProvider.webLink(from: mainland, pollToken: "token", storefront: .mainland)
+        XCTAssertEqual(link.verificationURL.host, "bigmodel.cn")
+        let evil = Data(#"""
+        {"code":0,"data":{"flow_id":"abc","authorize_url":"https://evil.example/login","expires_at":1793596569}}
+        """#.utf8)
+        XCTAssertThrowsError(try ZAIProvider.webLink(from: evil, pollToken: "token", storefront: .mainland))
     }
 
     func testQuotaWithoutFutureResetIsRejected() throws {
@@ -104,8 +156,12 @@ final class ZAIProviderTests: XCTestCase {
 
     func testRegionSelectionPinsOneHostAndAutomaticTriesBothUntilPinned() {
         XCTAssertEqual(
-            ZAIProvider.candidateURLs(region: .automatic, pinnedHost: nil).map(\.host),
-            ["api.z.ai", "open.bigmodel.cn"]
+            ZAIProvider.candidateURLs(provider: .zai, region: .global, pinnedHost: nil).map(\.host),
+            ["api.z.ai"]
+        )
+        XCTAssertEqual(
+            ZAIProvider.candidateURLs(provider: .zhipu, region: .mainland, pinnedHost: nil).map(\.host),
+            ["open.bigmodel.cn"]
         )
         XCTAssertEqual(
             ZAIProvider.candidateURLs(region: .mainland, pinnedHost: nil).map(\.absoluteString),
@@ -117,16 +173,18 @@ final class ZAIProviderTests: XCTestCase {
         )
         XCTAssertEqual(
             ZAIProvider.candidateURLs(
-                region: .automatic,
+                provider: .zhipu,
+                region: .mainland,
                 pinnedHost: "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
             ).map(\.host),
             ["open.bigmodel.cn"]
         )
         XCTAssertEqual(
             ZAIProvider.candidateURLs(region: .automatic, pinnedHost: "https://evil.example/quota"),
-            [ZAIProvider.globalQuotaURL, ZAIProvider.mainlandQuotaURL]
+            [ZAIProvider.globalQuotaURL]
         )
-        XCTAssertEqual(ProviderID.zai.displayName, "智谱 GLM")
+        XCTAssertEqual(ProviderID.zai.displayName, "z.ai")
+        XCTAssertEqual(ProviderID.zhipu.displayName, "智谱")
         XCTAssertEqual(ProviderID.zai.logoAssetName, "ZAILogo")
     }
 }

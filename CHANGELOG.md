@@ -1,4 +1,17 @@
-# Changelog / 更新说明
+# Changelog
+
+## Unreleased
+
+- Settings → About can check for a Blinky update. App Store installs compare with iTunes Lookup. TestFlight installs compare version and build with `update-check.json` on `master`. The check never downloads or installs the app. Notify-first is the default and can remind about once a day; Manual only checks when you tap the button.
+- Settings is grouped by module: Appearance (system, light, or dark, and continuous or segmented usage bars; a fresh install draws one continuous bar), Forecasts, Language, Notifications, Refresh, Live Activity, Self-hosted Worker, and About. Account display name and icon stay on the account screen. Notifications show permission, unexpected or early resets, scheduled reset times, and each account’s detected-reset and scheduled-reset switches.
+- Usage cards lead with the limit bars. Banked resets are one collapsed row under those bars. A card can also say how long a limit may last, and a ChatGPT card can show the public Codex Resets predicted reset. Settings → Forecasts holds those switches.
+- Before anyone drags, accounts are grouped by provider. A provider’s group follows the first account added for that provider, and accounts inside the group follow add time. A saved drag order stays as it was, including on widgets, the compact island, and Live Activity. A later account of a provider already on the list joins the end of that group; a new provider goes to the end.
+- Appearance has a separate Interface style: Classic, Screen Time, or Liquid Glass. Liquid Glass is the default. Light, dark, and system stay on the theme control. In every style the remaining percent and bar are primary, and stored resets, the forecast, and the updated time stay a collapsed caption underneath.
+- Settings → Token activity charts the last 12 months (daily, weekly, or cumulative). Performance, with cache, input, output, and tokens per second, sits under that chart when a span has those figures. iOS does not scan local agent transcripts yet, so the page stays empty until records are available.
+- Usage is the subject: account order is saved and synced, medium and large widgets default to a multi-account list, and Live Activity shows each included account's remaining percent. The soonest reset is a badge.
+- 智谱 and z.ai are separate providers. Domestic Coding Plan keys that report `CREDIT_LIMIT` link and show remaining percent even when a reset time is missing. Browser sign-in can create a Coding Plan key. Existing mainland accounts move to 智谱.
+- Codex device sign-in copies the code and opens the bare device page unless OpenAI returns `verification_uri_complete`.
+- Simplified Chinese and English follow the system language, with an in-app override.
 
 ## 1.8
 

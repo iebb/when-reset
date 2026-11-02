@@ -86,11 +86,25 @@ struct ChatGPTProvider {
             seconds = 5
         }
         return DeviceLink(
-            verificationURL: URL(string: "https://auth.openai.com/codex/device")!,
+            verificationURL: Self.verificationURL(from: json ?? [:]),
             userCode: code,
             deviceAuthID: id,
             interval: .seconds(max(1, seconds))
         )
+    }
+
+    /// OpenAI's device-code response does not include `verification_uri_complete`.
+    /// The bare device page is what Codex opens. A complete URL is used only when
+    /// this response itself supplies one on `auth.openai.com`.
+    static func verificationURL(from json: [String: Any]) -> URL {
+        let bare = URL(string: "https://auth.openai.com/codex/device")!
+        guard let raw = json["verification_uri_complete"] as? String,
+              let url = URL(string: raw),
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "auth.openai.com" else {
+            return bare
+        }
+        return url
     }
 
     func finishLink(_ link: DeviceLink) async throws -> LinkedIdentity {

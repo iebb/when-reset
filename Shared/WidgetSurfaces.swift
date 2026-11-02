@@ -6,7 +6,7 @@ import Foundation
 /// The widget extension does not special-case those providers; it renders whatever
 /// `metrics(for:)` returns, together with `ProviderID.logoAssetName`.
 enum WidgetSurface {
-    static let codingPlanProviders: [ProviderID] = [.chatGPT, .kimi, .zai, .grok]
+    static let codingPlanProviders: [ProviderID] = [.chatGPT, .kimi, .zai, .zhipu, .grok]
     static let homeFamilies = ["systemSmall", "systemMedium", "systemLarge"]
     static let lockFamilies = ["accessoryCircular", "accessoryRectangular", "accessoryInline"]
 

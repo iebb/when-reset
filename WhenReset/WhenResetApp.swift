@@ -22,6 +22,16 @@ final class WhenResetAppDelegate: NSObject, UIApplicationDelegate, UNUserNotific
         [.banner, .list, .sound]
     }
 
+    nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                            didReceive response: UNNotificationResponse) async {
+        let info = response.notification.request.content.userInfo
+        guard let raw = info[UpdateNotification.urlUserInfoKey] as? String,
+              let url = URL(string: raw) else { return }
+        await MainActor.run {
+            UIApplication.shared.open(url)
+        }
+    }
+
     func application(_ application: UIApplication,
                      didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
         RemotePushCoordinator.shared.didRegister(deviceToken: deviceToken)
@@ -164,8 +174,20 @@ struct WhenResetApp: App {
 #endif
     @Environment(\.scenePhase) private var scenePhase
     @State private var store: AppStore
+    @State private var interfaceLanguage = AppLanguage.current
+    @State private var appearance = AppAppearance.current
+    @State private var barStyle = UsageBarStyle.current
+    @State private var interfaceStyle = InterfaceStyle.current
 
     init() {
+        #if DEBUG
+        ScreenshotLaunch.applyLanguage()
+        ScreenshotLaunch.applyChrome()
+        _interfaceLanguage = State(initialValue: AppLanguage.current)
+        _appearance = State(initialValue: AppAppearance.current)
+        _barStyle = State(initialValue: UsageBarStyle.current)
+        _interfaceStyle = State(initialValue: InterfaceStyle.current)
+        #endif
         let store = AppStore()
         _store = State(initialValue: store)
         RemotePushCoordinator.shared.configure(store: store)
@@ -178,6 +200,22 @@ struct WhenResetApp: App {
 #if os(iOS)
         WindowGroup {
             ContentView().environment(store)
+                .environment(\.locale, interfaceLanguage.locale)
+                .environment(\.usageBarStyle, barStyle)
+                .environment(\.interfaceStyle, interfaceStyle)
+                .preferredColorScheme(appearance.colorScheme)
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
+                    if let language = note.object as? AppLanguage { interfaceLanguage = language }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyAppearanceChanged)) { note in
+                    if let appearance = note.object as? AppAppearance { self.appearance = appearance }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyUsageBarStyleChanged)) { note in
+                    if let style = note.object as? UsageBarStyle { barStyle = style }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyInterfaceStyleChanged)) { note in
+                    if let style = note.object as? InterfaceStyle { interfaceStyle = style }
+                }
                 .task { await startStore() }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }
@@ -208,6 +246,22 @@ struct WhenResetApp: App {
         Window("Blinky", id: "main") {
             MacContentView()
                 .environment(store)
+                .environment(\.locale, interfaceLanguage.locale)
+                .environment(\.usageBarStyle, barStyle)
+                .environment(\.interfaceStyle, interfaceStyle)
+                .preferredColorScheme(appearance.colorScheme)
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
+                    if let language = note.object as? AppLanguage { interfaceLanguage = language }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyAppearanceChanged)) { note in
+                    if let appearance = note.object as? AppAppearance { self.appearance = appearance }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyUsageBarStyleChanged)) { note in
+                    if let style = note.object as? UsageBarStyle { barStyle = style }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyInterfaceStyleChanged)) { note in
+                    if let style = note.object as? InterfaceStyle { interfaceStyle = style }
+                }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }
                     await store.synchronizeAccountsFromICloudKeychain()

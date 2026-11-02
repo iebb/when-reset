@@ -34,6 +34,16 @@ jobs:
           node --test .github/scripts/test-release-diagnostics.mjs
           bash -n .github/scripts/export-app-store.sh
           shellcheck .github/scripts/export-app-store.sh
+          bash -n Scripts/bump-update-check.sh
+          shellcheck Scripts/bump-update-check.sh
+          python3 -c 'import json; d=json.load(open("update-check.json", encoding="utf-8")); ios=d["ios"]; assert ios["version"] and str(ios["build"]).isdigit() and "T" in ios["updatedAt"]'
+          tmp="$(mktemp)"
+          bash Scripts/bump-update-check.sh 1.2.3 45 "$tmp"
+          python3 -c 'import json,sys; from datetime import datetime; d=json.load(open(sys.argv[1], encoding="utf-8")); assert d["ios"]["version"]=="1.2.3" and d["ios"]["build"]=="45"; datetime.strptime(d["ios"]["updatedAt"], "%Y-%m-%dT%H:%M:%SZ")' "$tmp"
+          if bash Scripts/bump-update-check.sh 1.2.3 not-a-build "$tmp"; then
+            echo "bump-update-check.sh accepted a non-numeric build" >&2
+            exit 1
+          fi
 
   secrets:
     name: Secret disclosure checks

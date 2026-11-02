@@ -691,10 +691,16 @@ actor UsageHistoryStore {
             enqueue(
                 kind: .newBankedReset,
                 accountID: account.id,
-                title: count == 1 ? "New banked reset available" : "New banked resets available",
+                title: count == 1
+                    ? String.localized("New banked reset available")
+                    : String.localized("New banked resets available"),
                 body: count == 1
-                    ? "A new banked reset was added to \(accountName)."
-                    : "\(count) new banked resets were added to \(accountName).",
+                    ? UsageNotificationCopy.format("A new banked reset was added to %@.", accountName)
+                    : UsageNotificationCopy.format(
+                        "%lld new banked resets were added to %@.",
+                        Int64(count),
+                        accountName
+                    ),
                 createdAt: observedAt,
                 deduplicationKey: "new-credit:\(sourceIdentity):\(newlySeen.map(\.id).sorted().joined(separator: ","))",
                 notificationsEnabled: notificationsEnabled,
@@ -706,8 +712,12 @@ actor UsageHistoryStore {
             enqueue(
                 kind: .newBankedReset,
                 accountID: account.id,
-                title: "Banked resets increased",
-                body: "\(accountName) now has \(snapshot.availableResetCount) banked resets available.",
+                title: String.localized("Banked resets increased"),
+                body: UsageNotificationCopy.format(
+                    "%@ now has %lld banked resets available.",
+                    accountName,
+                    Int64(snapshot.availableResetCount)
+                ),
                 createdAt: observedAt,
                 deduplicationKey: "credit-count:\(sourceIdentity):\(previousCount):\(snapshot.availableResetCount):\(observationMilliseconds(observedAt))",
                 notificationsEnabled: notificationsEnabled,
@@ -719,8 +729,12 @@ actor UsageHistoryStore {
                 enqueue(
                     kind: .newBankedReset,
                     accountID: account.id,
-                    title: "Banked resets increased",
-                    body: "\(accountName) now has \(snapshot.availableResetCount) banked resets available.",
+                    title: String.localized("Banked resets increased"),
+                    body: UsageNotificationCopy.format(
+                        "%@ now has %lld banked resets available.",
+                        accountName,
+                        Int64(snapshot.availableResetCount)
+                    ),
                     createdAt: observedAt,
                     deduplicationKey: "credit-baseline-count:\(sourceIdentity):\(previousCount):\(snapshot.availableResetCount):\(observationMilliseconds(observedAt))",
                     notificationsEnabled: notificationsEnabled,
@@ -781,8 +795,13 @@ actor UsageHistoryStore {
             enqueue(
                 kind: .probableEarlyWeeklyReset,
                 accountID: account.id,
-                title: "Weekly limit reset early",
-                body: "\(accountName)’s weekly allowance increased from \(previousValue)% to \(currentValue)% before its scheduled reset. A banked reset was probably applied.",
+                title: String.localized("Weekly limit reset early"),
+                body: UsageNotificationCopy.format(
+                    "%@’s weekly allowance increased from %lld%% to %lld%% before its scheduled reset. A banked reset was probably applied.",
+                    accountName,
+                    Int64(previousValue),
+                    Int64(currentValue)
+                ),
                 createdAt: observedAt,
                 deduplicationKey: "early-weekly:\(sourceIdentity):\(cycleBucket(recovery.previousResetAt))",
                 notificationsEnabled: notificationsEnabled,
@@ -855,7 +874,11 @@ actor UsageHistoryStore {
         if !scheduledResets.isEmpty {
             let titles = scheduledResets.map { $0.current.metricTitle }
             let values = scheduledResets.map {
-                "\($0.current.metricTitle) \(Int($0.current.remainingPercent.rounded()))%"
+                UsageNotificationCopy.format(
+                    "%1$@ %2$lld%%",
+                    $0.current.metricTitle,
+                    Int64($0.current.remainingPercent.rounded())
+                )
             }
             let cycleIDs = scheduledResets.map {
                 "\($0.current.metricID):\(cycleBucket($0.previous.resetsAt))"
@@ -863,10 +886,21 @@ actor UsageHistoryStore {
             enqueue(
                 kind: .quotaReset,
                 accountID: account.id,
-                title: titles.count == 1 ? "\(titles[0]) reset" : "Usage limits reset",
+                title: titles.count == 1
+                    ? UsageNotificationCopy.format("%@ reset", titles[0])
+                    : String.localized("Usage limits reset"),
                 body: titles.count == 1
-                    ? "\(account.resolvedDisplayName)’s \(titles[0]) started a new period with \(Int(scheduledResets[0].current.remainingPercent.rounded()))% remaining."
-                    : "\(account.resolvedDisplayName)’s usage limits started new periods: \(values.joined(separator: ", ")).",
+                    ? UsageNotificationCopy.format(
+                        "%1$@’s %2$@ started a new period with %3$lld%% remaining.",
+                        account.resolvedDisplayName,
+                        titles[0],
+                        Int64(scheduledResets[0].current.remainingPercent.rounded())
+                    )
+                    : UsageNotificationCopy.format(
+                        "%1$@’s usage limits started new periods: %2$@.",
+                        account.resolvedDisplayName,
+                        values.joined(separator: ", ")
+                    ),
                 createdAt: observedAt,
                 deduplicationKey: "quota-reset:\(sourceIdentity):\(cycleIDs.joined(separator: ","))",
                 notificationsEnabled: notificationsEnabled,
@@ -877,7 +911,12 @@ actor UsageHistoryStore {
         if !probableEarlyResets.isEmpty {
             let titles = probableEarlyResets.map { $0.current.metricTitle }
             let changes = probableEarlyResets.map {
-                "\($0.current.metricTitle) \(Int($0.previous.remainingPercent.rounded()))%→\(Int($0.current.remainingPercent.rounded()))%"
+                UsageNotificationCopy.format(
+                    "%1$@ %2$lld%%→%3$lld%%",
+                    $0.current.metricTitle,
+                    Int64($0.previous.remainingPercent.rounded()),
+                    Int64($0.current.remainingPercent.rounded())
+                )
             }
             let cycleIDs = probableEarlyResets.map {
                 "\($0.current.metricID):\(cycleBucket($0.previous.resetsAt))"
@@ -885,8 +924,14 @@ actor UsageHistoryStore {
             enqueue(
                 kind: .probableEarlyReset,
                 accountID: account.id,
-                title: titles.count == 1 ? "\(titles[0]) probably reset" : "Usage limits probably reset",
-                body: "\(account.resolvedDisplayName)’s remaining allowance increased before the scheduled reset: \(changes.joined(separator: ", ")). A reset was probably applied.",
+                title: titles.count == 1
+                    ? UsageNotificationCopy.format("%@ probably reset", titles[0])
+                    : String.localized("Usage limits probably reset"),
+                body: UsageNotificationCopy.format(
+                    "%1$@’s remaining allowance increased before the scheduled reset: %2$@. A reset was probably applied.",
+                    account.resolvedDisplayName,
+                    changes.joined(separator: ", ")
+                ),
                 createdAt: observedAt,
                 deduplicationKey: "early-quota-reset:\(sourceIdentity):\(cycleIDs.joined(separator: ","))",
                 notificationsEnabled: notificationsEnabled,

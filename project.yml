@@ -1,5 +1,6 @@
 name: WhenReset
 options:
+  developmentLanguage: en
   bundleIdPrefix: com.harrisliangsu
   deploymentTarget:
     iOS: "17.0"
@@ -81,3 +82,25 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: "$(APP_BUNDLE_IDENTIFIER).tests"
     dependencies:
       - target: WhenReset
+  WhenResetUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [WhenResetUITests]
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: "$(APP_BUNDLE_IDENTIFIER).uitests"
+        TEST_TARGET_NAME: WhenReset
+    dependencies:
+      - target: WhenReset
+schemes:
+  Screenshots:
+    build:
+      targets:
+        WhenReset: all
+        WhenResetTests: [test]
+        WhenResetUITests: [test]
+    test:
+      targets:
+        - name: WhenResetUITests
+        - name: WhenResetTests

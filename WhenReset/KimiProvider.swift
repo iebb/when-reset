@@ -57,6 +57,21 @@ struct KimiProvider {
         self.session = session
     }
 
+    func link(apiKey rawAPIKey: String) async throws -> LinkedIdentity {
+        let apiKey = rawAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard apiKey.count >= 12, !apiKey.contains(where: \.isWhitespace) else {
+            throw KimiProviderError.invalidResponse
+        }
+        let credentials = AccountCredentials(accessToken: apiKey, refreshToken: "", idToken: "")
+        let account = MonitoredAccount(id: UUID(), providerID: .kimi, displayName: "Kimi Code",
+                                       workspaceID: "pending", plan: nil, addedAt: .now)
+        let snapshot = try await fetchUsage(account: account, credentials: credentials)
+        let digest = SHA256.hash(data: Data(apiKey.utf8))
+        let fingerprint = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return LinkedIdentity(workspaceID: "kimi-\(fingerprint)", displayName: "Kimi Code",
+                              plan: snapshot.plan, credentials: credentials)
+    }
+
     func beginLink() async throws -> KimiDeviceLink {
         let response = try await postForm(Self.deviceAuthorizationURL, values: [
             ("client_id", Self.clientID),

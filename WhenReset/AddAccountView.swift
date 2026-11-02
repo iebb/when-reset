@@ -11,6 +11,7 @@ struct AddAccountView: View {
     @State private var selectedProvider: ProviderID?
     @State private var claudeCode = ""
     @State private var zaiAPIKey = ""
+    @State private var kimiAPIKey = ""
     @State private var zaiRegion: ZAIRegion = .automatic
     @State private var miniMaxAPIKey = ""
     @State private var syntheticAPIKey = ""
@@ -122,10 +123,10 @@ struct AddAccountView: View {
                     Text(relinkingAccount == nil ? "Connect an account" : "Reconnect \(relinkingAccount?.providerDisplayName ?? "account")")
                         .font(.title2.bold())
                     Text(relinkingAccount == nil
-                         ? "Choose a provider to securely import its usage, balance, or reset schedule."
+                         ? String.localized("Choose a provider to securely import its usage, balance, or reset schedule.")
                          : relinkingAccount?.isRemoteOnly == true
-                            ? "Sign in again to send a replacement credential directly to the Worker. It is not stored on this device and can never be downloaded from the Worker."
-                            : "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.")
+                            ? String.localized("Sign in again to send a replacement credential directly to the Worker. It is not stored on this device and can never be downloaded from the Worker.")
+                            : String.localized("Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds."))
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }
@@ -149,6 +150,7 @@ struct AddAccountView: View {
                                     ProviderCard(provider: provider, selected: selectedProvider == provider)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityIdentifier("provider-\(provider.rawValue)")
 
                                 if selectedProvider == provider {
                                     Divider().padding(.horizontal, 16)
@@ -323,8 +325,8 @@ struct AddAccountView: View {
             deviceLinker(provider)
         case .claude:
             claudeLinker
-        case .zai:
-            zaiLinker
+        case .zai, .zhipu:
+            zaiLinker(provider)
         case .miniMax:
             miniMaxLinker
         case .synthetic:
@@ -364,6 +366,25 @@ struct AddAccountView: View {
             .buttonBorderShape(.roundedRectangle(radius: 14))
             .controlSize(.large)
             .disabled(store.isLinking)
+            if provider == .kimi {
+                SecureField("Kimi Code API key", text: $kimiAPIKey)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.system(.body, design: .monospaced))
+                    .padding(14)
+                    .background(Color(.tertiarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+                Button {
+                    completionTask = Task {
+                        if await store.addKimiAPIAccount(apiKey: kimiAPIKey, replacing: relinkingAccount) { dismiss() }
+                    }
+                } label: {
+                    Label("Connect with API key", systemImage: "key.fill")
+                        .fontWeight(.semibold)
+                        .frame(maxWidth: .infinity, minHeight: 28)
+                }
+                .buttonStyle(.bordered)
+                .disabled(kimiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.isLinking)
+            }
             if store.isLinking { ProgressView("Starting secure link…") }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -379,7 +400,7 @@ struct AddAccountView: View {
             "Uses Kimi Code’s device authorization flow. This integration relies on Kimi’s public first-party client and is experimental."
         case .githubCopilot:
             "Uses GitHub device authorization. Exact Copilot quotas come from an undocumented endpoint and may change."
-        case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
+        case .claude, .zai, .zhipu, .miniMax, .synthetic, .ollamaCloud, .warp,
              .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI,
              .openRouter, .fireworksAI, .deepSeek, .poe:
             ""
@@ -406,23 +427,28 @@ struct AddAccountView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var zaiLinker: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Enter the Coding Plan key from 智谱 BigModel (open.bigmodel.cn) or Z.AI (api.z.ai). Blinky reads quota only, stores the key in Keychain, and remembers which host accepted it.")
+    private func zaiLinker(_ provider: ProviderID) -> some View {
+        let mainland = provider == .zhipu
+        return VStack(alignment: .leading, spacing: 14) {
+            Text(mainland
+                 ? "Sign in with 智谱 in the browser, or paste a Coding Plan key from open.bigmodel.cn. Blinky reads quota only and stores the key in Keychain."
+                 : "Sign in with z.ai in the browser, or paste a Coding Plan key from api.z.ai. Blinky reads quota only and stores the key in Keychain.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
-            Picker("Region · 区域", selection: $zaiRegion) {
-                ForEach(ZAIRegion.allCases) { region in
-                    Text(region.title).tag(region)
-                }
+            Button {
+                startZAIWebLink(provider)
+            } label: {
+                Label(mainland ? "Sign in with 智谱" : "Sign in with z.ai", systemImage: "safari")
+                    .fontWeight(.semibold)
+                    .frame(maxWidth: .infinity, minHeight: 28)
             }
-            .pickerStyle(.menu)
-            Text(zaiRegion.detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            .buttonStyle(.borderedProminent)
+            .buttonBorderShape(.roundedRectangle(radius: 14))
+            .controlSize(.large)
+            .disabled(store.isLinking)
 
-            SecureField("智谱 GLM / Z.AI Coding Plan API key", text: $zaiAPIKey)
+            SecureField(mainland ? "智谱 Coding Plan API key" : "z.ai Coding Plan API key", text: $zaiAPIKey)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.system(.body, design: .monospaced))
@@ -431,11 +457,12 @@ struct AddAccountView: View {
 
             Button {
                 completionTask = Task {
-                    if await store.addZAIAccount(apiKey: zaiAPIKey, region: zaiRegion,
+                    if await store.addZAIAccount(apiKey: zaiAPIKey, provider: provider,
+                                                  region: mainland ? .mainland : .global,
                                                   replacing: relinkingAccount) { dismiss() }
                 }
             } label: {
-                Label("Connect 智谱 GLM", systemImage: "key.fill")
+                Label(mainland ? "Connect 智谱" : "Connect z.ai", systemImage: "key.fill")
                     .fontWeight(.semibold)
                     .frame(maxWidth: .infinity, minHeight: 28)
             }
@@ -446,6 +473,22 @@ struct AddAccountView: View {
             if store.isLinking { ProgressView("Checking Coding Plan…") }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func startZAIWebLink(_ provider: ProviderID) {
+        let previousTask = completionTask
+        completionTask = Task {
+            previousTask?.cancel()
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            store.cancelLink()
+            await store.beginZAIWebLink(provider: provider, replacing: relinkingAccount)
+            guard !Task.isCancelled, let link = store.deviceLink, link.providerID == provider else { return }
+            openURL(link.verificationURL)
+            if await store.completeDeviceLink(replacing: relinkingAccount) {
+                dismissAfterSuccess()
+            }
+        }
     }
 
     private var miniMaxLinker: some View {
@@ -964,12 +1007,20 @@ struct AddAccountView: View {
             VStack(spacing: 20) {
                 ProviderIcon(providerID: link.providerID)
                     .frame(width: 64, height: 64)
-                Text("Enter this code")
+                Text(link.userCode.isEmpty ? "Finish sign-in in the browser" : "Enter this code")
                     .font(.title2.bold())
+                if !link.userCode.isEmpty {
                 Text(link.userCode)
                     .font(.system(.largeTitle, design: .monospaced, weight: .bold))
+                    .accessibilityIdentifier("device-user-code")
                     .textSelection(.enabled)
                     .padding(.vertical, 8)
+                if link.providerID == .chatGPT {
+                    Text("Copied to the clipboard. Paste it if the page does not fill the code.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
                 Button { UIPasteboard.general.string = link.userCode } label: {
                     Label("Copy code", systemImage: "doc.on.doc")
                         .fontWeight(.semibold)
@@ -978,8 +1029,9 @@ struct AddAccountView: View {
                 .buttonStyle(.bordered)
                 .buttonBorderShape(.roundedRectangle(radius: 14))
                 .controlSize(.large)
+                }
                 Button { openURL(link.verificationURL) } label: {
-                    Label("Open \(link.providerID.displayName) linking", systemImage: "safari")
+                    Label(String(format: String.localized("Open %@ linking"), locale: AppLanguage.current.locale, link.providerID.displayName), systemImage: "safari")
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity, minHeight: 30)
                 }
@@ -992,7 +1044,7 @@ struct AddAccountView: View {
                     Label("Authorization check paused", systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
                 }
-                Text("The code expires \(link.expiresAt, style: .relative).")
+                Text(String(format: String.localized("The code expires in %lld min."), locale: AppLanguage.current.locale, Int64(max(1, Int(link.expiresAt.timeIntervalSinceNow / 60)))))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Button {
@@ -1081,6 +1133,9 @@ struct AddAccountView: View {
             guard !Task.isCancelled,
                   let link = store.deviceLink,
                   link.providerID == provider else { return }
+            if provider == .chatGPT, !link.userCode.isEmpty {
+                UIPasteboard.general.string = link.userCode
+            }
             openURL(link.verificationURL)
             if await store.completeDeviceLink(replacing: relinkingAccount) {
                 dismissAfterSuccess()

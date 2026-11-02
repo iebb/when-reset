@@ -66,7 +66,7 @@ struct ProviderIcon: View {
         case .chatGPT, .openAIAPI: .white
         case .claude: .clear
         case .grok: .black
-        case .kimi, .zai, .miniMax, .synthetic, .ollamaCloud, .warp, .antigravity,
+        case .kimi, .zai, .zhipu, .miniMax, .synthetic, .ollamaCloud, .warp, .antigravity,
              .compatibleAPI, .anthropicAPI, .newAPI, .openRouter, .fireworksAI,
              .deepSeek, .poe: .clear
         case .githubCopilot: .secondary.opacity(0.12)
@@ -79,7 +79,7 @@ struct ProviderIcon: View {
         case .grok: .white
         case .kimi: .indigo
         case .githubCopilot: .purple
-        case .zai: .primary
+        case .zai, .zhipu: .primary
         case .miniMax: Color(red: 0.91, green: 0.21, blue: 0.38)
         case .synthetic: .cyan
         case .ollamaCloud: .primary
@@ -98,7 +98,7 @@ struct ProviderIcon: View {
         switch providerID {
         case .chatGPT, .openAIAPI: 0.16
         case .githubCopilot: 0.18
-        case .claude, .anthropicAPI, .kimi, .zai, .grok: 0
+        case .claude, .anthropicAPI, .kimi, .zai, .zhipu, .grok: 0
         case .miniMax: 0.13
         case .synthetic, .ollamaCloud, .warp, .antigravity, .compatibleAPI, .newAPI,
              .openRouter, .fireworksAI, .deepSeek, .poe: 0.2

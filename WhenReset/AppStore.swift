@@ -1077,6 +1077,22 @@ enum DeviceUsageEnableCompensation {
 @MainActor @Observable
 final class AppStore {
     private(set) var accounts: [MonitoredAccount] = []
+    /// Display sort. Custom leaves `accounts` as the stored drag order.
+    var usageListSort = UsageListSort.current
+
+    /// The Usage list order. Widgets and Live Activity keep `accounts`, the
+    /// stored custom order, even when this list is sorted another way.
+    var displayedAccounts: [MonitoredAccount] {
+        AccountOrdering.displayed(accounts, sort: usageListSort, snapshots: snapshots)
+    }
+
+    func setUsageListSort(_ sort: UsageListSort) {
+        guard usageListSort != sort else { return }
+        usageListSort = sort
+        UsageListSort.choose(sort)
+        publishSnapshots()
+        Task { await updateLiveActivity() }
+    }
     private(set) var snapshots: [UUID: UsageSnapshot] = [:]
     private(set) var refreshFailures: [UUID: AccountRefreshFailure] = [:]
     var isRefreshing = false
@@ -1116,6 +1132,8 @@ final class AppStore {
     private let fireworksAIProvider = FireworksAIProvider()
     private let deepSeekProvider = DeepSeekProvider()
     private let poeProvider = PoeProvider()
+    private var customOrderIDs: [UUID]?
+    private var zaiWebLink: ZAIWebLink?
     private var chatGPTLink: DeviceLink?
     private var grokLink: GrokDeviceLink?
     private var kimiLink: KimiDeviceLink?
@@ -1172,11 +1190,23 @@ final class AppStore {
     init() {
         let cachedAccounts = UserDefaults.standard.data(forKey: accountsKey)
             .flatMap { try? JSONDecoder().decode([MonitoredAccount].self, from: $0) } ?? []
-        accounts = Self.loadInitialAccounts(cachedAccounts)
+        customOrderIDs = KeychainStore.loadDisplayOrder()
+        accounts = AccountOrdering.apply(
+            customIDs: customOrderIDs,
+            to: Self.loadInitialAccounts(cachedAccounts)
+        )
         let accountIDs = Set(accounts.map(\.id))
         snapshots = Dictionary(uniqueKeysWithValues: SharedSnapshotStore.load()
             .filter { accountIDs.contains($0.accountID) }
             .map { ($0.accountID, $0) })
+        #if DEBUG
+        if ScreenshotLaunch.isActive {
+            let seeded = ScreenshotFixture.seed()
+            accounts = seeded.accounts
+            snapshots = seeded.snapshots
+            deviceLink = seeded.deviceLink
+        }
+        #endif
         if let data = UserDefaults.standard.data(forKey: settingsKey),
            let saved = try? JSONDecoder().decode([UUID: AccountMonitorSettings].self, from: data) { monitorSettings = saved }
         if let data = UserDefaults.standard.data(forKey: liveActivitySettingsKey),
@@ -1263,6 +1293,14 @@ final class AppStore {
     }
 
     func start() async {
+        #if DEBUG
+        if ScreenshotLaunch.isActive {
+            hasStarted = true
+            publishSnapshots()
+            await updateLiveActivity()
+            return
+        }
+        #endif
         guard !hasStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
@@ -1299,6 +1337,9 @@ final class AppStore {
     }
 
     func synchronizeAccountsFromICloudKeychain() async {
+        #if DEBUG
+        if ScreenshotLaunch.isActive { return }
+        #endif
         if let accountKeychainSyncTask {
             await accountKeychainSyncTask.value
             return
@@ -1350,7 +1391,17 @@ final class AppStore {
                 updatedAccounts.append(account)
             }
         }
-        updatedAccounts = KeychainStore.orderedAccounts(updatedAccounts)
+        updatedAccounts = updatedAccounts.map { account in
+            let credentials = try? KeychainStore.load(for: account.id)
+            let migrated = ZhipuAccountMigration.migrate(
+                account,
+                region: credentials?.serviceRegion,
+                host: credentials?.serviceHost
+            )
+            if migrated != account { try? KeychainStore.saveAccount(migrated) }
+            return migrated
+        }
+        updatedAccounts = AccountOrdering.apply(customIDs: customOrderIDs, to: updatedAccounts)
 
         if let currentServerURL {
             for account in missingCachedAccounts {
@@ -1961,7 +2012,7 @@ final class AppStore {
                 copilotLink = link
                 deviceLink = .init(providerID: .githubCopilot, verificationURL: link.verificationURL,
                                    userCode: link.userCode, expiresAt: link.expiresAt)
-            case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
+            case .claude, .zai, .zhipu, .miniMax, .synthetic, .ollamaCloud, .warp,
                  .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI,
                  .openRouter, .fireworksAI, .deepSeek, .poe:
                 throw ProviderError.server(400, "This provider does not use device linking.")
@@ -1995,7 +2046,10 @@ final class AppStore {
             case .githubCopilot:
                 guard let copilotLink else { throw ProviderError.invalidResponse }
                 identity = try await copilotProvider.finishLink(copilotLink)
-            case .claude, .zai, .miniMax, .synthetic, .ollamaCloud, .warp,
+            case .zai, .zhipu:
+                guard let zaiWebLink else { throw ProviderError.invalidResponse }
+                identity = try await zaiProvider.finishWebLink(zaiWebLink)
+            case .claude, .miniMax, .synthetic, .ollamaCloud, .warp,
                  .antigravity, .compatibleAPI, .openAIAPI, .anthropicAPI, .newAPI,
                  .openRouter, .fireworksAI, .deepSeek, .poe:
                 throw ProviderError.invalidResponse
@@ -2168,21 +2222,22 @@ final class AppStore {
     }
 
     @discardableResult
-    func addZAIAccount(apiKey: String, region: ZAIRegion = .automatic,
+    func addZAIAccount(apiKey: String, provider: ProviderID = .zai, region: ZAIRegion = .automatic,
                        replacing relinkingAccount: MonitoredAccount? = nil) async -> Bool {
+        let resolved = provider == .zhipu ? ProviderID.zhipu : ProviderID.zai
         isLinking = true; errorMessage = nil
         do {
-            let identity = try await zaiProvider.link(apiKey: apiKey, region: region)
+            let identity = try await zaiProvider.link(apiKey: apiKey, provider: resolved, region: region)
             if let relinkingAccount, relinkingAccount.isRemoteOnly {
                 try await replaceRemoteWorkerCredential(
                     for: relinkingAccount,
                     identity: identity,
-                    providerID: .zai
+                    providerID: resolved
                 )
                 isLinking = false
                 return true
             }
-            let account = try saveLinkedAccount(identity, providerID: .zai, replacing: relinkingAccount)
+            let account = try saveLinkedAccount(identity, providerID: resolved, replacing: relinkingAccount)
             await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
             isLinking = false
             return await finishAccountLinkRefresh(account)
@@ -2191,6 +2246,68 @@ final class AppStore {
             isLinking = false
             return false
         }
+    }
+
+    func beginZAIWebLink(provider: ProviderID, replacing relinkingAccount: MonitoredAccount? = nil) async {
+        let storefront = ZAIStorefront(provider: provider, region: provider == .zhipu ? .mainland : .global)
+        isLinking = true
+        accountLinkProgress = .authorizing
+        errorMessage = nil
+        do {
+            let link = try await zaiProvider.beginWebLink(storefront: storefront)
+            zaiWebLink = link
+            deviceLink = DeviceLinkPresentation(
+                providerID: storefront.providerID,
+                verificationURL: link.verificationURL,
+                userCode: "",
+                expiresAt: link.expiresAt
+            )
+        } catch {
+            errorMessage = error.localizedDescription
+            clearPendingLinks()
+            isLinking = false
+            accountLinkProgress = .idle
+        }
+        _ = relinkingAccount
+    }
+
+    @discardableResult
+    func addKimiAPIAccount(apiKey: String, replacing relinkingAccount: MonitoredAccount? = nil) async -> Bool {
+        isLinking = true
+        errorMessage = nil
+        do {
+            let identity = try await kimiProvider.link(apiKey: apiKey)
+            if let relinkingAccount, relinkingAccount.isRemoteOnly {
+                try await replaceRemoteWorkerCredential(
+                    for: relinkingAccount, identity: identity, providerID: .kimi
+                )
+                isLinking = false
+                return true
+            }
+            let account = try saveLinkedAccount(identity, providerID: .kimi, replacing: relinkingAccount)
+            await clearHistoryIfIdentityChanged(from: relinkingAccount, to: account)
+            isLinking = false
+            return await finishAccountLinkRefresh(account)
+        } catch {
+            errorMessage = error.localizedDescription
+            isLinking = false
+            return false
+        }
+    }
+
+    func moveAccount(_ id: UUID, before target: UUID) {
+        guard id != target,
+              let from = accounts.firstIndex(where: { $0.id == id }),
+              let to = accounts.firstIndex(where: { $0.id == target }) else { return }
+        moveAccounts(from: IndexSet(integer: from), to: to)
+    }
+
+    func moveAccounts(from offsets: IndexSet, to destination: Int) {
+        let ids = AccountOrdering.moving(accounts.map(\.id), from: offsets, to: destination)
+        customOrderIDs = ids
+        accounts = AccountOrdering.apply(customIDs: ids, to: accounts)
+        try? KeychainStore.saveDisplayOrder(ids)
+        publishSnapshots()
     }
 
     @discardableResult
@@ -2589,7 +2706,7 @@ final class AppStore {
                     effectiveAccount = updated
                 }
                 snapshot = try await copilotProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
-            case .zai:
+            case .zai, .zhipu:
                 let fetched = try await zaiProvider.fetchUsage(account: effectiveAccount, credentials: credentials)
                 if fetched.credentials != credentials {
                     try KeychainStore.save(fetched.credentials, for: account.id)
@@ -2746,12 +2863,18 @@ final class AppStore {
         account.mergeProviderDetails(identity.accountDetails)
         try KeychainStore.save(identity.credentials, for: account.id)
         accounts.append(account)
+        accounts = AccountOrdering.apply(customIDs: customOrderIDs, to: accounts)
+        if customOrderIDs != nil {
+            customOrderIDs = accounts.map(\.id)
+            try? KeychainStore.saveDisplayOrder(accounts.map(\.id))
+        }
         persistAccounts()
         return account
     }
 
     private func clearPendingLinks() {
         deviceLink = nil
+        zaiWebLink = nil
         chatGPTLink = nil
         grokLink = nil
         kimiLink = nil
@@ -3401,10 +3524,21 @@ final class AppStore {
         notificationSettings = settings
         UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: notificationSettingsKey)
         Task {
-            if !previousSettings.notifyAtScheduledReset,
-               settings.notifyAtScheduledReset,
-               accounts.contains(where: { !$0.isDemo && self.settings(for: $0).notifyAtScheduledReset }) {
-                await UsageNotificationService.requestProminentAuthorization()
+            let unexpectedTurnedOn = !previousSettings.notifyAboutUnexpectedResets
+                && settings.notifyAboutUnexpectedResets
+            let scheduledTurnedOn = !previousSettings.notifyAtScheduledReset
+                && settings.notifyAtScheduledReset
+            if unexpectedTurnedOn || scheduledTurnedOn {
+                let accountReady = accounts.contains { account in
+                    guard !account.isDemo else { return false }
+                    let accountSettings = self.settings(for: account)
+                    if unexpectedTurnedOn, accountSettings.notifyAboutResets { return true }
+                    if scheduledTurnedOn, accountSettings.notifyAtScheduledReset { return true }
+                    return false
+                }
+                if accountReady {
+                    await UsageNotificationService.requestProminentAuthorization()
+                }
             }
             await reconcileScheduledResetNotifications()
         }
@@ -3990,7 +4124,8 @@ final class AppStore {
         let shouldRun: Bool
         switch liveActivitySettings.mode {
         case .automatic: shouldRun = !activityEvents(at: date, matchingRules: true).isEmpty
-        case .always: shouldRun = !activityEvents(at: date, matchingRules: false).isEmpty
+        case .always: shouldRun = !liveActivityAccountRows(at: date).isEmpty
+                || !activityEvents(at: date, matchingRules: false).isEmpty
         case .disabled: shouldRun = false
         }
         if shouldRun, !running, UIApplication.shared.applicationState == .active {
@@ -4020,7 +4155,7 @@ final class AppStore {
     private var hasEligibleLiveActivityContent: Bool {
         switch liveActivitySettings.mode {
         case .automatic: !activityEvents(matchingRules: true).isEmpty
-        case .always: !activityEvents(matchingRules: false).isEmpty
+        case .always: !liveActivityAccountRows().isEmpty || !activityEvents(matchingRules: false).isEmpty
         case .disabled: false
         }
     }
@@ -4056,7 +4191,7 @@ final class AppStore {
             let snapshot = presentedSnapshot(storedSnapshot, for: account)
             let accountSettings = settings(for: account)
 
-            for window in snapshot.usageWindows where window.resetsAt > date
+            for window in snapshot.usageWindows where window.showsCountdown && window.resetsAt > date
                 && accountSettings.showsInLiveActivity(window) {
                 let rule = accountSettings.liveActivityRule(for: window)
                 guard rule.trigger != .never, !matchingRules || rule.matches(window, at: date) else { continue }
@@ -4103,10 +4238,48 @@ final class AppStore {
         case .always: activityEvents(matchingRules: false)
         case .disabled: []
         }
+        let rows = liveActivityAccountRows()
         return .init(
             targets: events.map { $0.target(showRemainingPercentage: liveActivitySettings.showRemainingPercentage) },
-            updatedAt: events.map(\.fetchedAt).max() ?? snapshots.values.map(\.fetchedAt).max() ?? .now
+            accounts: rows,
+            updatedAt: rows.isEmpty
+                ? events.map(\.fetchedAt).max() ?? snapshots.values.map(\.fetchedAt).max() ?? .now
+                : snapshots.values.map(\.fetchedAt).max() ?? .now
         )
+    }
+
+    private func liveActivityAccountRows(at date: Date = .now) -> [UsageActivityAccountRow] {
+        var rows: [UsageActivityAccountRow] = []
+        var soonest: (id: String, date: Date)?
+        for account in accounts where liveActivitySettings.includes(account.id) {
+            guard let snapshot = snapshots[account.id] else { continue }
+            let accountSettings = settings(for: account)
+            let presented = presentedSnapshot(snapshot, for: account)
+            let pinned = presented.usageWindows.first { accountSettings.isPinnedInLiveActivity($0) }?.metricID
+            guard let headline = presented.headlineWindow(pinnedMetricID: pinned) else { continue }
+            let secondary = presented.secondaryLimit(after: headline)
+            let reset = headline.showsCountdown && headline.resetsAt > date ? headline.resetsAt : nil
+            if let reset, soonest == nil || reset < soonest!.date {
+                soonest = (account.id.uuidString, reset)
+            }
+            rows.append(UsageActivityAccountRow(
+                id: account.id.uuidString,
+                accountName: account.resolvedDisplayName,
+                providerID: account.providerID,
+                symbolName: account.customSymbolName,
+                headlineTitle: headline.displayTitle,
+                headlineRemainingPercent: headline.remainingPercent,
+                secondaryTitle: secondary?.displayTitle,
+                secondaryRemainingPercent: secondary?.remainingPercent,
+                headlineResetsAt: reset,
+                isSoonestReset: false
+            ))
+        }
+        return rows.map { row in
+            var copy = row
+            copy.isSoonestReset = row.id == soonest?.id
+            return copy
+        }
     }
 #endif
 
@@ -5387,7 +5560,11 @@ enum ScheduledResetNotificationPlanner {
 }
 
 @MainActor
-private enum UsageNotificationService {
+enum UsageNotificationService {
+    static func authorizationStatus() async -> UNAuthorizationStatus {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+
     static func prepareProvisionalAuthorization() async {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
@@ -5465,8 +5642,12 @@ private enum UsageNotificationService {
             let interval = target.fireDate.timeIntervalSinceNow
             guard interval > 1 else { continue }
             let content = UNMutableNotificationContent()
-            content.title = "\(target.metricTitle) reset"
-            content.body = "\(target.accountName)’s \(target.metricTitle) should now be available again."
+            content.title = UsageNotificationCopy.format("%@ reset", target.metricTitle)
+            content.body = UsageNotificationCopy.format(
+                "%1$@’s %2$@ should now be available again.",
+                target.accountName,
+                target.metricTitle
+            )
             content.threadIdentifier = "usage-\(target.accountID.uuidString)"
             content.userInfo = [
                 "accountID": target.accountID.uuidString,

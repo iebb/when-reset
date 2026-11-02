@@ -6,7 +6,7 @@ const RATE_LIMIT_RETRY_FLOOR_SECONDS = 30 * 60;
 const CREDENTIAL_ERROR_RETRY_FLOOR_SECONDS = 6 * 60 * 60;
 const MAX_PROVIDER_RETRY_SECONDS = 8 * 60 * 60;
 
-export type ProviderID = "chatgpt" | "claude" | "grok" | "kimi" | "github_copilot" | "zai" | "minimax"
+export type ProviderID = "chatgpt" | "claude" | "grok" | "kimi" | "github_copilot" | "zai" | "zhipu" | "minimax"
   | "synthetic" | "warp" | "openai_api" | "anthropic_api" | "openrouter" | "fireworks"
   | "deepseek" | "poe";
 export type WindowKind = "fiveHour" | "weekly" | "additional";
@@ -71,7 +71,8 @@ export type ProviderUsageWindow = {
   kind: WindowKind | null;
   window_minutes: number | null;
   remaining_percent: number;
-  resets_at: number;
+  resets_at: number | null;
+  reports_reset?: boolean;
 };
 
 export type ProviderResetCredit = {
@@ -153,6 +154,11 @@ export async function fetchProviderUsage(
     case "kimi": return fetchKimi(account, originalCredentials, now);
     case "github_copilot": return fetchCopilot(account, originalCredentials, now);
     case "zai": return fetchZAI(account, originalCredentials, now);
+    case "zhipu": return fetchZAI({ ...account, provider_id: "zhipu" }, {
+      ...originalCredentials,
+      service_region: "mainland",
+      service_host: originalCredentials.service_host ?? zaiQuotaURLs.mainland,
+    }, now);
     case "minimax": return fetchMiniMax(account, originalCredentials, now);
     case "synthetic": return fetchSynthetic(account, originalCredentials, now);
     case "warp": return fetchWarp(account, originalCredentials, now);
@@ -1226,7 +1232,7 @@ function zaiQuotaSnapshot(
   const selected = [fiveHour, weekly, ...candidates.filter((item) => item !== fiveHour && item !== weekly)]
     .filter((item): item is ProviderUsageWindow => item !== undefined)
     .map((item, position) => ({ ...item, position }));
-  if (selected.length === 0) throw new ProviderFetchError("智谱 GLM returned no resettable quota.", 422);
+  if (selected.length === 0) throw new ProviderFetchError("This key has no Coding Plan limits.", 422);
   const plan = text(payload.planName ?? payload.plan ?? payload.plan_type ?? payload.packageName) ?? account.plan;
   return snapshot(account.provider_id, plan, now, selected, 0, []);
 }
@@ -1234,7 +1240,10 @@ function zaiQuotaSnapshot(
 function zaiWindow(raw: Record<string, unknown>, position: number, now: number): ProviderUsageWindow | null {
   const type = text(raw.type)?.toUpperCase();
   const reset = timestamp(raw.nextResetTime ?? raw.next_reset_time);
-  if ((type !== "TOKENS_LIMIT" && type !== "TIME_LIMIT") || reset === null || reset <= now) return null;
+  const codingLimit = type === "TOKENS_LIMIT" || type === "CREDIT_LIMIT";
+  if ((!codingLimit && type !== "TIME_LIMIT")) return null;
+  if (reset !== null && reset <= now) return null;
+  const reportsReset = reset !== null;
   const unit = integer(raw.unit);
   const count = integer(raw.number) ?? 0;
   const minutes = unit === 1 ? count * 24 * 60 : unit === 3 ? count * 60
@@ -1247,14 +1256,14 @@ function zaiWindow(raw: Record<string, unknown>, position: number, now: number):
     : number(raw.percentage) ?? 0;
   if (type === "TIME_LIMIT") {
     return window(position, `zai:mcp:${unit ?? -1}:${count}`, "Monthly MCP limit", "additional",
-      minutes, 100 - usedPercent, reset);
+      minutes, 100 - usedPercent, reportsReset ? reset : null, reportsReset);
   }
   const kind: WindowKind = minutes === 300 ? "fiveHour" : minutes === 10_080 ? "weekly" : "additional";
   const title = minutes === 300 ? "5h limit" : minutes === 10_080 ? "Weekly limit"
     : durationTitle(unit, count) ?? "Coding limit";
   const id = minutes === 300 ? "zai:five_hour" : minutes === 10_080 ? "zai:weekly"
     : `zai:coding:${unit ?? -1}:${count}`;
-  return window(position, id, title, kind, minutes, 100 - usedPercent, reset);
+  return window(position, id, title, kind, minutes, 100 - usedPercent, reportsReset ? reset : null, reportsReset);
 }
 
 async function fetchMiniMax(
@@ -1488,7 +1497,8 @@ function window(
   kind: WindowKind | null,
   minutes: number | null,
   remainingPercent: number,
-  resetsAt: number,
+  resetsAt: number | null,
+  reportsReset = true,
 ): ProviderUsageWindow {
   return {
     position,
@@ -1498,6 +1508,7 @@ function window(
     window_minutes: minutes,
     remaining_percent: clamp(remainingPercent),
     resets_at: resetsAt,
+    reports_reset: reportsReset,
   };
 }
 
