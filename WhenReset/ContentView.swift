@@ -25,6 +25,8 @@ struct ContentView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 .tag(Tab.settings)
         }
+        .environment(ForecastSettingsStore.shared)
+        .environment(CodexResetStore.shared)
         .onAppear {
             #if DEBUG
             if ScreenshotLaunch.isActive, ScreenshotLaunch.screen == "settings" {
@@ -1502,6 +1504,7 @@ struct SettingsView: View {
                     Toggle("Notify at Scheduled Reset Time",
                            isOn: $notificationSettings.notifyAtScheduledReset)
                 }
+                ForecastSettingsSection(accounts: store.accounts)
                 Section("Refresh") {
                     Picker("In app", selection: $refreshSettings.inAppInterval) {
                         ForEach(RefreshInterval.inAppOptions, id: \.self) { interval in
@@ -2346,6 +2349,7 @@ struct UsageCard: View {
                     LimitRow(window: window)
                 }
             }
+            ForecastCardExtras(snapshot: snapshot)
             HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }.font(.caption2).foregroundStyle(.tertiary)
         }.padding(.vertical, 6)
     }
