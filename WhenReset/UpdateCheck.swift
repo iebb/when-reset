@@ -581,7 +581,7 @@ struct UpdateCheckPreferences: Codable, Equatable, Sendable {
     }
 
     func save(to defaults: UserDefaults) {
-        defaults.set(try? JSONEncoder().encode(self), forKey: storageKey)
+        defaults.set(try? JSONEncoder().encode(self), forKey: Self.storageKey)
     }
 
     func encode(to encoder: Encoder) throws {
