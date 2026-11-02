@@ -270,7 +270,10 @@ struct ZAIProvider {
         guard let type = string(raw["type"])?.uppercased(),
               type == "TOKENS_LIMIT" || type == "CREDIT_LIMIT" || type == "TIME_LIMIT" else { return nil }
         let reportedReset = resetDate(raw["nextResetTime"] ?? raw["next_reset_time"])
-        let reportsReset = reportedReset.map { $0 > now } ?? false
+        // A timestamp that has already passed is not a live window. A missing
+        // timestamp still shows the remaining percent, without a countdown.
+        if let reportedReset, reportedReset <= now { return nil }
+        let reportsReset = reportedReset != nil
         let reset = reportedReset ?? now.addingTimeInterval(60)
 
         let unit = integer(raw["unit"])

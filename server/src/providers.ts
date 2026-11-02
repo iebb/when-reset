@@ -1242,7 +1242,8 @@ function zaiWindow(raw: Record<string, unknown>, position: number, now: number):
   const reset = timestamp(raw.nextResetTime ?? raw.next_reset_time);
   const codingLimit = type === "TOKENS_LIMIT" || type === "CREDIT_LIMIT";
   if ((!codingLimit && type !== "TIME_LIMIT")) return null;
-  const reportsReset = reset !== null && reset > now;
+  if (reset !== null && reset <= now) return null;
+  const reportsReset = reset !== null;
   const unit = integer(raw.unit);
   const count = integer(raw.number) ?? 0;
   const minutes = unit === 1 ? count * 24 * 60 : unit === 3 ? count * 60
