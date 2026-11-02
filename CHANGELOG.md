@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.9
+
 - Settings → About can check for a Blinky update. App Store installs compare with iTunes Lookup. TestFlight installs compare version and build with `update-check.json` on `master`. The check never downloads or installs the app. Notify-first is the default and can remind about once a day; Manual only checks when you tap the button.
 - Settings is grouped by module: Appearance (system, light, or dark, and continuous or segmented usage bars; a fresh install draws one continuous bar), Forecasts, Language, Notifications, Refresh, Live Activity, Self-hosted Worker, and About. Account display name and icon stay on the account screen. Notifications show permission, unexpected or early resets, scheduled reset times, and each account’s detected-reset and scheduled-reset switches.
 - Usage cards lead with the limit bars. Banked resets are one collapsed row under those bars. A card can also say how long a limit may last, and a ChatGPT card can show the public Codex Resets predicted reset. Settings → Forecasts holds those switches.
