@@ -611,15 +611,15 @@ enum RefreshInterval: Int, Codable, CaseIterable, Hashable, Sendable {
 
     var title: String {
         switch self {
-        case .off: "Off"
-        case .fiveMinutes: "5 minutes"
-        case .tenMinutes: "10 minutes"
-        case .fifteenMinutes: "15 minutes"
-        case .thirtyMinutes: "30 minutes"
-        case .oneHour: "1 hour"
-        case .twoHours: "2 hours"
-        case .fourHours: "4 hours"
-        case .eightHours: "8 hours"
+        case .off: String.localized("Off")
+        case .fiveMinutes: String.localized("5 minutes")
+        case .tenMinutes: String.localized("10 minutes")
+        case .fifteenMinutes: String.localized("15 minutes")
+        case .thirtyMinutes: String.localized("30 minutes")
+        case .oneHour: String.localized("1 hour")
+        case .twoHours: String.localized("2 hours")
+        case .fourHours: String.localized("4 hours")
+        case .eightHours: String.localized("8 hours")
         }
     }
 
@@ -703,6 +703,7 @@ struct UsageWindow: Codable, Hashable, Sendable {
     var showsCountdown: Bool { reportsReset }
 
     var displayTitle: String {
+        if kind == .additional { return title }
         switch windowMinutes {
         case 300: return String.localized("5h limit")
         case 10_080: return String.localized("Weekly limit")

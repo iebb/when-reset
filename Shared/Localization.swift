@@ -53,8 +53,22 @@ extension Notification.Name {
 
 extension String {
     static func localized(_ key: String.LocalizationValue) -> String {
-        let locale = AppLanguage.current.locale
-        return String(localized: key, locale: locale)
+        String(localized: key, bundle: bundle(for: AppLanguage.current))
+    }
+
+    private static func bundle(for language: AppLanguage) -> Bundle {
+        let name: String?
+        switch language {
+        case .system: name = nil
+        case .english: name = "en"
+        case .chineseSimplified: name = "zh-Hans"
+        }
+        guard let name,
+              let path = Bundle.main.path(forResource: name, ofType: "lproj"),
+              let bundle = Bundle(path: path) else {
+            return .main
+        }
+        return bundle
     }
 }
 

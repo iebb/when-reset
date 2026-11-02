@@ -1624,7 +1624,7 @@ struct SettingsView: View {
     }
 
     private var pushServerActionTitle: String {
-        if pushServerSettings.mode == .disabled { return "Turn Off" }
+        if pushServerSettings.mode == .disabled { return String.localized("Turn Off") }
         let enteredKey = pushServerAccessKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let proposedURL = try? PushServerConfiguration.normalizedServerOrigin(
             pushServerSettings.customServerURL

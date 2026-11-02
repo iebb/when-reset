@@ -123,10 +123,10 @@ struct AddAccountView: View {
                     Text(relinkingAccount == nil ? "Connect an account" : "Reconnect \(relinkingAccount?.providerDisplayName ?? "account")")
                         .font(.title2.bold())
                     Text(relinkingAccount == nil
-                         ? "Choose a provider to securely import its usage, balance, or reset schedule."
+                         ? String.localized("Choose a provider to securely import its usage, balance, or reset schedule.")
                          : relinkingAccount?.isRemoteOnly == true
-                            ? "Sign in again to send a replacement credential directly to the Worker. It is not stored on this device and can never be downloaded from the Worker."
-                            : "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.")
+                            ? String.localized("Sign in again to send a replacement credential directly to the Worker. It is not stored on this device and can never be downloaded from the Worker.")
+                            : String.localized("Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds."))
                         .font(.body)
                         .foregroundStyle(.secondary)
                 }

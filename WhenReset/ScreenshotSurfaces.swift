@@ -37,8 +37,7 @@ struct ScreenshotUsageList: View {
                 }
             }
             if let headline {
-                ProgressView(value: headline.remainingPercent, total: 100)
-                    .tint(.blue)
+                ScreenshotMeter(remaining: headline.remainingPercent)
                 if showsSecondLimit, let secondary {
                     HStack {
                         Text(secondary.displayTitle)
@@ -85,8 +84,7 @@ struct ScreenshotLiveLock: View {
                             .font(.caption.monospacedDigit())
                             .lineLimit(1)
                     }
-                    ProgressView(value: account.headlineRemainingPercent, total: 100)
-                        .tint(.blue)
+                    ScreenshotMeter(remaining: account.headlineRemainingPercent)
                     HStack {
                         if let secondary = account.secondaryTitle,
                            let percent = account.secondaryRemainingPercent {
@@ -107,6 +105,21 @@ struct ScreenshotLiveLock: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.black)
         .foregroundStyle(.white)
+    }
+}
+
+private struct ScreenshotMeter: View {
+    var remaining: Double
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.secondary.opacity(0.25))
+                Capsule().fill(Color.blue)
+                    .frame(width: max(0, geo.size.width * min(1, max(0, remaining / 100))))
+            }
+        }
+        .frame(height: 6)
     }
 }
 

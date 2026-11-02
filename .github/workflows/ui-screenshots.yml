@@ -63,6 +63,24 @@ jobs:
           find "$RUNNER_TEMP/Screenshots.xcresult" -type f \
             \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
             -exec cp {} "$out" \; || true
+          OUT="$out" python3 - << 'PY'
+          import json, os, shutil
+          from pathlib import Path
+          out = Path(os.environ["OUT"])
+          manifest = out / "manifest.json"
+          if manifest.exists():
+              named = out / "named"
+              named.mkdir(exist_ok=True)
+              for group in json.loads(manifest.read_text()):
+                  for item in group.get("attachments", []):
+                      source = out / item["exportedFileName"]
+                      label = item["suggestedHumanReadableName"].split("_0_")[0]
+                      if not label.endswith(".png"):
+                          label += ".png"
+                      if source.exists():
+                          shutil.copy(source, named / label)
+              print("named", len(list(named.glob('*.png'))))
+          PY
           find "$out" -type f | sort
           test -n "$(find "$out" -type f -print -quit)"
 
@@ -71,5 +89,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ui-screenshots
-          path: ${{ runner.temp }}/ui-screenshots
+          path: ${{ runner.temp }}/ui-screenshots/named
           if-no-files-found: error

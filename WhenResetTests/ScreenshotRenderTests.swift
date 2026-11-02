@@ -14,9 +14,9 @@ final class ScreenshotRenderTests: XCTestCase {
 
     private func render(language: AppLanguage, prefix: String) {
         AppLanguage.choose(language)
-        let seeded = ScreenshotFixture.seed(now: Date(timeIntervalSince1970: 1_763_000_000))
+        let seeded = ScreenshotFixture.seed()
         let snapshots = seeded.accounts.compactMap { seeded.snapshots[$0.id] }
-        let rows = ScreenshotFixture.activityRows(now: Date(timeIntervalSince1970: 1_763_000_000))
+        let rows = ScreenshotFixture.activityRows()
         let locale = language.locale
         attach(
             ScreenshotUsageList(snapshots: Array(snapshots.prefix(4)), showsSecondLimit: false)

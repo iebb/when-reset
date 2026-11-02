@@ -5120,6 +5120,150 @@
           }
         }
       }
+    },
+    "Off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭"
+          }
+        }
+      }
+    },
+    "5 minutes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5 minutes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5 分钟"
+          }
+        }
+      }
+    },
+    "10 minutes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "10 minutes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "10 分钟"
+          }
+        }
+      }
+    },
+    "15 minutes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 minutes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟"
+          }
+        }
+      }
+    },
+    "Turn Off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn Off"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭"
+          }
+        }
+      }
+    },
+    "Self-hosted server": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Self-hosted server"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自托管服务器"
+          }
+        }
+      }
+    },
+    "Choose a provider to securely import its usage, balance, or reset schedule.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a provider to securely import its usage, balance, or reset schedule."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择一个提供方，安全地导入它的用量、余额或重置时间。"
+          }
+        }
+      }
+    },
+    "Sign in again to send a replacement credential directly to the Worker. It is not stored on this device and can never be downloaded from the Worker.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again to send a replacement credential directly to the Worker. It is not stored on this device and can never be downloaded from the Worker."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新登录后，替换用的凭据会直接发给 Worker。它不保存在这台设备上，也不能从 Worker 下载。"
+          }
+        }
+      }
+    },
+    "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again to resume updates. Your saved usage and monitor settings stay in place until reconnection succeeds."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新登录以恢复更新。在重新连接成功之前，已保存的用量和监控设置保持不变。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

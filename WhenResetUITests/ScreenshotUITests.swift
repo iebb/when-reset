@@ -39,6 +39,7 @@ final class ScreenshotUITests: XCTestCase {
                 swipes += 1
             }
             XCTAssertTrue(zhipu.waitForExistence(timeout: 5))
+            app.swipeUp(velocity: .slow)
         case "deviceCode":
             XCTAssertTrue(app.staticTexts["K3M9-PQ2R"].waitForExistence(timeout: 15))
         case "settings":

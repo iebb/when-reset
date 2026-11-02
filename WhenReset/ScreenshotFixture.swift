@@ -40,8 +40,8 @@ enum ScreenshotFixture {
         let samples: [(ProviderID, String, String, Double, Double, Bool)] = [
             (.chatGPT, "Kong Yi", "Pro", 62, 20, true),
             (.chatGPT, "Work", "Plus", 10, 55, true),
-            (.grok, "Grok", "SuperGrok", 42, 42, false),
-            (.kimi, "Kimi Code", "Kimi", 0, 8, false),
+            (.grok, "Grok", "Heavy", 42, 42, false),
+            (.kimi, "Kimi Code", "Plus", 0, 8, false),
             (.zai, "z.ai", "Pro", 15, 33, false),
             (.zhipu, "智谱", "Max", 26, 41, false),
         ]

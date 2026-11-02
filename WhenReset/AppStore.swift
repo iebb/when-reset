@@ -1179,6 +1179,10 @@ final class AppStore {
             customIDs: customOrderIDs,
             to: Self.loadInitialAccounts(cachedAccounts)
         )
+        let accountIDs = Set(accounts.map(\.id))
+        snapshots = Dictionary(uniqueKeysWithValues: SharedSnapshotStore.load()
+            .filter { accountIDs.contains($0.accountID) }
+            .map { ($0.accountID, $0) })
         #if DEBUG
         if ScreenshotLaunch.isActive {
             let seeded = ScreenshotFixture.seed()
@@ -1187,10 +1191,6 @@ final class AppStore {
             deviceLink = seeded.deviceLink
         }
         #endif
-        let accountIDs = Set(accounts.map(\.id))
-        snapshots = Dictionary(uniqueKeysWithValues: SharedSnapshotStore.load()
-            .filter { accountIDs.contains($0.accountID) }
-            .map { ($0.accountID, $0) })
         if let data = UserDefaults.standard.data(forKey: settingsKey),
            let saved = try? JSONDecoder().decode([UUID: AccountMonitorSettings].self, from: data) { monitorSettings = saved }
         if let data = UserDefaults.standard.data(forKey: liveActivitySettingsKey),
