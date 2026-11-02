@@ -22,7 +22,7 @@ enum ScreenshotLaunch {
         }
     }
 
-    /// Forces a light or dark interface and the segmented bar so captures stay deterministic.
+    /// Forces a light or dark interface and the continuous bar so captures stay deterministic.
     static func applyChrome() {
         guard isActive else { return }
         switch argument(after: "-BlinkyScreenshotAppearance") {
@@ -31,7 +31,7 @@ enum ScreenshotLaunch {
         default:
             AppAppearance.choose(.light)
         }
-        UsageBarStyle.choose(.segmented)
+        UsageBarStyle.choose(.continuous)
     }
 
     private static func argument(after flag: String) -> String? {

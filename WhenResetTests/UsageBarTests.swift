@@ -19,7 +19,7 @@ final class UsageBarTests: XCTestCase {
         XCTAssertEqual(full.lit, full.count)
     }
 
-    func testBarStyleDefaultsToSegmented() {
+    func testBarStyleDefaultsToContinuous() {
         let standard = UserDefaults.standard
         let shared = UserDefaults(suiteName: AppIdentity.appGroupIdentifier)
         let key = UsageBarStyle.storageKey
@@ -39,6 +39,6 @@ final class UsageBarTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(UsageBarStyle.current, .segmented)
+        XCTAssertEqual(UsageBarStyle.current, .continuous)
     }
 }

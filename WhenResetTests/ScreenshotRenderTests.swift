@@ -24,7 +24,7 @@ final class ScreenshotRenderTests: XCTestCase {
     private func render(language: AppLanguage, appearance: AppAppearance) {
         AppLanguage.choose(language)
         AppAppearance.choose(appearance)
-        UsageBarStyle.choose(.segmented)
+        UsageBarStyle.choose(.continuous)
         if language == .chineseSimplified {
             XCTAssertEqual(String.localized("5h limit"), "5 小时额度")
             XCTAssertEqual(String.localized("Progress bars"), "进度条")
@@ -99,7 +99,7 @@ private extension AppLanguage {
 private extension View {
     func screenshotChrome(language: AppLanguage, scheme: ColorScheme) -> some View {
         environment(\.locale, language.locale)
-            .environment(\.usageBarStyle, .segmented)
+            .environment(\.usageBarStyle, .continuous)
             .environment(\.colorScheme, scheme)
             .preferredColorScheme(scheme)
     }

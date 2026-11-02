@@ -58,14 +58,14 @@ enum AppAppearance: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-/// How a remaining-allowance meter is drawn. Segmented is the default.
+/// How a remaining-allowance meter is drawn. Continuous is the default.
 enum UsageBarStyle: String, CaseIterable, Identifiable, Sendable {
-    case segmented
     case continuous
+    case segmented
 
     var id: String { rawValue }
 
-    static let `default` = UsageBarStyle.segmented
+    static let `default` = UsageBarStyle.continuous
     static let storageKey = "settings.usageBarStyle"
 
     var title: String {

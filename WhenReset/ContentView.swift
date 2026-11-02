@@ -2373,7 +2373,6 @@ struct UsageCard: View {
             if let balance = snapshot.apiBalance {
                 APIBalanceRow(balance: balance)
             }
-            UsageMoreSection(snapshot: snapshot)
             if snapshot.usageWindows.isEmpty, snapshot.apiBalance == nil {
                 Label("No resettable limits reported", systemImage: "checkmark.circle")
                     .font(.subheadline)
@@ -2384,6 +2383,7 @@ struct UsageCard: View {
                     LimitRow(window: window)
                 }
             }
+            UsageMoreSection(snapshot: snapshot)
             HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }.font(.caption2).foregroundStyle(.tertiary)
         }.padding(.vertical, 6)
     }
