@@ -55,12 +55,30 @@ enum UsageListSort: String, CaseIterable, Identifiable, Codable, Sendable {
 }
 
 enum AccountOrdering {
+    /// Default order, before anyone drags.
+    ///
+    /// Accounts of one provider sit together. Groups follow the first account
+    /// added for that provider. Inside a group, earlier adds come first.
+    /// A saved drag order does not come through here: `apply` keeps those ids.
     static func grouped(_ accounts: [MonitoredAccount]) -> [MonitoredAccount] {
-        let rank = Dictionary(uniqueKeysWithValues: ProviderID.allCases.enumerated().map { ($1, $0) })
+        var firstAdded: [ProviderID: (date: Date, id: String)] = [:]
+        for account in accounts {
+            let marker = (date: account.addedAt, id: account.id.uuidString)
+            if let existing = firstAdded[account.providerID] {
+                let earlier = marker.date < existing.date
+                    || (marker.date == existing.date && marker.id < existing.id)
+                if earlier { firstAdded[account.providerID] = marker }
+            } else {
+                firstAdded[account.providerID] = marker
+            }
+        }
         return accounts.sorted { lhs, rhs in
-            let left = rank[lhs.providerID] ?? .max
-            let right = rank[rhs.providerID] ?? .max
-            if left != right { return left < right }
+            let left = firstAdded[lhs.providerID] ?? (lhs.addedAt, lhs.id.uuidString)
+            let right = firstAdded[rhs.providerID] ?? (rhs.addedAt, rhs.id.uuidString)
+            if left.date != right.date { return left.date < right.date }
+            if lhs.providerID != rhs.providerID, left.id != right.id {
+                return left.id < right.id
+            }
             if lhs.addedAt != rhs.addedAt { return lhs.addedAt < rhs.addedAt }
             return lhs.id.uuidString < rhs.id.uuidString
         }

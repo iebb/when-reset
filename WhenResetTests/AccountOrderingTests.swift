@@ -2,12 +2,29 @@ import XCTest
 @testable import WhenReset
 
 final class AccountOrderingTests: XCTestCase {
-    func testFreshOrderGroupsByProvider() {
-        let chatgpt = account(.chatGPT, name: "Later", at: 20)
+    func testFreshOrderGroupsByTheProviderAddedFirst() {
+        let later = account(.chatGPT, name: "Later", at: 20)
         let kimi = account(.kimi, name: "Kimi", at: 5)
-        let second = account(.chatGPT, name: "Earlier", at: 10)
-        let ordered = AccountOrdering.grouped([chatgpt, kimi, second])
-        XCTAssertEqual(ordered.map(\.displayName), ["Earlier", "Later", "Kimi"])
+        let earlier = account(.chatGPT, name: "Earlier", at: 10)
+        let ordered = AccountOrdering.grouped([later, kimi, earlier])
+        XCTAssertEqual(ordered.map(\.displayName), ["Kimi", "Earlier", "Later"])
+    }
+
+    func testSavedCustomOrderIsLeftUntouched() {
+        let chat = account(.chatGPT, name: "Chat", at: 1)
+        let kimi = account(.kimi, name: "Kimi", at: 2)
+        let grok = account(.grok, name: "Grok", at: 3)
+        let saved = [grok.id, chat.id, kimi.id]
+        let ordered = AccountOrdering.apply(customIDs: saved, to: [chat, kimi, grok])
+        XCTAssertEqual(ordered.map(\.id), saved)
+    }
+
+    func testNewProviderGoesToTheEnd() {
+        let chat = account(.chatGPT, name: "Chat", at: 1)
+        let kimi = account(.kimi, name: "Kimi", at: 2)
+        let grok = account(.grok, name: "Grok", at: 3)
+        let ordered = AccountOrdering.inserting(grok, into: [chat, kimi])
+        XCTAssertEqual(ordered.map(\.displayName), ["Chat", "Kimi", "Grok"])
     }
 
     func testNewAccountInsertsAfterTheProvidersLastRow() {

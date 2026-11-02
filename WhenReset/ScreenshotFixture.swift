@@ -33,6 +33,14 @@ enum ScreenshotLaunch {
         }
         UsageBarStyle.choose(.continuous)
         UsageListSort.choose(.custom)
+        switch argument(after: "-BlinkyScreenshotInterfaceStyle") {
+        case "classic":
+            InterfaceStyle.choose(.classic)
+        case "screenTime":
+            InterfaceStyle.choose(.screenTime)
+        default:
+            InterfaceStyle.choose(.liquidGlass)
+        }
     }
 
     private static func argument(after flag: String) -> String? {

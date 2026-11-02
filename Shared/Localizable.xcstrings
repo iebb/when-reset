@@ -641,6 +641,38 @@
         }
       }
     },
+    "Classic": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Classic"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "经典"
+          }
+        }
+      }
+    },
+    "Classic is a plain list. Screen Time sets the meter apart from the extra lines. Liquid Glass uses the system glass.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Classic is a plain list. Screen Time sets the meter apart from the extra lines. Liquid Glass uses the system glass."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "经典是普通列表。屏幕使用时间把额度条和附加信息分开。液态玻璃使用系统玻璃。"
+          }
+        }
+      }
+    },
     "Continuous": {
       "localizations": {
         "en": {
@@ -737,6 +769,22 @@
         }
       }
     },
+    "Follows the system until you choose light or dark.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Follows the system until you choose light or dark."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在选择浅色或深色之前跟随系统。"
+          }
+        }
+      }
+    },
     "Hide banked reset details": {
       "localizations": {
         "en": {
@@ -785,6 +833,22 @@
         }
       }
     },
+    "Interface style": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Interface style"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "界面风格"
+          }
+        }
+      }
+    },
     "Light": {
       "localizations": {
         "en": {
@@ -797,6 +861,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "浅色"
+          }
+        }
+      }
+    },
+    "Liquid Glass": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Liquid Glass"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "液态玻璃"
           }
         }
       }
@@ -877,6 +957,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "进度条"
+          }
+        }
+      }
+    },
+    "Screen Time": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Screen Time"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "屏幕使用时间"
           }
         }
       }

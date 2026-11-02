@@ -12,7 +12,15 @@ final class ScreenshotUITests: XCTestCase {
     private func capture(language: String, prefix: String) {
         for appearance in ["light", "dark"] {
             let name = "\(prefix)-\(appearance)"
-            shot(language: language, appearance: appearance, screen: "usage", name: "\(name)-01-usage-list")
+            for style in ["classic", "screenTime", "liquidGlass"] {
+                shot(
+                    language: language,
+                    appearance: appearance,
+                    interfaceStyle: style,
+                    screen: "usage",
+                    name: "\(name)-\(style)-usage"
+                )
+            }
             shot(language: language, appearance: appearance, screen: "reorder", name: "\(name)-02-usage-reorder")
             shot(language: language, appearance: appearance, screen: "addAccount", name: "\(name)-03-add-account")
             shot(language: language, appearance: appearance, screen: "deviceCode", name: "\(name)-04-device-code")
@@ -25,12 +33,19 @@ final class ScreenshotUITests: XCTestCase {
         }
     }
 
-    private func shot(language: String, appearance: String, screen: String, name: String) {
+    private func shot(
+        language: String,
+        appearance: String,
+        interfaceStyle: String = "liquidGlass",
+        screen: String,
+        name: String
+    ) {
         let app = XCUIApplication()
         app.launchArguments = [
             "-BlinkyScreenshotFixture",
             "-BlinkyScreenshotLanguage", language,
             "-BlinkyScreenshotAppearance", appearance,
+            "-BlinkyScreenshotInterfaceStyle", interfaceStyle,
             "-BlinkyScreenshotScreen", screen,
         ]
         app.launch()
@@ -63,6 +78,12 @@ final class ScreenshotUITests: XCTestCase {
             let label = app.staticTexts["Interface appearance"]
             let chinese = app.staticTexts["界面外观"]
             XCTAssertTrue(label.waitForExistence(timeout: 8) || chinese.waitForExistence(timeout: 4))
+            let style = app.staticTexts["Interface style"]
+            let chineseStyle = app.staticTexts["界面风格"]
+            XCTAssertTrue(style.exists || chineseStyle.waitForExistence(timeout: 4))
+            let glass = app.staticTexts["Liquid Glass"]
+            let chineseGlass = app.staticTexts["液态玻璃"]
+            XCTAssertTrue(glass.exists || chineseGlass.exists)
             let bars = app.staticTexts["Progress bars"]
             let chineseBars = app.staticTexts["进度条"]
             XCTAssertTrue(bars.exists || chineseBars.exists)

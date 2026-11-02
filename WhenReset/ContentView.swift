@@ -116,6 +116,7 @@ private struct UpdateAvailableBanner: View {
 
 private struct UsageTabView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.interfaceStyle) private var interfaceStyle
     @State private var showingAddAccount = false
     @State private var relinkingAccount: MonitoredAccount?
     @State private var accountPendingRemoval: MonitoredAccount?
@@ -175,7 +176,7 @@ private struct UsageTabView: View {
                 if sort != .custom { editingAccountOrder = false }
             }
             .refreshable { await store.refreshAll() }
-            .blinkyNavigationGlass()
+            .blinkyNavigationGlass(interfaceStyle)
             .sheet(isPresented: $showingAddAccount) { AddAccountView() }
             .sheet(item: $relinkingAccount) { account in
                 AddAccountView(relinkingAccount: account)
@@ -576,6 +577,7 @@ private struct AccountFailureView: View {
 
 struct UsageCard: View {
     let snapshot: UsageSnapshot
+    @Environment(\.interfaceStyle) private var interfaceStyle
 
     var body: some View {
         VStack(spacing: 16) {
@@ -599,9 +601,9 @@ struct UsageCard: View {
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
-            .blinkyInsetGlass()
+            .padding(.horizontal, interfaceStyle == .classic ? 0 : 10)
+            .padding(.vertical, interfaceStyle == .classic ? 2 : 8)
+            .modifier(UsageExtrasChrome(style: interfaceStyle))
         }.padding(.vertical, 6)
     }
 }
@@ -783,6 +785,9 @@ private struct BankedResetBar: View {
 struct LimitRow: View {
     let window: UsageWindow
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.interfaceStyle) private var interfaceStyle
+
+    private var prominent: Bool { interfaceStyle != .classic }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -801,13 +806,32 @@ struct LimitRow: View {
                     }
                 }
                 Text(UsageText.remainingPercent(window.remainingPercent))
-                    .font(.title2.bold().monospacedDigit())
+                    .font((prominent ? Font.title2 : Font.title3).bold().monospacedDigit())
                     .foregroundStyle(UsageMeterTint.color(
                         remainingFraction: window.remainingPercent / 100,
                         colorScheme: colorScheme
                     ))
-                UsageMeter(remainingFraction: window.remainingPercent / 100, prominent: true)
+                UsageMeter(remainingFraction: window.remainingPercent / 100, prominent: prominent)
             }
+        }
+    }
+}
+
+private struct UsageExtrasChrome: ViewModifier {
+    var style: InterfaceStyle
+
+    func body(content: Content) -> some View {
+        switch style {
+        case .classic:
+            content
+                .overlay(alignment: .top) { Divider() }
+        case .screenTime:
+            content.background(
+                Color.primary.opacity(0.05),
+                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+            )
+        case .liquidGlass:
+            content.blinkyInsetGlass()
         }
     }
 }
@@ -827,13 +851,17 @@ private extension View {
 
     /// System navigation glass on iOS 26. Older systems get an explicit material.
     @ViewBuilder
-    func blinkyNavigationGlass() -> some View {
-        if #available(iOS 26, *) {
-            self
+    func blinkyNavigationGlass(_ style: InterfaceStyle) -> some View {
+        if style == .liquidGlass {
+            if #available(iOS 26, *) {
+                self
+            } else {
+                self
+                    .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+                    .toolbarBackground(.visible, for: .navigationBar)
+            }
         } else {
             self
-                .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
-                .toolbarBackground(.visible, for: .navigationBar)
         }
     }
 }

@@ -58,6 +58,49 @@ enum AppAppearance: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// How the usage cards are drawn. Independent of light, dark, or system theme.
+enum InterfaceStyle: String, CaseIterable, Identifiable, Sendable {
+    case classic
+    case screenTime
+    case liquidGlass
+
+    var id: String { rawValue }
+
+    static let `default` = InterfaceStyle.liquidGlass
+    static let storageKey = "settings.interfaceStyle"
+
+    var title: String {
+        switch self {
+        case .classic: String.localized("Classic")
+        case .screenTime: String.localized("Screen Time")
+        case .liquidGlass: String.localized("Liquid Glass")
+        }
+    }
+
+    static var current: InterfaceStyle {
+        let raw = UserDefaults(suiteName: AppIdentity.appGroupIdentifier)?.string(forKey: storageKey)
+            ?? UserDefaults.standard.string(forKey: storageKey)
+        return InterfaceStyle(rawValue: raw ?? "") ?? .default
+    }
+
+    static func choose(_ style: InterfaceStyle) {
+        UserDefaults.standard.set(style.rawValue, forKey: storageKey)
+        UserDefaults(suiteName: AppIdentity.appGroupIdentifier)?.set(style.rawValue, forKey: storageKey)
+        NotificationCenter.default.post(name: .blinkyInterfaceStyleChanged, object: style)
+    }
+}
+
+private struct InterfaceStyleKey: EnvironmentKey {
+    static let defaultValue = InterfaceStyle.default
+}
+
+extension EnvironmentValues {
+    var interfaceStyle: InterfaceStyle {
+        get { self[InterfaceStyleKey.self] }
+        set { self[InterfaceStyleKey.self] = newValue }
+    }
+}
+
 /// How a remaining-allowance meter is drawn. Continuous is the default.
 enum UsageBarStyle: String, CaseIterable, Identifiable, Sendable {
     case continuous
@@ -98,6 +141,7 @@ enum UsageBarStyle: String, CaseIterable, Identifiable, Sendable {
 extension Notification.Name {
     static let blinkyAppearanceChanged = Notification.Name("blinky.appearance.changed")
     static let blinkyUsageBarStyleChanged = Notification.Name("blinky.usageBarStyle.changed")
+    static let blinkyInterfaceStyleChanged = Notification.Name("blinky.interfaceStyle.changed")
 }
 
 private struct UsageBarStyleKey: EnvironmentKey {
