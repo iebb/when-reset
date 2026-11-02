@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     let onStageWorkerLink: (WorkerLinkDraft) -> Void
+    @Environment(UpdateCheckController.self) private var updates
 
     var body: some View {
         NavigationStack {
@@ -37,6 +38,7 @@ struct SettingsView: View {
                     moduleLink("About", systemImage: "info.circle", identifier: "settings-module-about") {
                         AboutSettingsView()
                     }
+                    .badge(updates.showsAboutBadge ? 1 : 0)
                 }
             }
             .navigationTitle("Settings")
