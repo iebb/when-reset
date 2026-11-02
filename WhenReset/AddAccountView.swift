@@ -1044,7 +1044,7 @@ struct AddAccountView: View {
                     Label("Authorization check paused", systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
                 }
-                Text(String(format: String.localized("The code expires %@."), locale: AppLanguage.current.locale, link.expiresAt.formatted(.relative(presentation: .numeric))))
+                Text(String(format: String.localized("The code expires in %lld min."), locale: AppLanguage.current.locale, Int64(max(1, Int(link.expiresAt.timeIntervalSinceNow / 60)))))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Button {

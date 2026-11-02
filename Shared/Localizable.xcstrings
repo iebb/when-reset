@@ -5520,6 +5520,22 @@
           }
         }
       }
+    },
+    "The code expires in %lld min.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The code expires in %lld min."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "代码将在 %lld 分钟后过期。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
