@@ -6,17 +6,29 @@ import SwiftUI
 @MainActor
 final class ScreenshotRenderTests: XCTestCase {
     func testRendersWidgetAndLiveActivityPreviews() {
-        let previous = AppLanguage.current
-        defer { AppLanguage.choose(previous) }
-        render(language: .english, prefix: "en")
-        render(language: .chineseSimplified, prefix: "zh-Hans")
+        let previousLanguage = AppLanguage.current
+        let previousAppearance = AppAppearance.current
+        let previousBars = UsageBarStyle.current
+        defer {
+            AppLanguage.choose(previousLanguage)
+            AppAppearance.choose(previousAppearance)
+            UsageBarStyle.choose(previousBars)
+        }
+        for language in [AppLanguage.english, AppLanguage.chineseSimplified] {
+            for appearance in [AppAppearance.light, AppAppearance.dark] {
+                render(language: language, appearance: appearance)
+            }
+        }
     }
 
-    private func render(language: AppLanguage, prefix: String) {
+    private func render(language: AppLanguage, appearance: AppAppearance) {
         AppLanguage.choose(language)
+        AppAppearance.choose(appearance)
+        UsageBarStyle.choose(.segmented)
         if language == .chineseSimplified {
             XCTAssertEqual(String.localized("5h limit"), "5 小时额度")
-            XCTAssertEqual(String.localized("Open %@ linking"), "打开 %@ 关联")
+            XCTAssertEqual(String.localized("Progress bars"), "进度条")
+            XCTAssertEqual(String.localized("Segmented"), "分段")
             let now = Date(timeIntervalSince1970: 1_000)
             XCTAssertEqual(
                 CountdownDisplay.compactString(until: now.addingTimeInterval(3 * 3_600), from: now),
@@ -30,39 +42,40 @@ final class ScreenshotRenderTests: XCTestCase {
         let seeded = ScreenshotFixture.seed()
         let snapshots = seeded.accounts.compactMap { seeded.snapshots[$0.id] }
         let rows = ScreenshotFixture.activityRows()
-        let locale = language.locale
+        let prefix = "\(language.screenshotPrefix)-\(appearance.rawValue)"
+        let scheme = appearance.colorScheme ?? .light
         attach(
             ScreenshotUsageList(snapshots: Array(snapshots.prefix(4)), showsSecondLimit: false)
-                .environment(\.locale, locale)
-                .frame(width: 364, height: 170),
+                .screenshotChrome(language: language, scheme: scheme),
             name: "\(prefix)-06-widget-medium",
-            scale: 2
+            scale: 2,
+            size: CGSize(width: 364, height: 170)
         )
         attach(
             ScreenshotUsageList(snapshots: snapshots, showsSecondLimit: true)
-                .environment(\.locale, locale)
-                .frame(width: 364, height: 382),
+                .screenshotChrome(language: language, scheme: scheme),
             name: "\(prefix)-07-widget-large",
-            scale: 2
+            scale: 2,
+            size: CGSize(width: 364, height: 382)
         )
         attach(
             ScreenshotLiveLock(rows: rows)
-                .environment(\.locale, locale)
-                .frame(width: 360, height: 280),
+                .screenshotChrome(language: language, scheme: scheme),
             name: "\(prefix)-08-live-activity-lock",
-            scale: 2
+            scale: 2,
+            size: CGSize(width: 360, height: 280)
         )
         attach(
             ScreenshotLiveCompact(rows: rows)
-                .environment(\.locale, locale)
-                .frame(width: 280, height: 48),
+                .screenshotChrome(language: language, scheme: scheme),
             name: "\(prefix)-09-live-activity-compact",
-            scale: 2
+            scale: 2,
+            size: CGSize(width: 280, height: 48)
         )
     }
 
-    private func attach<V: View>(_ view: V, name: String, scale: CGFloat) {
-        let renderer = ImageRenderer(content: view)
+    private func attach<V: View>(_ view: V, name: String, scale: CGFloat, size: CGSize) {
+        let renderer = ImageRenderer(content: view.frame(width: size.width, height: size.height))
         renderer.scale = scale
         guard let image = renderer.uiImage, let data = image.pngData() else {
             return XCTFail("Could not render \(name)")
@@ -71,6 +84,24 @@ final class ScreenshotRenderTests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+}
+
+private extension AppLanguage {
+    var screenshotPrefix: String {
+        switch self {
+        case .system, .english: "en"
+        case .chineseSimplified: "zh-Hans"
+        }
+    }
+}
+
+private extension View {
+    func screenshotChrome(language: AppLanguage, scheme: ColorScheme) -> some View {
+        environment(\.locale, language.locale)
+            .environment(\.usageBarStyle, .segmented)
+            .environment(\.colorScheme, scheme)
+            .preferredColorScheme(scheme)
     }
 }
 #endif

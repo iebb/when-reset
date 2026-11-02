@@ -22,6 +22,18 @@ enum ScreenshotLaunch {
         }
     }
 
+    /// Forces a light or dark interface and the segmented bar so captures stay deterministic.
+    static func applyChrome() {
+        guard isActive else { return }
+        switch argument(after: "-BlinkyScreenshotAppearance") {
+        case "dark":
+            AppAppearance.choose(.dark)
+        default:
+            AppAppearance.choose(.light)
+        }
+        UsageBarStyle.choose(.segmented)
+    }
+
     private static func argument(after flag: String) -> String? {
         let args = ProcessInfo.processInfo.arguments
         guard let index = args.firstIndex(of: flag), args.indices.contains(index + 1) else { return nil }

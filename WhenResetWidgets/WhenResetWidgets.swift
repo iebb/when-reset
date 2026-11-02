@@ -576,7 +576,7 @@ struct UsageWidget: Widget {
         AppIntentConfiguration(kind: "UsageWidget", intent: UsageWidgetConfigurationIntent.self,
                                provider: UsageWidgetProvider()) { entry in
             HomeWidgetView(entry: entry)
-                .environment(\.locale, AppLanguage.current.locale)
+                .blinkyUsageChrome()
                 .containerBackground(.fill.tertiary, for: .widget)
         }
         .configurationDisplayName("Usage limits")
@@ -710,8 +710,7 @@ private struct UsageListHomeWidget: View {
                 }
             }
             if let headline {
-                ProgressView(value: headline.remainingPercent, total: 100)
-                    .tint(.blue)
+                UsageMeter(remainingFraction: headline.remainingPercent / 100)
                 if family == .systemLarge, let secondary {
                     HStack {
                         Text(secondary.displayTitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
@@ -832,8 +831,7 @@ private struct MarketTargetChip: View {
                     .fill(.secondary.opacity(0.16))
                     .frame(height: 4)
             } else if let progress = target.progress(at: date) {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.tint)
+                UsageMeter(remainingFraction: progress)
             }
         }
         .padding(8)
@@ -1033,8 +1031,7 @@ private struct RingSecondaryRow: View {
                     .fill(.secondary.opacity(0.16))
                     .frame(height: 4)
             } else if let progress = target.progress(at: date) {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.tint)
+                UsageMeter(remainingFraction: progress)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1289,8 +1286,7 @@ private struct GaugeTargetSummary: View {
                     .fill(.secondary.opacity(0.16))
                     .frame(height: 4)
             } else if let progress = target.progress(at: date) {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.widgetAccent)
+                UsageMeter(remainingFraction: progress)
             }
         }
         .padding(7)
@@ -1549,8 +1545,7 @@ private struct BoardTargetRow: View {
                     .fill(.secondary.opacity(0.16))
                     .frame(height: 4)
             } else if let progress = target.progress(at: date) {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.tint)
+                UsageMeter(remainingFraction: progress)
             }
         }
         .padding(compact ? 6 : 8)
@@ -1729,7 +1724,9 @@ struct UsageLockScreenWidget: Widget {
         AppIntentConfiguration(kind: "UsageLockScreenWidget",
                                intent: UsageLockScreenConfigurationIntent.self,
                                provider: UsageLockScreenWidgetProvider()) { entry in
-            LockWidgetView(entry: entry).containerBackground(.clear, for: .widget)
+            LockWidgetView(entry: entry)
+                .blinkyUsageChrome()
+                .containerBackground(.clear, for: .widget)
         }
         .configurationDisplayName("Usage countdown")
         .description("Choose the account, quota, and Lock Screen style.")
@@ -1877,7 +1874,7 @@ private struct LockRectangularView: View {
                     Text(entry.target.condensedValueLabel).font(.caption.bold())
                 }
                 if let progress = entry.target.progress(at: entry.date) {
-                    ProgressView(value: progress, total: 1)
+                    UsageMeter(remainingFraction: progress)
                 }
                 if let expiresAt = entry.target.expiresAt {
                     WidgetCountdown(expiry: expiresAt)
@@ -1921,9 +1918,8 @@ struct UsageLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: UsageActivityAttributes.self) { context in
             LiveLockView(state: context.state)
-                .environment(\.locale, AppLanguage.current.locale)
-                .activityBackgroundTint(.black)
-                .activitySystemActionForegroundColor(.white)
+                .blinkyUsageChrome()
+                .modifier(LiveActivityBackground())
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -1947,9 +1943,10 @@ struct UsageLiveActivity: Widget {
                     if !context.state.accounts.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(context.state.accounts.prefix(4)) { account in
-                                LiveAccountBar(account: account)
+                                LiveAccountBar(account: account, onDarkSurface: true)
                             }
                         }
+                        .blinkyUsageChrome(colorScheme: .dark)
                     } else if let target = context.state.targets.first {
                         VStack(alignment: .leading, spacing: 7) {
                             LivePrimaryIslandDetail(target: target)
@@ -1960,6 +1957,7 @@ struct UsageLiveActivity: Widget {
                                 }
                             }
                         }
+                        .blinkyUsageChrome(colorScheme: .dark)
                     }
                 }
             } compactLeading: {
@@ -2018,8 +2016,7 @@ private struct LivePrimaryIslandDetail: View {
                 }
             }
             if let progress = target.progressFraction {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.kind == .bankedReset ? .teal : .blue)
+                UsageMeter(remainingFraction: progress)
             }
         }
         .foregroundStyle(.white)
@@ -2040,8 +2037,7 @@ private struct LiveIslandMiniTarget: View {
                 }
             }
             if let progress = target.progressFraction {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.kind == .bankedReset ? .teal : .blue)
+                UsageMeter(remainingFraction: progress)
             }
             HStack(spacing: 4) {
                 ProviderMark(providerID: target.providerID, symbolName: target.accountSymbolName)
@@ -2128,7 +2124,6 @@ private struct LiveLockView: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 10)
-            .foregroundStyle(.white)
         } else {
         let ordered = UsageActivityTarget.ordered(state.targets)
         VStack(spacing: 8) {
@@ -2150,7 +2145,6 @@ private struct LiveLockView: View {
             }
         }
         .padding(.horizontal, 12).padding(.vertical, 10)
-        .foregroundStyle(.white)
         }
     }
 }
@@ -2175,8 +2169,23 @@ private struct LiveAccountStrip: View {
     }
 }
 
+private struct LiveActivityBackground: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        switch AppAppearance.current {
+        case .dark:
+            content.activityBackgroundTint(.black).activitySystemActionForegroundColor(.white)
+        case .light:
+            content.activityBackgroundTint(Color(.systemBackground)).activitySystemActionForegroundColor(.primary)
+        case .system:
+            content
+        }
+    }
+}
+
 private struct LiveAccountBar: View {
     let account: UsageActivityAccountRow
+    var onDarkSurface = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
@@ -2199,7 +2208,7 @@ private struct LiveAccountBar: View {
                 Text(UsageText.remainingPercent(account.headlineRemainingPercent))
                     .font(.caption.monospacedDigit())
             }
-            ProgressView(value: account.headlineRemainingPercent, total: 100)
+            UsageMeter(remainingFraction: account.headlineRemainingPercent / 100)
             if let secondary = account.secondaryTitle, let percent = account.secondaryRemainingPercent {
                 Text("\(secondary) \(UsageText.remainingPercent(percent))")
                     .font(.caption2)
@@ -2207,7 +2216,7 @@ private struct LiveAccountBar: View {
                     .lineLimit(1)
             }
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(onDarkSurface ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
     }
 }
 
@@ -2233,8 +2242,7 @@ private struct LiveHeroTargetCard: View {
                 }
             }
             if let progress = target.progressFraction {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.kind == .bankedReset ? .teal : .blue)
+                UsageMeter(remainingFraction: progress)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2257,8 +2265,7 @@ private struct LiveCompactTargetCard: View {
                 }
             }
             if let progress = target.progressFraction {
-                ProgressView(value: progress, total: 1)
-                    .tint(target.kind == .bankedReset ? .teal : .blue)
+                UsageMeter(remainingFraction: progress)
             }
             HStack(spacing: 4) {
                 ProviderMark(providerID: target.providerID, symbolName: target.accountSymbolName)

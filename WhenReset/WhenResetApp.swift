@@ -165,11 +165,16 @@ struct WhenResetApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @State private var store: AppStore
     @State private var interfaceLanguage = AppLanguage.current
+    @State private var appearance = AppAppearance.current
+    @State private var barStyle = UsageBarStyle.current
 
     init() {
         #if DEBUG
         ScreenshotLaunch.applyLanguage()
+        ScreenshotLaunch.applyChrome()
         _interfaceLanguage = State(initialValue: AppLanguage.current)
+        _appearance = State(initialValue: AppAppearance.current)
+        _barStyle = State(initialValue: UsageBarStyle.current)
         #endif
         let store = AppStore()
         _store = State(initialValue: store)
@@ -184,8 +189,16 @@ struct WhenResetApp: App {
         WindowGroup {
             ContentView().environment(store)
                 .environment(\.locale, interfaceLanguage.locale)
+                .environment(\.usageBarStyle, barStyle)
+                .preferredColorScheme(appearance.colorScheme)
                 .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
                     if let language = note.object as? AppLanguage { interfaceLanguage = language }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyAppearanceChanged)) { note in
+                    if let appearance = note.object as? AppAppearance { self.appearance = appearance }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyUsageBarStyleChanged)) { note in
+                    if let style = note.object as? UsageBarStyle { barStyle = style }
                 }
                 .task { await startStore() }
                 .task(id: scenePhase) {
@@ -218,8 +231,16 @@ struct WhenResetApp: App {
             MacContentView()
                 .environment(store)
                 .environment(\.locale, interfaceLanguage.locale)
+                .environment(\.usageBarStyle, barStyle)
+                .preferredColorScheme(appearance.colorScheme)
                 .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
                     if let language = note.object as? AppLanguage { interfaceLanguage = language }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyAppearanceChanged)) { note in
+                    if let appearance = note.object as? AppAppearance { self.appearance = appearance }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyUsageBarStyleChanged)) { note in
+                    if let style = note.object as? UsageBarStyle { barStyle = style }
                 }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }

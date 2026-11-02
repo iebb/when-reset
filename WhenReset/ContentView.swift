@@ -1475,6 +1475,28 @@ struct SettingsView: View {
     @State private var stagedLinkFromEntry: WorkerLinkDraft?
     @State private var pushServerActionError: String?
     @State private var language = AppLanguage.current
+    @State private var appearance = AppAppearance.current
+    @State private var barStyle = UsageBarStyle.current
+
+    private var appearanceSelection: Binding<AppAppearance> {
+        Binding {
+            appearance
+        } set: { newValue in
+            appearance = newValue
+            AppAppearance.choose(newValue)
+            Task { await store.reconcileLiveActivityAfterForegroundActivation() }
+        }
+    }
+
+    private var barStyleSelection: Binding<UsageBarStyle> {
+        Binding {
+            barStyle
+        } set: { newValue in
+            barStyle = newValue
+            UsageBarStyle.choose(newValue)
+            Task { await store.reconcileLiveActivityAfterForegroundActivation() }
+        }
+    }
 
     private var languageSelection: Binding<AppLanguage> {
         Binding {
@@ -1488,6 +1510,24 @@ struct SettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Picker("Interface appearance", selection: appearanceSelection) {
+                        ForEach(AppAppearance.allCases) { appearance in
+                            Text(appearance.title).tag(appearance)
+                        }
+                    }
+                    .accessibilityIdentifier("interface-appearance")
+                    Picker("Progress bars", selection: barStyleSelection) {
+                        ForEach(UsageBarStyle.allCases) { style in
+                            Text(style.title).tag(style)
+                        }
+                    }
+                    .accessibilityIdentifier("usage-bar-style")
+                } header: {
+                    Text("Appearance")
+                } footer: {
+                    Text("Segmented draws remaining allowance as ticks. Continuous draws one bar.")
+                }
                 Section("Language") {
                     Picker("Interface language", selection: languageSelection) {
                         ForEach(AppLanguage.allCases) { language in
@@ -2333,9 +2373,7 @@ struct UsageCard: View {
             if let balance = snapshot.apiBalance {
                 APIBalanceRow(balance: balance)
             }
-            if snapshot.availableResetCount > 0 || !snapshot.availableResetCredits.isEmpty {
-                BankedResetBar(snapshot: snapshot)
-            }
+            UsageMoreSection(snapshot: snapshot)
             if snapshot.usageWindows.isEmpty, snapshot.apiBalance == nil {
                 Label("No resettable limits reported", systemImage: "checkmark.circle")
                     .font(.subheadline)
@@ -2377,8 +2415,7 @@ struct APIBalanceRow: View {
             }
 
             if let fraction = balance.fractionRemaining {
-                ProgressView(value: fraction, total: 1)
-                    .tint(fraction <= 0.1 ? .red : .green)
+                UsageMeter(remainingFraction: fraction)
             }
 
             HStack(spacing: 8) {
@@ -2431,8 +2468,26 @@ struct APIBalanceRow: View {
     }
 }
 
+/// Collapsed extras under the always-visible limits.
+/// Banked resets are the only extra today. Predicted reset and exhaustion
+/// belong in this section later; do not add them on this branch.
+private struct UsageMoreSection: View {
+    let snapshot: UsageSnapshot
+
+    private var showsBankedResets: Bool {
+        snapshot.availableResetCount > 0 || !snapshot.availableResetCredits.isEmpty
+    }
+
+    var body: some View {
+        if showsBankedResets {
+            BankedResetBar(snapshot: snapshot)
+        }
+    }
+}
+
 private struct BankedResetBar: View {
     let snapshot: UsageSnapshot
+    @State private var expanded = false
 
     private var credits: [ResetCredit] { snapshot.availableResetCredits }
     private var count: Int { max(snapshot.availableResetCount, credits.count) }
@@ -2449,40 +2504,59 @@ private struct BankedResetBar: View {
     }
 
     private func content(at date: Date, nearest: ResetCredit?, expiry: Date?) -> some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                Text(count == 1
-                     ? String.localized("1 banked reset")
-                     : String(format: String.localized("%lld banked resets"), locale: AppLanguage.current.locale, Int64(count)))
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                Spacer()
-                if let expiry {
-                    Text(CountdownDisplay.string(until: expiry, from: date))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
-            }
-            if let nearest, let remaining = nearest.remainingLifetimeFraction(at: date) {
-                ProgressView(value: remaining, total: 1).tint(.teal)
-            }
-            ForEach(Array(credits.enumerated()), id: \.element.id) { index, credit in
-                HStack {
-                    Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1)))
-                    Spacer()
-                    if let expiry = credit.expiresAt {
-                        Text(expiry, format: .dateTime.year().month(.abbreviated).day().hour().minute().second())
-                            .multilineTextAlignment(.trailing)
-                    } else {
-                        Text("Expiry unavailable")
+        VStack(alignment: .leading, spacing: 8) {
+            Button {
+                expanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Text(count == 1
+                         ? String.localized("1 banked reset")
+                         : String(format: String.localized("%lld banked resets"), locale: AppLanguage.current.locale, Int64(count)))
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    if let expiry {
+                        Text(CountdownDisplay.string(until: expiry, from: date))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
                     }
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
                 }
-                .foregroundStyle(.secondary)
             }
-            if count > credits.count {
-                ForEach(credits.count..<count, id: \.self) { index in
-                    HStack { Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1))); Spacer(); Text("Expiry unavailable") }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("usage-more-banked")
+            .accessibilityLabel(expanded
+                                ? String.localized("Hide banked reset details")
+                                : String.localized("Show banked reset details"))
+
+            if expanded {
+                if let nearest, let remaining = nearest.remainingLifetimeFraction(at: date) {
+                    UsageMeter(remainingFraction: remaining)
+                }
+                ForEach(Array(credits.enumerated()), id: \.element.id) { index, credit in
+                    HStack {
+                        Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1)))
+                        Spacer()
+                        if let expiry = credit.expiresAt {
+                            Text(expiry, format: .dateTime.year().month(.abbreviated).day().hour().minute().second())
+                                .multilineTextAlignment(.trailing)
+                        } else {
+                            Text("Expiry unavailable")
+                        }
+                    }
+                    .foregroundStyle(.secondary)
+                }
+                if count > credits.count {
+                    ForEach(credits.count..<count, id: \.self) { index in
+                        HStack {
+                            Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1)))
+                            Spacer()
+                            Text("Expiry unavailable")
+                        }
                         .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -2492,14 +2566,6 @@ private struct BankedResetBar: View {
 
 struct LimitRow: View {
     let window: UsageWindow
-
-    private var color: Color {
-        switch window.windowMinutes {
-        case 300: .blue
-        case 10_080: .purple
-        default: .indigo
-        }
-    }
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -2517,7 +2583,7 @@ struct LimitRow: View {
                     }
                 }
                 HStack(spacing: 10) {
-                    ProgressView(value: window.remainingPercent, total: 100).tint(color)
+                    UsageMeter(remainingFraction: window.remainingPercent / 100)
                     Text(UsageText.remainingPercent(window.remainingPercent))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)

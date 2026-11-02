@@ -6,7 +6,7 @@ struct ScreenshotUsageList: View {
     var showsSecondLimit: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: showsSecondLimit ? 6 : 5) {
+        VStack(alignment: .leading, spacing: showsSecondLimit ? 5 : 4) {
             Text("Usage")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
@@ -15,7 +15,7 @@ struct ScreenshotUsageList: View {
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, showsSecondLimit ? 10 : 8)
+        .padding(.vertical, showsSecondLimit ? 8 : 6)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(.systemBackground))
     }
@@ -44,7 +44,7 @@ struct ScreenshotUsageList: View {
                 }
             }
             if let headline {
-                ScreenshotMeter(remaining: headline.remainingPercent)
+                UsageMeter(remainingFraction: headline.remainingPercent / 100)
                 if showsSecondLimit, let secondary {
                     HStack {
                         Text(secondary.displayTitle)
@@ -86,19 +86,19 @@ struct ScreenshotLiveLock: View {
                         if let reset = account.headlineResetsAt {
                             Text(CountdownDisplay.compactString(until: reset))
                                 .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.white.opacity(0.7))
+                                .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
                         Text(UsageText.remainingPercent(account.headlineRemainingPercent))
                             .font(.caption.monospacedDigit())
                             .lineLimit(1)
                     }
-                    ScreenshotMeter(remaining: account.headlineRemainingPercent)
+                    UsageMeter(remainingFraction: account.headlineRemainingPercent / 100)
                     if let secondary = account.secondaryTitle,
                        let percent = account.secondaryRemainingPercent {
                         Text("\(secondary) \(UsageText.remainingPercent(percent))")
                             .font(.caption2)
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                 }
@@ -106,23 +106,8 @@ struct ScreenshotLiveLock: View {
         }
         .padding(12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.black)
-        .foregroundStyle(.white)
-    }
-}
-
-private struct ScreenshotMeter: View {
-    var remaining: Double
-
-    var body: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(Color.secondary.opacity(0.25))
-                Capsule().fill(Color.blue)
-                    .frame(width: max(0, geo.size.width * min(1, max(0, remaining / 100))))
-            }
-        }
-        .frame(height: 6)
+        .background(Color(.systemBackground))
+        .foregroundStyle(.primary)
     }
 }
 
@@ -144,8 +129,8 @@ struct ScreenshotLiveCompact: View {
         }
         .padding(.horizontal, 10)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
-        .foregroundStyle(.white)
+        .background(Color(.systemBackground))
+        .foregroundStyle(.primary)
     }
 }
 #endif

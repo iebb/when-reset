@@ -10,18 +10,22 @@ final class ScreenshotUITests: XCTestCase {
     }
 
     private func capture(language: String, prefix: String) {
-        shot(language: language, screen: "usage", name: "\(prefix)-01-usage-list")
-        shot(language: language, screen: "reorder", name: "\(prefix)-02-usage-reorder")
-        shot(language: language, screen: "addAccount", name: "\(prefix)-03-add-account")
-        shot(language: language, screen: "deviceCode", name: "\(prefix)-04-device-code")
-        shot(language: language, screen: "settings", name: "\(prefix)-05-settings")
+        for appearance in ["light", "dark"] {
+            let name = "\(prefix)-\(appearance)"
+            shot(language: language, appearance: appearance, screen: "usage", name: "\(name)-01-usage-list")
+            shot(language: language, appearance: appearance, screen: "reorder", name: "\(name)-02-usage-reorder")
+            shot(language: language, appearance: appearance, screen: "addAccount", name: "\(name)-03-add-account")
+            shot(language: language, appearance: appearance, screen: "deviceCode", name: "\(name)-04-device-code")
+            shot(language: language, appearance: appearance, screen: "settings", name: "\(name)-05-settings")
+        }
     }
 
-    private func shot(language: String, screen: String, name: String) {
+    private func shot(language: String, appearance: String, screen: String, name: String) {
         let app = XCUIApplication()
         app.launchArguments = [
             "-BlinkyScreenshotFixture",
             "-BlinkyScreenshotLanguage", language,
+            "-BlinkyScreenshotAppearance", appearance,
             "-BlinkyScreenshotScreen", screen,
         ]
         app.launch()
@@ -43,8 +47,8 @@ final class ScreenshotUITests: XCTestCase {
         case "deviceCode":
             XCTAssertTrue(app.staticTexts["K3M9-PQ2R"].waitForExistence(timeout: 15))
         case "settings":
-            let label = app.staticTexts["Interface language"]
-            let chinese = app.staticTexts["界面语言"]
+            let label = app.staticTexts["Interface appearance"]
+            let chinese = app.staticTexts["界面外观"]
             XCTAssertTrue(label.waitForExistence(timeout: 12) || chinese.waitForExistence(timeout: 4))
         case "reorder":
             let done = app.buttons["Done"]
