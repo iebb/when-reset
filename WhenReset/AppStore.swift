@@ -3508,10 +3508,21 @@ final class AppStore {
         notificationSettings = settings
         UserDefaults.standard.set(try? JSONEncoder().encode(settings), forKey: notificationSettingsKey)
         Task {
-            if !previousSettings.notifyAtScheduledReset,
-               settings.notifyAtScheduledReset,
-               accounts.contains(where: { !$0.isDemo && self.settings(for: $0).notifyAtScheduledReset }) {
-                await UsageNotificationService.requestProminentAuthorization()
+            let unexpectedTurnedOn = !previousSettings.notifyAboutUnexpectedResets
+                && settings.notifyAboutUnexpectedResets
+            let scheduledTurnedOn = !previousSettings.notifyAtScheduledReset
+                && settings.notifyAtScheduledReset
+            if unexpectedTurnedOn || scheduledTurnedOn {
+                let accountReady = accounts.contains { account in
+                    guard !account.isDemo else { return false }
+                    let accountSettings = self.settings(for: account)
+                    if unexpectedTurnedOn, accountSettings.notifyAboutResets { return true }
+                    if scheduledTurnedOn, accountSettings.notifyAtScheduledReset { return true }
+                    return false
+                }
+                if accountReady {
+                    await UsageNotificationService.requestProminentAuthorization()
+                }
             }
             await reconcileScheduledResetNotifications()
         }
@@ -5533,7 +5544,11 @@ enum ScheduledResetNotificationPlanner {
 }
 
 @MainActor
-private enum UsageNotificationService {
+enum UsageNotificationService {
+    static func authorizationStatus() async -> UNAuthorizationStatus {
+        await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+    }
+
     static func prepareProvisionalAuthorization() async {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
@@ -5611,8 +5626,12 @@ private enum UsageNotificationService {
             let interval = target.fireDate.timeIntervalSinceNow
             guard interval > 1 else { continue }
             let content = UNMutableNotificationContent()
-            content.title = "\(target.metricTitle) reset"
-            content.body = "\(target.accountName)’s \(target.metricTitle) should now be available again."
+            content.title = UsageNotificationCopy.format("%@ reset", target.metricTitle)
+            content.body = UsageNotificationCopy.format(
+                "%1$@’s %2$@ should now be available again.",
+                target.accountName,
+                target.metricTitle
+            )
             content.threadIdentifier = "usage-\(target.accountID.uuidString)"
             content.userInfo = [
                 "accountID": target.accountID.uuidString,

@@ -5760,6 +5760,694 @@
           }
         }
       }
+    },
+    "Live Activity": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live Activity"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "实时活动"
+          }
+        }
+      }
+    },
+    "The in-app interval runs while Blinky is open. Background refresh and Live Activity use the second interval.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The in-app interval runs while Blinky is open. Background refresh and Live Activity use the second interval."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用内间隔在 Blinky 打开时生效。后台刷新和实时活动使用第二个间隔。"
+          }
+        }
+      }
+    },
+    "English and Simplified Chinese follow the system language until you choose one here.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "English and Simplified Chinese follow the system language until you choose one here."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在这里选择之前，英文和简体中文跟随系统语言。"
+          }
+        }
+      }
+    },
+    "Detected quota resets and new banked resets use this switch. Unexpected or early resets, and alerts at the scheduled time, also need the matching switch in Settings → Notifications.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detected quota resets and new banked resets use this switch. Unexpected or early resets, and alerts at the scheduled time, also need the matching switch in Settings → Notifications."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到的额度重置和新增的已储存重置使用这个开关。意外或提前的重置，以及计划时间的提醒，还需要在「设置 → 通知」中打开对应开关。"
+          }
+        }
+      }
+    },
+    "Status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态"
+          }
+        }
+      }
+    },
+    "The Worker settings could not be updated.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The Worker settings could not be updated."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法更新 Worker 设置。"
+          }
+        }
+      }
+    },
+    "Apply Cloud Settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apply Cloud Settings"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用云端设置"
+          }
+        }
+      }
+    },
+    "Allow Notifications": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow Notifications"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许通知"
+          }
+        }
+      }
+    },
+    "Quiet alerts": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quiet alerts"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "静默提醒"
+          }
+        }
+      }
+    },
+    "Allow Alerts and Sounds": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow Alerts and Sounds"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许提醒和声音"
+          }
+        }
+      }
+    },
+    "Allowed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allowed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已允许"
+          }
+        }
+      }
+    },
+    "Open Settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Settings"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开设置"
+          }
+        }
+      }
+    },
+    "Allowed for this session": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allowed for this session"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本次已允许"
+          }
+        }
+      }
+    },
+    "Permission": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Permission"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "权限"
+          }
+        }
+      }
+    },
+    "Unexpected or early resets include an early quota change and an early weekly reset. Scheduled reset times alert when that time arrives. Each account also needs its own switch on.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unexpected or early resets include an early quota change and an early weekly reset. Scheduled reset times alert when that time arrives. Each account also needs its own switch on."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "意外或提前的重置包括额度提前变化，以及每周额度提前重置。计划中的重置时间会在到达时提醒。每个账号还需要打开自己的开关。"
+          }
+        }
+      }
+    },
+    "Detected quota resets and new banked resets use each account’s Notify About Detected Resets switch. Turning off unexpected resets does not turn those alerts off.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detected quota resets and new banked resets use each account’s Notify About Detected Resets switch. Turning off unexpected resets does not turn those alerts off."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到的额度重置和新增的已储存重置，由每个账号的「发现重置时通知」开关控制。关闭意外重置不会关闭这两类提醒。"
+          }
+        }
+      }
+    },
+    "Detected resets": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Detected resets"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到的重置"
+          }
+        }
+      }
+    },
+    "Allow notifications to deliver reset alerts.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow notifications to deliver reset alerts."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许通知后，才能发送重置提醒。"
+          }
+        }
+      }
+    },
+    "Quiet alerts are on. Allow alerts and sounds to show reset notifications on the Lock Screen and in Notification Center.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quiet alerts are on. Allow alerts and sounds to show reset notifications on the Lock Screen and in Notification Center."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前是静默提醒。允许提醒和声音后，重置通知会显示在锁屏和通知中心。"
+          }
+        }
+      }
+    },
+    "Notifications are allowed.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are allowed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已允许通知。"
+          }
+        }
+      }
+    },
+    "Notifications are off for Blinky. Turn them on in Settings to deliver reset alerts.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are off for Blinky. Turn them on in Settings to deliver reset alerts."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Blinky 的通知已关闭。请在系统设置中打开，才能发送重置提醒。"
+          }
+        }
+      }
+    },
+    "Notifications are allowed for this session.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notifications are allowed for this session."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本次已允许通知。"
+          }
+        }
+      }
+    },
+    "Starts after a refresh finds that any included quota matches its account rule.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Starts after a refresh finds that any included quota matches its account rule."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新后，如果任一已包含的额度符合该账号的规则，就会开始。"
+          }
+        }
+      }
+    },
+    "Shows whenever at least one included quota or banked reset is available.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shows whenever at least one included quota or banked reset is available."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "只要至少有一个已包含的额度或已储存重置，就会显示。"
+          }
+        }
+      }
+    },
+    "Ends the current Live Activity and prevents Blinky from starting another one.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ends the current Live Activity and prevents Blinky from starting another one."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "结束当前的实时活动，并阻止 Blinky 再开始一个。"
+          }
+        }
+      }
+    },
+    "New banked reset available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New banked reset available"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有新的已储存重置"
+          }
+        }
+      }
+    },
+    "New banked resets available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New banked resets available"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有新的已储存重置"
+          }
+        }
+      }
+    },
+    "A new banked reset was added to %@.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A new banked reset was added to %@."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已为 %@ 添加一次新的已储存重置。"
+          }
+        }
+      }
+    },
+    "%lld new banked resets were added to %@.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld new banked resets were added to %@."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已为 %2$@ 添加 %1$lld 次新的已储存重置。"
+          }
+        }
+      }
+    },
+    "Banked resets increased": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Banked resets increased"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已储存重置增加了"
+          }
+        }
+      }
+    },
+    "%@ now has %lld banked resets available.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ now has %lld banked resets available."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 现在有 %2$lld 次已储存重置可用。"
+          }
+        }
+      }
+    },
+    "Weekly limit reset early": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weekly limit reset early"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每周额度提前重置"
+          }
+        }
+      }
+    },
+    "%@’s weekly allowance increased from %lld%% to %lld%% before its scheduled reset. A banked reset was probably applied.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@’s weekly allowance increased from %lld%% to %lld%% before its scheduled reset. A banked reset was probably applied."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 的每周额度在计划重置前从 %2$lld%% 增加到 %3$lld%%。可能已使用一次已储存重置。"
+          }
+        }
+      }
+    },
+    "%1$@ %2$lld%%": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ %2$lld%%"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ %2$lld%%"
+          }
+        }
+      }
+    },
+    "%@ reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ reset"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 已重置"
+          }
+        }
+      }
+    },
+    "Usage limits reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usage limits reset"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用量额度已重置"
+          }
+        }
+      }
+    },
+    "%1$@’s %2$@ started a new period with %3$lld%% remaining.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@’s %2$@ started a new period with %3$lld%% remaining."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 的%2$@已开始新周期，剩余 %3$lld%%。"
+          }
+        }
+      }
+    },
+    "%1$@’s usage limits started new periods: %2$@.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@’s usage limits started new periods: %2$@."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 的用量额度已开始新周期：%2$@。"
+          }
+        }
+      }
+    },
+    "%1$@ %2$lld%%→%3$lld%%": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ %2$lld%%→%3$lld%%"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ %2$lld%%→%3$lld%%"
+          }
+        }
+      }
+    },
+    "%@ probably reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ probably reset"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 可能已重置"
+          }
+        }
+      }
+    },
+    "Usage limits probably reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usage limits probably reset"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用量额度可能已重置"
+          }
+        }
+      }
+    },
+    "%1$@’s remaining allowance increased before the scheduled reset: %2$@. A reset was probably applied.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@’s remaining allowance increased before the scheduled reset: %2$@. A reset was probably applied."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 的剩余额度在计划重置前上升：%2$@。可能已使用一次重置。"
+          }
+        }
+      }
+    },
+    "%1$@’s %2$@ should now be available again.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@’s %2$@ should now be available again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@ 的%2$@现在应已恢复可用。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Settings is grouped by module: Appearance (system, light, or dark, and segmented or continuous usage bars), Language, Notifications, Refresh, Live Activity, Self-hosted Worker, and About. Account display name and icon stay on the account screen. Notifications show permission, unexpected or early resets, scheduled reset times, and each account’s detected-reset and scheduled-reset switches.
 - Usage is the subject: account order is saved and synced, medium and large widgets default to a multi-account list, and Live Activity shows each included account's remaining percent. The soonest reset is a badge.
 - 智谱 and z.ai are separate providers. Domestic Coding Plan keys that report `CREDIT_LIMIT` link and show remaining percent even when a reset time is missing. Browser sign-in can create a Coding Plan key. Existing mainland accounts move to 智谱.
 - Codex device sign-in copies the code and opens the bare device page unless OpenAI returns `verification_uri_complete`.

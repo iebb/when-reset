@@ -47,9 +47,20 @@ final class ScreenshotUITests: XCTestCase {
         case "deviceCode":
             XCTAssertTrue(app.staticTexts["K3M9-PQ2R"].waitForExistence(timeout: 15))
         case "settings":
+            let appearanceRow = app.staticTexts["Appearance"]
+            let chineseAppearanceRow = app.staticTexts["外观"]
+            XCTAssertTrue(appearanceRow.waitForExistence(timeout: 12) || chineseAppearanceRow.waitForExistence(timeout: 4))
+            if appearanceRow.exists {
+                appearanceRow.tap()
+            } else {
+                chineseAppearanceRow.tap()
+            }
             let label = app.staticTexts["Interface appearance"]
             let chinese = app.staticTexts["界面外观"]
-            XCTAssertTrue(label.waitForExistence(timeout: 12) || chinese.waitForExistence(timeout: 4))
+            XCTAssertTrue(label.waitForExistence(timeout: 8) || chinese.waitForExistence(timeout: 4))
+            let bars = app.staticTexts["Progress bars"]
+            let chineseBars = app.staticTexts["进度条"]
+            XCTAssertTrue(bars.exists || chineseBars.exists)
         case "reorder":
             let done = app.buttons["Done"]
             let chineseDone = app.buttons["完成"]
