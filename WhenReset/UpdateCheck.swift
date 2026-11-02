@@ -41,7 +41,7 @@ enum StoreKitEnvironmentHint: String, Equatable, Sendable {
 }
 
 extension StoreKitEnvironmentHint {
-    init?(_ environment: AppStore.Environment) {
+    init?(_ environment: StoreKit.AppStore.Environment) {
         if environment == .production {
             self = .production
         } else if environment == .sandbox {
