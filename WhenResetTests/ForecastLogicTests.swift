@@ -898,7 +898,9 @@ final class ForecastLogicTests: XCTestCase {
     private func isolatedDefaults() -> UserDefaults {
         let name = "forecast-tests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!
-        addTeardownBlock { defaults.removePersistentDomain(forName: name) }
+        addTeardownBlock {
+            UserDefaults(suiteName: name)?.removePersistentDomain(forName: name)
+        }
         return defaults
     }
 
