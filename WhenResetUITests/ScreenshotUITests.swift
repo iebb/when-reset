@@ -129,10 +129,8 @@ final class ScreenshotUITests: XCTestCase {
                 swipes += 1
             }
         case "about":
-            openSettingsModule(app, english: "About", chinese: "关于")
-            let check = app.staticTexts["Check for Updates"]
-            let chineseCheck = app.staticTexts["检查更新"]
-            XCTAssertTrue(check.waitForExistence(timeout: 8) || chineseCheck.waitForExistence(timeout: 4))
+            openIdentifier(app, "settings-module-about")
+            XCTAssertTrue(app.descendants(matching: .any)["about-check-updates"].waitForExistence(timeout: 12))
         case "notifications":
             openSettingsModule(app, english: "Notifications", chinese: "通知")
             let allow = app.staticTexts["Allow Notifications"]
@@ -164,6 +162,17 @@ final class ScreenshotUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
         app.terminate()
+    }
+
+    private func openIdentifier(_ app: XCUIApplication, _ identifier: String) {
+        let row = app.descendants(matching: .any)[identifier]
+        var swipes = 0
+        while !row.isHittable && swipes < 8 {
+            app.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 8))
+        row.tap()
     }
 
     private func openSettingsModule(_ app: XCUIApplication, english: String, chinese: String) {
