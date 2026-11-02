@@ -1,6 +1,22 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "%@ tokens in the last 12 months": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ tokens in the last 12 months"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近 12 个月共 %@ tokens"
+          }
+        }
+      }
+    },
     "%lldd": {
       "localizations": {
         "en": {
@@ -609,6 +625,22 @@
         }
       }
     },
+    "Cache": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cache"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缓存"
+          }
+        }
+      }
+    },
     "Continuous": {
       "localizations": {
         "en": {
@@ -625,6 +657,38 @@
         }
       }
     },
+    "Counts may be incomplete.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Counts may be incomplete."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "计数可能不完整。"
+          }
+        }
+      }
+    },
+    "Cumulative": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cumulative"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "累计总量"
+          }
+        }
+      }
+    },
     "Custom order": {
       "localizations": {
         "en": {
@@ -637,6 +701,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "自定义顺序"
+          }
+        }
+      }
+    },
+    "Daily": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Daily"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每天"
           }
         }
       }
@@ -669,6 +749,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "收起已存储的重置"
+          }
+        }
+      }
+    },
+    "Input": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Input"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入"
           }
         }
       }
@@ -717,6 +813,54 @@
           "stringUnit": {
             "state": "translated",
             "value": "剩余最少"
+          }
+        }
+      }
+    },
+    "No token records on this iPhone yet.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No token records on this iPhone yet."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPhone 上还没有 Token 记录。"
+          }
+        }
+      }
+    },
+    "Output": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Output"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输出"
+          }
+        }
+      }
+    },
+    "Performance": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Performance"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "性能"
           }
         }
       }
@@ -4193,6 +4337,22 @@
         }
       }
     },
+    "Token activity": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Token activity"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Token 活动"
+          }
+        }
+      }
+    },
     "Trust": {
       "localizations": {
         "en": {
@@ -4609,6 +4769,22 @@
         }
       }
     },
+    "Weekly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weekly"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每周"
+          }
+        }
+      }
+    },
     "What this Mac sends": {
       "localizations": {
         "en": {
@@ -4717,6 +4893,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "你的 AI 提供方"
+          }
+        }
+      }
+    },
+    "tok/s": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "tok/s"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "tok/s"
           }
         }
       }

@@ -14,6 +14,9 @@ struct SettingsView: View {
                     moduleLink("Forecasts", systemImage: "chart.line.uptrend.xyaxis", identifier: "settings-module-forecasts") {
                         ForecastSettingsView()
                     }
+                    moduleLink("Token activity", systemImage: "square.grid.3x3", identifier: "settings-module-token-activity") {
+                        TokenActivitySettingsView()
+                    }
                     moduleLink("Language", systemImage: "globe", identifier: "settings-module-language") {
                         LanguageSettingsView()
                     }
