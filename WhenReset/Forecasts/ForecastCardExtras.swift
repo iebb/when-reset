@@ -2,9 +2,8 @@ import SwiftUI
 
 /// Exhaustion lines and the public Codex reset, under the usage bars.
 ///
-/// A pace that may not last is written in place. "Expected to last", the
-/// early-pace note's quieter siblings, and the Codex announcement sit behind
-/// a disclosure so the bars stay the primary reading.
+/// Collapsed to one secondary line. The rest opens on tap, the same way a
+/// banked-reset row does. The bars stay the primary reading.
 struct ForecastCardExtras: View {
     let snapshot: UsageSnapshot
 
@@ -57,43 +56,51 @@ struct ForecastCardExtras: View {
         if urgent.isEmpty && calm.isEmpty && !showPredicted {
             EmptyView()
         } else {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(urgent) { row in
-                    ForecastLineText(line: row.line)
-                }
-                if let lines, !lines.prediction.isPlaceholder {
-                    PredictedResetHeadline(lines: lines)
-                }
-                if !calm.isEmpty || showPredicted {
-                    Button {
-                        expanded.toggle()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text("Forecasts")
-                                .font(.caption.weight(.semibold))
-                            Spacer(minLength: 8)
-                            Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                                .font(.caption2)
-                        }
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            VStack(alignment: .leading, spacing: 6) {
+                Button {
+                    expanded.toggle()
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(summaryLine(urgent: urgent, lines: lines))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                        Spacer(minLength: 8)
+                        Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
                     }
-                    .buttonStyle(.borderless)
-                    .accessibilityIdentifier("forecasts-disclosure")
-                    if expanded {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(calm) { row in
-                                ForecastLineText(line: row.line)
-                            }
-                            if showPredicted, let lines {
-                                PredictedResetDetails(lines: lines)
-                            }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("forecasts-disclosure")
+                if expanded {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(urgent) { row in
+                            ForecastLineText(line: row.line)
+                        }
+                        if let lines, !lines.prediction.isPlaceholder {
+                            PredictedResetHeadline(lines: lines)
+                        }
+                        ForEach(calm) { row in
+                            ForecastLineText(line: row.line)
+                        }
+                        if showPredicted, let lines {
+                            PredictedResetDetails(lines: lines)
                         }
                     }
                 }
             }
             .accessibilityIdentifier("forecasts-extras")
         }
+    }
+
+    private func summaryLine(urgent: [ForecastCardModel.Row], lines: CodexResetCardLines?) -> String {
+        if let text = urgent.first?.line.text, !text.isEmpty { return text }
+        if let lines, !lines.prediction.isPlaceholder {
+            return String.localized("Predicted reset")
+        }
+        return String.localized("Forecasts")
     }
 }
 
@@ -104,8 +111,8 @@ private struct ForecastLineText: View {
         let ink = ForecastLineInk.style(for: line.tone)
         VStack(alignment: .leading, spacing: 2) {
             Text(line.text)
-                .font(.caption.weight(ink.weight == .medium ? .medium : .regular))
-                .foregroundStyle(color(for: ink))
+                .font(.caption2)
+                .foregroundStyle(color(for: ink).opacity(0.9))
             if let note = line.note, !note.isEmpty {
                 Text(note)
                     .font(.caption2)

@@ -202,6 +202,8 @@ struct UsageBar: View {
 /// Remaining-fraction meter used on cards, widgets, and Live Activity.
 struct UsageMeter: View {
     var remainingFraction: Double
+    /// Usage cards draw a thicker continuous bar. Widgets stay compact.
+    var prominent: Bool = false
     @Environment(\.usageBarStyle) private var style
     @Environment(\.colorScheme) private var colorScheme
 
@@ -213,6 +215,6 @@ struct UsageMeter: View {
             style: style
         )
         .frame(maxWidth: .infinity)
-        .frame(height: style.barHeight)
+        .frame(height: prominent && style == .continuous ? 14 : style.barHeight)
     }
 }

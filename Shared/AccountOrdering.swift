@@ -21,10 +21,11 @@ enum ZhipuAccountMigration {
     }
 }
 
-/// How the Usage list, widgets, and Live Activity line up.
+/// How the Usage list lines up.
 ///
-/// Custom is the stored drag order. Lowest remaining and soonest reset are
-/// display-only. The soonest-reset badge is not a sort.
+/// Custom is the stored drag order. Lowest remaining and soonest reset change
+/// only that list. Widgets and the compact multi-account island stay on the
+/// stored order. The soonest-reset badge is not a sort.
 enum UsageListSort: String, CaseIterable, Identifiable, Codable, Sendable {
     case custom
     case remaining

@@ -17,7 +17,11 @@ final class ScreenshotUITests: XCTestCase {
             shot(language: language, appearance: appearance, screen: "addAccount", name: "\(name)-03-add-account")
             shot(language: language, appearance: appearance, screen: "deviceCode", name: "\(name)-04-device-code")
             shot(language: language, appearance: appearance, screen: "settings", name: "\(name)-05-settings")
+            shot(language: language, appearance: appearance, screen: "settingsRoot", name: "\(name)-07-settings-root")
+            shot(language: language, appearance: appearance, screen: "about", name: "\(name)-08-about")
+            shot(language: language, appearance: appearance, screen: "notifications", name: "\(name)-09-notifications")
             shot(language: language, appearance: appearance, screen: "forecasts", name: "\(name)-06-forecasts")
+            shot(language: language, appearance: appearance, screen: "tokenActivity", name: "\(name)-10-token-activity")
         }
     }
 
@@ -83,6 +87,48 @@ final class ScreenshotUITests: XCTestCase {
             XCTAssertTrue(predictedSwitch.waitForExistence(timeout: 4))
             XCTAssertTrue(app.staticTexts[predicted].exists)
             XCTAssertTrue(app.switches["forecasts-show-estimate"].exists)
+        case "settingsRoot":
+            let appearanceRow = app.staticTexts["Appearance"]
+            let chineseAppearanceRow = app.staticTexts["外观"]
+            XCTAssertTrue(appearanceRow.waitForExistence(timeout: 12) || chineseAppearanceRow.waitForExistence(timeout: 4))
+            let token = app.staticTexts["Token activity"]
+            let chineseToken = app.staticTexts["Token 活动"]
+            XCTAssertTrue(token.exists || chineseToken.waitForExistence(timeout: 4))
+            let about = app.staticTexts["About"]
+            let chineseAbout = app.staticTexts["关于"]
+            var swipes = 0
+            while !about.exists && !chineseAbout.exists && swipes < 4 {
+                app.swipeUp()
+                swipes += 1
+            }
+            XCTAssertTrue(about.exists || chineseAbout.exists)
+            swipes = 0
+            while !appearanceRow.exists && !chineseAppearanceRow.exists && swipes < 4 {
+                app.swipeDown()
+                swipes += 1
+            }
+        case "about":
+            openSettingsModule(app, english: "About", chinese: "关于")
+            let check = app.staticTexts["Check for Updates"]
+            let chineseCheck = app.staticTexts["检查更新"]
+            XCTAssertTrue(check.waitForExistence(timeout: 8) || chineseCheck.waitForExistence(timeout: 4))
+        case "notifications":
+            openSettingsModule(app, english: "Notifications", chinese: "通知")
+            let allow = app.staticTexts["Allow Notifications"]
+            let chineseAllow = app.staticTexts["允许通知"]
+            let unexpected = app.staticTexts["Unexpected or early resets"]
+            let chineseUnexpected = app.staticTexts["意外或提前的重置"]
+            XCTAssertTrue(
+                allow.waitForExistence(timeout: 8)
+                    || chineseAllow.waitForExistence(timeout: 4)
+                    || unexpected.exists
+                    || chineseUnexpected.exists
+            )
+        case "tokenActivity":
+            openSettingsModule(app, english: "Token activity", chinese: "Token 活动")
+            let empty = app.staticTexts["No token records on this iPhone yet."]
+            let chineseEmpty = app.staticTexts["这台 iPhone 上还没有 Token 记录。"]
+            XCTAssertTrue(empty.waitForExistence(timeout: 8) || chineseEmpty.waitForExistence(timeout: 4))
         case "reorder":
             let done = app.buttons["Done"]
             let chineseDone = app.buttons["完成"]
@@ -97,5 +143,21 @@ final class ScreenshotUITests: XCTestCase {
         attachment.lifetime = .keepAlways
         add(attachment)
         app.terminate()
+    }
+
+    private func openSettingsModule(_ app: XCUIApplication, english: String, chinese: String) {
+        let row = app.staticTexts[english]
+        let chineseRow = app.staticTexts[chinese]
+        var swipes = 0
+        while !row.exists && !chineseRow.exists && swipes < 6 {
+            app.swipeUp()
+            swipes += 1
+        }
+        XCTAssertTrue(row.waitForExistence(timeout: 8) || chineseRow.waitForExistence(timeout: 4))
+        if row.exists {
+            row.tap()
+        } else {
+            chineseRow.tap()
+        }
     }
 }

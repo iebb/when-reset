@@ -51,11 +51,13 @@ enum ScreenshotFixture {
 
     static func seed(now: Date = .now) -> Seed {
         let samples: [(ProviderID, String, String, Double, Double, Bool)] = [
-            (.chatGPT, "Kong Yi", "Pro", 62, 20, true),
+            // Remaining percents are intentionally not sorted. Widgets must
+            // keep this custom order instead of lining up lowest-remaining first.
+            (.chatGPT, "Kong Yi", "Pro", 15, 25, true),
             (.chatGPT, "Work", "Plus", 10, 55, true),
-            (.grok, "Grok", "Heavy", 42, 42, false),
+            (.grok, "Grok", "Heavy", 78, 42, false),
             (.kimi, "Kimi Code", "Plus", 0, 8, false),
-            (.zai, "z.ai", "Pro", 15, 33, false),
+            (.zai, "z.ai", "Pro", 40, 33, false),
             (.zhipu, "智谱", "Max", 26, 41, false),
         ]
         var accounts: [MonitoredAccount] = []

@@ -25,7 +25,8 @@ struct ContentView: View {
         .onAppear {
             #if DEBUG
             if ScreenshotLaunch.isActive,
-               ScreenshotLaunch.screen == "settings" || ScreenshotLaunch.screen == "forecasts" {
+               ["settings", "settingsRoot", "forecasts", "about", "notifications", "tokenActivity"]
+                .contains(ScreenshotLaunch.screen) {
                 selectedTab = .settings
             }
             #endif
@@ -174,6 +175,7 @@ private struct UsageTabView: View {
                 if sort != .custom { editingAccountOrder = false }
             }
             .refreshable { await store.refreshAll() }
+            .blinkyNavigationGlass()
             .sheet(isPresented: $showingAddAccount) { AddAccountView() }
             .sheet(item: $relinkingAccount) { account in
                 AddAccountView(relinkingAccount: account)
@@ -451,7 +453,7 @@ private struct ProviderSectionHeader: View {
                 .frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 1) {
                 Text(account.resolvedDisplayName)
-                    .font(.subheadline.weight(.semibold))
+                    .font(.headline)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(account.providerSectionTitle(plan: plan))
@@ -590,9 +592,16 @@ struct UsageCard: View {
                     LimitRow(window: window)
                 }
             }
-            UsageMoreSection(snapshot: snapshot)
-            ForecastCardExtras(snapshot: snapshot)
-            HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }.font(.caption2).foregroundStyle(.tertiary)
+            VStack(alignment: .leading, spacing: 6) {
+                UsageMoreSection(snapshot: snapshot)
+                ForecastCardExtras(snapshot: snapshot)
+                HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .blinkyInsetGlass()
         }.padding(.vertical, 6)
     }
 }
@@ -719,13 +728,13 @@ private struct BankedResetBar: View {
                     Text(count == 1
                          ? String.localized("1 banked reset")
                          : String(format: String.localized("%lld banked resets"), locale: AppLanguage.current.locale, Int64(count)))
-                        .font(.headline)
-                        .foregroundStyle(.primary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                     Spacer(minLength: 8)
                     if let expiry {
                         Text(CountdownDisplay.string(until: expiry, from: date))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
                     }
                     Image(systemName: expanded ? "chevron.up" : "chevron.down")
                         .font(.caption.weight(.semibold))
@@ -773,29 +782,58 @@ private struct BankedResetBar: View {
 
 struct LimitRow: View {
     let window: UsageWindow
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            VStack(spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(window.displayTitle).font(.headline).lineLimit(1)
-                    Spacer()
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(window.displayTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                    Spacer(minLength: 8)
                     if window.showsCountdown {
                         Text(CountdownDisplay.usageString(until: window.resetsAt, from: context.date))
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
-                            .layoutPriority(1)
                     }
                 }
-                HStack(spacing: 10) {
-                    UsageMeter(remainingFraction: window.remainingPercent / 100)
-                    Text(UsageText.remainingPercent(window.remainingPercent))
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                }
+                Text(UsageText.remainingPercent(window.remainingPercent))
+                    .font(.title2.bold().monospacedDigit())
+                    .foregroundStyle(UsageMeterTint.color(
+                        remainingFraction: window.remainingPercent / 100,
+                        colorScheme: colorScheme
+                    ))
+                UsageMeter(remainingFraction: window.remainingPercent / 100, prominent: true)
             }
+        }
+    }
+}
+
+private extension View {
+    /// Frosted inset for secondary card details. iOS 26 uses system glass;
+    /// earlier systems use the ultra-thin material.
+    @ViewBuilder
+    func blinkyInsetGlass() -> some View {
+        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
+        if #available(iOS 26, *) {
+            self.glassEffect(.regular, in: shape)
+        } else {
+            self.background(.ultraThinMaterial, in: shape)
+        }
+    }
+
+    /// System navigation glass on iOS 26. Older systems get an explicit material.
+    @ViewBuilder
+    func blinkyNavigationGlass() -> some View {
+        if #available(iOS 26, *) {
+            self
+        } else {
+            self
+                .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+                .toolbarBackground(.visible, for: .navigationBar)
         }
     }
 }

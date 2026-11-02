@@ -1080,8 +1080,8 @@ final class AppStore {
     /// Display sort. Custom leaves `accounts` as the stored drag order.
     var usageListSort = UsageListSort.current
 
-    /// The order on the Usage list, in widgets, and in Live Activity.
-    /// A widget pinned to one account does not use this order.
+    /// The Usage list order. Widgets and Live Activity keep `accounts`, the
+    /// stored custom order, even when this list is sorted another way.
     var displayedAccounts: [MonitoredAccount] {
         AccountOrdering.displayed(accounts, sort: usageListSort, snapshots: snapshots)
     }
@@ -4251,7 +4251,7 @@ final class AppStore {
     private func liveActivityAccountRows(at date: Date = .now) -> [UsageActivityAccountRow] {
         var rows: [UsageActivityAccountRow] = []
         var soonest: (id: String, date: Date)?
-        for account in displayedAccounts where liveActivitySettings.includes(account.id) {
+        for account in accounts where liveActivitySettings.includes(account.id) {
             guard let snapshot = snapshots[account.id] else { continue }
             let accountSettings = settings(for: account)
             let presented = presentedSnapshot(snapshot, for: account)
@@ -5465,7 +5465,7 @@ final class AppStore {
     }
 
     private func publishSnapshots() {
-        persistSharedSnapshots(for: displayedAccounts)
+        persistSharedSnapshots(for: accounts)
         WidgetCenter.shared.reloadAllTimelines()
     }
 
