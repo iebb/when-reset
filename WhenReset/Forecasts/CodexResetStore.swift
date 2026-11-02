@@ -149,7 +149,13 @@ final class CodexResetStore {
                 await refreshIfDue()
             }
             let wait = interested ? max(sleepFor, 1) : CodexResetSchedule.ceiling
-            let sleep = Task { try? await Task.sleep(for: .seconds(wait)) }
+            let sleep = Task<Void, Never> {
+                do {
+                    try await Task.sleep(for: .seconds(wait))
+                } catch {
+                    return
+                }
+            }
             sleeper = sleep
             await sleep.value
             if Task.isCancelled { return }
