@@ -2,7 +2,9 @@
 
 ## Unreleased
 
-- Settings is grouped by module: Appearance (system, light, or dark, and segmented or continuous usage bars), Language, Notifications, Refresh, Live Activity, Self-hosted Worker, and About. Account display name and icon stay on the account screen. Notifications show permission, unexpected or early resets, scheduled reset times, and each account’s detected-reset and scheduled-reset switches.
+- Settings is grouped by module: Appearance (system, light, or dark, and continuous or segmented usage bars; a fresh install draws one continuous bar), Forecasts, Language, Notifications, Refresh, Live Activity, Self-hosted Worker, and About. Account display name and icon stay on the account screen. Notifications show permission, unexpected or early resets, scheduled reset times, and each account’s detected-reset and scheduled-reset switches.
+- Usage cards lead with the limit bars. Banked resets are one collapsed row under those bars. A card can also say how long a limit may last, and a ChatGPT card can show the public Codex Resets predicted reset. Settings → Forecasts holds those switches.
+- The Usage list keeps the dragged custom order, or it can sort by lowest remaining or soonest reset. That choice does not rewrite the saved order. The soonest-reset badge does not move a row while the list is in custom order. Widgets and Live Activity follow the visible order; a widget pinned to one account stays on that account.
 - Usage is the subject: account order is saved and synced, medium and large widgets default to a multi-account list, and Live Activity shows each included account's remaining percent. The soonest reset is a badge.
 - 智谱 and z.ai are separate providers. Domestic Coding Plan keys that report `CREDIT_LIMIT` link and show remaining percent even when a reset time is missing. Browser sign-in can create a Coding Plan key. Existing mainland accounts move to 智谱.
 - Codex device sign-in copies the code and opens the bare device page unless OpenAI returns `verification_uri_complete`.

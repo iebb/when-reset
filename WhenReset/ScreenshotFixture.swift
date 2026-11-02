@@ -32,6 +32,7 @@ enum ScreenshotLaunch {
             AppAppearance.choose(.light)
         }
         UsageBarStyle.choose(.continuous)
+        UsageListSort.choose(.custom)
     }
 
     private static func argument(after flag: String) -> String? {

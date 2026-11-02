@@ -11,6 +11,9 @@ struct SettingsView: View {
                     moduleLink("Appearance", systemImage: "circle.lefthalf.filled", identifier: "settings-module-appearance") {
                         AppearanceSettingsView()
                     }
+                    moduleLink("Forecasts", systemImage: "chart.line.uptrend.xyaxis", identifier: "settings-module-forecasts") {
+                        ForecastSettingsView()
+                    }
                     moduleLink("Language", systemImage: "globe", identifier: "settings-module-language") {
                         LanguageSettingsView()
                     }

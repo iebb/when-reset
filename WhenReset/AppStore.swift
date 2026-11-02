@@ -1077,6 +1077,22 @@ enum DeviceUsageEnableCompensation {
 @MainActor @Observable
 final class AppStore {
     private(set) var accounts: [MonitoredAccount] = []
+    /// Display sort. Custom leaves `accounts` as the stored drag order.
+    var usageListSort = UsageListSort.current
+
+    /// The order on the Usage list, in widgets, and in Live Activity.
+    /// A widget pinned to one account does not use this order.
+    var displayedAccounts: [MonitoredAccount] {
+        AccountOrdering.displayed(accounts, sort: usageListSort, snapshots: snapshots)
+    }
+
+    func setUsageListSort(_ sort: UsageListSort) {
+        guard usageListSort != sort else { return }
+        usageListSort = sort
+        UsageListSort.choose(sort)
+        publishSnapshots()
+        Task { await updateLiveActivity() }
+    }
     private(set) var snapshots: [UUID: UsageSnapshot] = [:]
     private(set) var refreshFailures: [UUID: AccountRefreshFailure] = [:]
     var isRefreshing = false
@@ -4235,7 +4251,7 @@ final class AppStore {
     private func liveActivityAccountRows(at date: Date = .now) -> [UsageActivityAccountRow] {
         var rows: [UsageActivityAccountRow] = []
         var soonest: (id: String, date: Date)?
-        for account in accounts where liveActivitySettings.includes(account.id) {
+        for account in displayedAccounts where liveActivitySettings.includes(account.id) {
             guard let snapshot = snapshots[account.id] else { continue }
             let accountSettings = settings(for: account)
             let presented = presentedSnapshot(snapshot, for: account)
@@ -5449,7 +5465,7 @@ final class AppStore {
     }
 
     private func publishSnapshots() {
-        persistSharedSnapshots(for: accounts)
+        persistSharedSnapshots(for: displayedAccounts)
         WidgetCenter.shared.reloadAllTimelines()
     }
 

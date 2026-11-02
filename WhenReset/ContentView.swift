@@ -17,9 +17,12 @@ struct ContentView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 .tag(Tab.settings)
         }
+        .environment(ForecastSettingsStore.shared)
+        .environment(CodexResetStore.shared)
         .onAppear {
             #if DEBUG
-            if ScreenshotLaunch.isActive, ScreenshotLaunch.screen == "settings" {
+            if ScreenshotLaunch.isActive,
+               ScreenshotLaunch.screen == "settings" || ScreenshotLaunch.screen == "forecasts" {
                 selectedTab = .settings
             }
             #endif
@@ -86,12 +89,31 @@ private struct UsageTabView: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     if !store.accounts.isEmpty {
-                        Button(editingAccountOrder ? "Done" : "Edit") {
-                            editingAccountOrder.toggle()
+                        Menu {
+                            Picker("Sort accounts", selection: Binding(
+                                get: { store.usageListSort },
+                                set: { store.setUsageListSort($0) }
+                            )) {
+                                ForEach(UsageListSort.allCases) { mode in
+                                    Text(mode.title).tag(mode)
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "arrow.up.arrow.down")
+                        }
+                        .accessibilityIdentifier("usage-sort")
+                        .accessibilityLabel("Sort accounts")
+                        if store.usageListSort == .custom {
+                            Button(editingAccountOrder ? "Done" : "Edit") {
+                                editingAccountOrder.toggle()
+                            }
                         }
                         Button("Add", systemImage: "plus") { showingAddAccount = true }
                     }
                 }
+            }
+            .onChange(of: store.usageListSort) { _, sort in
+                if sort != .custom { editingAccountOrder = false }
             }
             .refreshable { await store.refreshAll() }
             .sheet(isPresented: $showingAddAccount) { AddAccountView() }
@@ -136,7 +158,7 @@ private struct UsageTabView: View {
 
     private var accountList: some View {
         List {
-            ForEach(store.accounts) { account in
+            ForEach(store.displayedAccounts) { account in
                 let snapshot = store.snapshots[account.id]
                 let failure = store.refreshFailures[account.id]
                 Section {
@@ -175,7 +197,7 @@ private struct UsageTabView: View {
                     Button("Remove", role: .destructive) { accountPendingRemoval = account }
                 }
                 .modifier(AccountDragModifier(
-                    enabled: !editingAccountOrder,
+                    enabled: store.usageListSort == .custom && !editingAccountOrder,
                     accountID: account.id,
                     moveBefore: { dragged in
                         store.moveAccount(dragged, before: account.id)
@@ -183,6 +205,7 @@ private struct UsageTabView: View {
                 ))
             }
             .onMove { offsets, destination in
+                guard store.usageListSort == .custom else { return }
                 store.moveAccounts(from: offsets, to: destination)
             }
         }
@@ -510,6 +533,7 @@ struct UsageCard: View {
                 }
             }
             UsageMoreSection(snapshot: snapshot)
+            ForecastCardExtras(snapshot: snapshot)
             HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }.font(.caption2).foregroundStyle(.tertiary)
         }.padding(.vertical, 6)
     }
@@ -594,9 +618,8 @@ struct APIBalanceRow: View {
     }
 }
 
-/// Collapsed extras under the always-visible limits.
-/// Banked resets are the only extra today. Predicted reset and exhaustion
-/// belong in this section later; do not add them on this branch.
+/// Collapsed banked resets under the limit bars.
+/// Exhaustion and the predicted Codex reset stay in `ForecastCardExtras`, also under the bars.
 private struct UsageMoreSection: View {
     let snapshot: UsageSnapshot
 

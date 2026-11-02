@@ -17,6 +17,7 @@ final class ScreenshotUITests: XCTestCase {
             shot(language: language, appearance: appearance, screen: "addAccount", name: "\(name)-03-add-account")
             shot(language: language, appearance: appearance, screen: "deviceCode", name: "\(name)-04-device-code")
             shot(language: language, appearance: appearance, screen: "settings", name: "\(name)-05-settings")
+            shot(language: language, appearance: appearance, screen: "forecasts", name: "\(name)-06-forecasts")
         }
     }
 
@@ -61,6 +62,27 @@ final class ScreenshotUITests: XCTestCase {
             let bars = app.staticTexts["Progress bars"]
             let chineseBars = app.staticTexts["进度条"]
             XCTAssertTrue(bars.exists || chineseBars.exists)
+        case "forecasts":
+            let forecastsRow = app.staticTexts["Forecasts"]
+            let chineseForecastsRow = app.staticTexts["预测"]
+            XCTAssertTrue(forecastsRow.waitForExistence(timeout: 12) || chineseForecastsRow.waitForExistence(timeout: 4))
+            if forecastsRow.exists {
+                forecastsRow.tap()
+            } else {
+                chineseForecastsRow.tap()
+            }
+            let estimate = language == "zh-Hans" ? "显示预估" : "Show the estimate"
+            let predicted = language == "zh-Hans" ? "显示预测重置" : "Show predicted reset"
+            XCTAssertTrue(app.staticTexts[estimate].waitForExistence(timeout: 8))
+            let predictedSwitch = app.switches["forecasts-show-predicted"]
+            var swipes = 0
+            while !predictedSwitch.exists && swipes < 4 {
+                app.swipeUp()
+                swipes += 1
+            }
+            XCTAssertTrue(predictedSwitch.waitForExistence(timeout: 4))
+            XCTAssertTrue(app.staticTexts[predicted].exists)
+            XCTAssertTrue(app.switches["forecasts-show-estimate"].exists)
         case "reorder":
             let done = app.buttons["Done"]
             let chineseDone = app.buttons["完成"]

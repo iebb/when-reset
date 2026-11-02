@@ -21,6 +21,38 @@ enum ZhipuAccountMigration {
     }
 }
 
+/// How the Usage list, widgets, and Live Activity line up.
+///
+/// Custom is the stored drag order. Lowest remaining and soonest reset are
+/// display-only. The soonest-reset badge is not a sort.
+enum UsageListSort: String, CaseIterable, Identifiable, Codable, Sendable {
+    case custom
+    case remaining
+    case soonestReset
+
+    var id: String { rawValue }
+
+    static let storageKey = "settings.usageListSort"
+    static let `default` = UsageListSort.custom
+
+    var title: String {
+        switch self {
+        case .custom: String.localized("Custom order")
+        case .remaining: String.localized("Lowest remaining")
+        case .soonestReset: String.localized("Soonest reset")
+        }
+    }
+
+    static var current: UsageListSort {
+        let raw = UserDefaults.standard.string(forKey: storageKey)
+        return UsageListSort(rawValue: raw ?? "") ?? .default
+    }
+
+    static func choose(_ sort: UsageListSort) {
+        UserDefaults.standard.set(sort.rawValue, forKey: storageKey)
+    }
+}
+
 enum AccountOrdering {
     static func grouped(_ accounts: [MonitoredAccount]) -> [MonitoredAccount] {
         let rank = Dictionary(uniqueKeysWithValues: ProviderID.allCases.enumerated().map { ($1, $0) })
@@ -60,6 +92,67 @@ enum AccountOrdering {
             result.append(account)
         }
         return result
+    }
+
+    /// Visible order. Custom keeps the stored order, including where a new account
+    /// was inserted. The other modes only change what is on screen: they do not
+    /// rewrite the stored order, and the soonest-reset badge never does either.
+    static func displayed(
+        _ accounts: [MonitoredAccount],
+        sort: UsageListSort,
+        snapshots: [UUID: UsageSnapshot],
+        now: Date = .now
+    ) -> [MonitoredAccount] {
+        switch sort {
+        case .custom:
+            return accounts
+        case .remaining:
+            return stablySorted(accounts) { account in
+                remaining(account, snapshots: snapshots).map { (0, $0) } ?? (1, 0)
+            }
+        case .soonestReset:
+            return stablySorted(accounts) { account in
+                if let reset = soonestReset(account, snapshots: snapshots, now: now) {
+                    return (0, reset.timeIntervalSinceReferenceDate)
+                }
+                return (1, 0)
+            }
+        }
+    }
+
+    /// Lowest remaining limit on the account, matching the headline row.
+    /// Missing usage sorts after every account that has a percent.
+    private static func remaining(
+        _ account: MonitoredAccount,
+        snapshots: [UUID: UsageSnapshot]
+    ) -> Double? {
+        snapshots[account.id]?.headlineWindow(pinnedMetricID: nil)?.remainingPercent
+    }
+
+    /// The headline countdown, when it is still ahead. A past or unstated reset
+    /// sorts after every account that has one.
+    private static func soonestReset(
+        _ account: MonitoredAccount,
+        snapshots: [UUID: UsageSnapshot],
+        now: Date
+    ) -> Date? {
+        guard let window = snapshots[account.id]?.headlineWindow(pinnedMetricID: nil),
+              window.showsCountdown,
+              window.resetsAt > now else { return nil }
+        return window.resetsAt
+    }
+
+    private static func stablySorted(
+        _ accounts: [MonitoredAccount],
+        key: (MonitoredAccount) -> (Int, Double)
+    ) -> [MonitoredAccount] {
+        accounts.enumerated().sorted { lhs, rhs in
+            let left = key(lhs.element)
+            let right = key(rhs.element)
+            if left.0 != right.0 { return left.0 < right.0 }
+            if left.1 != right.1 { return left.1 < right.1 }
+            return lhs.offset < rhs.offset
+        }.map(\.element)
     }
 
     static func moving(_ ids: [UUID], from offsets: IndexSet, to destination: Int) -> [UUID] {
