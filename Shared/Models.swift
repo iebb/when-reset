@@ -92,19 +92,19 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         case .githubCopilot: String.localized("Chat and premium request quotas")
         case .zai: String.localized("z.ai Coding Plan · 5h and weekly")
         case .zhipu: String.localized("智谱 Coding Plan · 5h and weekly")
-        case .miniMax: "5-hour and weekly coding limits"
-        case .synthetic: "Rolling 5-hour and weekly limits"
-        case .ollamaCloud: "Session and weekly Cloud limits"
-        case .warp: "Monthly request credits"
-        case .antigravity: "Gemini, Claude, and GPT quota pools"
-        case .compatibleAPI: "Reset windows from a compatible endpoint"
-        case .openAIAPI: "Organization API spend and budget balance"
-        case .anthropicAPI: "Organization API spend and budget balance"
-        case .newAPI: "API-key balance from a compatible gateway"
-        case .openRouter: "API-key spending limit and reset"
-        case .fireworksAI: "Monthly API spend limit"
-        case .deepSeek: "Available API wallet balance"
-        case .poe: "Available API point balance"
+        case .miniMax: String.localized("5-hour and weekly coding limits")
+        case .synthetic: String.localized("Rolling 5-hour and weekly limits")
+        case .ollamaCloud: String.localized("Session and weekly Cloud limits")
+        case .warp: String.localized("Monthly request credits")
+        case .antigravity: String.localized("Gemini, Claude, and GPT quota pools")
+        case .compatibleAPI: String.localized("Reset windows from a compatible endpoint")
+        case .openAIAPI: String.localized("Organization API spend and budget balance")
+        case .anthropicAPI: String.localized("Organization API spend and budget balance")
+        case .newAPI: String.localized("API-key balance from a compatible gateway")
+        case .openRouter: String.localized("API-key spending limit and reset")
+        case .fireworksAI: String.localized("Monthly API spend limit")
+        case .deepSeek: String.localized("Available API wallet balance")
+        case .poe: String.localized("Available API point balance")
         }
     }
 
@@ -767,7 +767,13 @@ enum CountdownDisplay {
         let minutes = (remaining % 3_600) / 60
         let seconds = remaining % 60
         let clock = String(format: "%02d:%02d:%02d", hours, minutes, seconds)
-        return days > 0 ? "\(days) day\(days == 1 ? "" : "s"), \(clock)" : clock
+        if days == 1 {
+            return String(format: String.localized("1 day, %@"), locale: AppLanguage.current.locale, clock)
+        }
+        if days > 1 {
+            return String(format: String.localized("%lld days, %@"), locale: AppLanguage.current.locale, Int64(days), clock)
+        }
+        return clock
     }
 
     static func usageString(until expiry: Date, from date: Date = .now) -> String {

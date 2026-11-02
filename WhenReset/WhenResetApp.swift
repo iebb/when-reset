@@ -169,6 +169,7 @@ struct WhenResetApp: App {
     init() {
         #if DEBUG
         ScreenshotLaunch.applyLanguage()
+        _interfaceLanguage = State(initialValue: AppLanguage.current)
         #endif
         let store = AppStore()
         _store = State(initialValue: store)

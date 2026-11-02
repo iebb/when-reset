@@ -1031,7 +1031,7 @@ struct AddAccountView: View {
                 .controlSize(.large)
                 }
                 Button { openURL(link.verificationURL) } label: {
-                    Label("Open \(link.providerID.displayName) linking", systemImage: "safari")
+                    Label(String(format: String.localized("Open %@ linking"), locale: AppLanguage.current.locale, link.providerID.displayName), systemImage: "safari")
                         .fontWeight(.semibold)
                         .frame(maxWidth: .infinity, minHeight: 30)
                 }
@@ -1044,7 +1044,7 @@ struct AddAccountView: View {
                     Label("Authorization check paused", systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
                 }
-                Text("The code expires \(link.expiresAt, style: .relative).")
+                Text(String(format: String.localized("The code expires %@."), locale: AppLanguage.current.locale, link.expiresAt.formatted(.relative(presentation: .numeric))))
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                 Button {

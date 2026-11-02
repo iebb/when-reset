@@ -2402,7 +2402,7 @@ private struct BankedResetBar: View {
             }
             ForEach(Array(credits.enumerated()), id: \.element.id) { index, credit in
                 HStack {
-                    Text("Reset #\(index + 1)")
+                    Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1)))
                     Spacer()
                     if let expiry = credit.expiresAt {
                         Text(expiry, format: .dateTime.year().month(.abbreviated).day().hour().minute().second())
@@ -2415,7 +2415,7 @@ private struct BankedResetBar: View {
             }
             if count > credits.count {
                 ForEach(credits.count..<count, id: \.self) { index in
-                    HStack { Text("Reset #\(index + 1)"); Spacer(); Text("Expiry unavailable") }
+                    HStack { Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1))); Spacer(); Text("Expiry unavailable") }
                         .foregroundStyle(.secondary)
                 }
             }

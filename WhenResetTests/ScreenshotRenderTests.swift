@@ -14,6 +14,10 @@ final class ScreenshotRenderTests: XCTestCase {
 
     private func render(language: AppLanguage, prefix: String) {
         AppLanguage.choose(language)
+        if language == .chineseSimplified {
+            XCTAssertEqual(String.localized("5h limit"), "5 小时额度")
+            XCTAssertEqual(String.localized("Open %@ linking"), "打开 %@ 关联")
+        }
         let seeded = ScreenshotFixture.seed()
         let snapshots = seeded.accounts.compactMap { seeded.snapshots[$0.id] }
         let rows = ScreenshotFixture.activityRows()
