@@ -150,6 +150,7 @@ struct AddAccountView: View {
                                     ProviderCard(provider: provider, selected: selectedProvider == provider)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityIdentifier("provider-\(provider.rawValue)")
 
                                 if selectedProvider == provider {
                                     Divider().padding(.horizontal, 16)
@@ -1011,6 +1012,7 @@ struct AddAccountView: View {
                 if !link.userCode.isEmpty {
                 Text(link.userCode)
                     .font(.system(.largeTitle, design: .monospaced, weight: .bold))
+                    .accessibilityIdentifier("device-user-code")
                     .textSelection(.enabled)
                     .padding(.vertical, 8)
                 if link.providerID == .chatGPT {

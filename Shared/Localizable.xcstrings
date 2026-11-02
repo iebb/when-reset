@@ -4976,6 +4976,150 @@
           }
         }
       }
+    },
+    "Usage limits and banked resets": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Usage limits and banked resets"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用量额度和已存储的重置"
+          }
+        }
+      }
+    },
+    "Session and weekly reset times": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Session and weekly reset times"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "会话和每周重置时间"
+          }
+        }
+      }
+    },
+    "Weekly Grok credit pool": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Weekly Grok credit pool"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Grok 每周额度"
+          }
+        }
+      }
+    },
+    "5-hour and weekly coding limits": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5-hour and weekly coding limits"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5 小时和每周编程额度"
+          }
+        }
+      }
+    },
+    "Chat and premium request quotas": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat and premium request quotas"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "聊天和高级请求额度"
+          }
+        }
+      }
+    },
+    "z.ai Coding Plan · 5h and weekly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "z.ai Coding Plan · 5h and weekly"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "z.ai Coding Plan · 5 小时和每周"
+          }
+        }
+      }
+    },
+    "智谱 Coding Plan · 5h and weekly": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "智谱 Coding Plan · 5h and weekly"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "智谱 Coding Plan · 5 小时和每周"
+          }
+        }
+      }
+    },
+    "1 banked reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 banked reset"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 个已存储的重置"
+          }
+        }
+      }
+    },
+    "%lld banked resets": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld banked resets"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 个已存储的重置"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

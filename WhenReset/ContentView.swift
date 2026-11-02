@@ -25,6 +25,13 @@ struct ContentView: View {
                 .tabItem { Label("Settings", systemImage: "gearshape.fill") }
                 .tag(Tab.settings)
         }
+        .onAppear {
+            #if DEBUG
+            if ScreenshotLaunch.isActive, ScreenshotLaunch.screen == "settings" {
+                selectedTab = .settings
+            }
+            #endif
+        }
         .onOpenURL { url in
             do {
                 let payload = try WorkerLinkPayload.parse(url)
@@ -66,6 +73,16 @@ private struct UsageTabView: View {
                 else { accountList }
             }
             .navigationTitle(store.accounts.isEmpty ? "Blinky" : "Usage")
+            .onAppear {
+                #if DEBUG
+                if ScreenshotLaunch.isActive {
+                    if ScreenshotLaunch.screen == "reorder" { editingAccountOrder = true }
+                    if ScreenshotLaunch.screen == "addAccount" || ScreenshotLaunch.screen == "deviceCode" {
+                        showingAddAccount = true
+                    }
+                }
+                #endif
+            }
             .navigationBarTitleDisplayMode(store.accounts.isEmpty ? .inline : .automatic)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -177,6 +194,7 @@ private struct UsageTabView: View {
                 store.moveAccounts(from: offsets, to: destination)
             }
         }
+        .accessibilityIdentifier("usage-list")
         .listStyle(.insetGrouped)
         .environment(\.editMode, .constant(editingAccountOrder ? .active : .inactive))
     }
@@ -1412,6 +1430,7 @@ struct SettingsView: View {
                             Text(language.title).tag(language)
                         }
                     }
+                    .accessibilityIdentifier("interface-language")
                 }
                 Section("Notifications") {
                     Toggle("Notify About Unexpected Resets",
@@ -2366,7 +2385,9 @@ private struct BankedResetBar: View {
     private func content(at date: Date, nearest: ResetCredit?, expiry: Date?) -> some View {
         VStack(spacing: 8) {
             HStack(spacing: 8) {
-                Text("\(count) banked reset\(count == 1 ? "" : "s")")
+                Text(count == 1
+                     ? String.localized("1 banked reset")
+                     : String(format: String.localized("%lld banked resets"), locale: AppLanguage.current.locale, Int64(count)))
                     .font(.headline)
                     .foregroundStyle(.primary)
                 Spacer()

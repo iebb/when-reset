@@ -167,6 +167,9 @@ struct WhenResetApp: App {
     @State private var interfaceLanguage = AppLanguage.current
 
     init() {
+        #if DEBUG
+        ScreenshotLaunch.applyLanguage()
+        #endif
         let store = AppStore()
         _store = State(initialValue: store)
         RemotePushCoordinator.shared.configure(store: store)

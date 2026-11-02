@@ -1,0 +1,75 @@
+name: UI screenshots
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-screenshots-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  screenshots:
+    name: Simulator screenshots
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Generate the Xcode project
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew install xcodegen
+          xcodegen generate --spec project.yml
+
+      - name: Capture screenshots
+        run: |
+          set -euo pipefail
+          xcodebuild test \
+            -project WhenReset.xcodeproj \
+            -scheme Screenshots \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=latest' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData-Screenshots" \
+            -resultBundlePath "$RUNNER_TEMP/Screenshots.xcresult" \
+            -only-testing:WhenResetUITests \
+            -only-testing:WhenResetTests/ScreenshotRenderTests \
+            CODE_SIGN_STYLE=Manual \
+            "CODE_SIGN_IDENTITY=-" \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_REQUIRED=YES \
+            DEVELOPMENT_TEAM= \
+            PROVISIONING_PROFILE_SPECIFIER=
+
+      - name: Export screenshot attachments
+        if: always()
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/ui-screenshots"
+          rm -rf "$out"
+          mkdir -p "$out"
+          if xcrun xcresulttool export attachments --help >/dev/null 2>&1; then
+            xcrun xcresulttool export attachments \
+              --path "$RUNNER_TEMP/Screenshots.xcresult" \
+              --output-path "$out" || true
+          fi
+          find "$RUNNER_TEMP/Screenshots.xcresult" -type f \
+            \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.heic' \) \
+            -exec cp {} "$out" \; || true
+          find "$out" -type f | sort
+          test -n "$(find "$out" -type f -print -quit)"
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: ${{ runner.temp }}/ui-screenshots
+          if-no-files-found: error

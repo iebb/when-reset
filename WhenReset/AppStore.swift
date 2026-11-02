@@ -1179,6 +1179,14 @@ final class AppStore {
             customIDs: customOrderIDs,
             to: Self.loadInitialAccounts(cachedAccounts)
         )
+        #if DEBUG
+        if ScreenshotLaunch.isActive {
+            let seeded = ScreenshotFixture.seed()
+            accounts = seeded.accounts
+            snapshots = seeded.snapshots
+            deviceLink = seeded.deviceLink
+        }
+        #endif
         let accountIDs = Set(accounts.map(\.id))
         snapshots = Dictionary(uniqueKeysWithValues: SharedSnapshotStore.load()
             .filter { accountIDs.contains($0.accountID) }
@@ -1269,6 +1277,14 @@ final class AppStore {
     }
 
     func start() async {
+        #if DEBUG
+        if ScreenshotLaunch.isActive {
+            hasStarted = true
+            publishSnapshots()
+            await updateLiveActivity()
+            return
+        }
+        #endif
         guard !hasStarted, !isStarting else { return }
         isStarting = true
         defer { isStarting = false }
@@ -1305,6 +1321,9 @@ final class AppStore {
     }
 
     func synchronizeAccountsFromICloudKeychain() async {
+        #if DEBUG
+        if ScreenshotLaunch.isActive { return }
+        #endif
         if let accountKeychainSyncTask {
             await accountKeychainSyncTask.value
             return

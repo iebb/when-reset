@@ -85,13 +85,13 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
 
     var accountDescription: String {
         switch self {
-        case .chatGPT: "Usage limits and banked resets"
-        case .claude: "Session and weekly reset times"
-        case .grok: "Weekly Grok credit pool"
-        case .kimi: "5-hour and weekly coding limits"
-        case .githubCopilot: "Chat and premium request quotas"
-        case .zai: "z.ai Coding Plan · 5h and weekly"
-        case .zhipu: "智谱 Coding Plan · 5h and weekly"
+        case .chatGPT: String.localized("Usage limits and banked resets")
+        case .claude: String.localized("Session and weekly reset times")
+        case .grok: String.localized("Weekly Grok credit pool")
+        case .kimi: String.localized("5-hour and weekly coding limits")
+        case .githubCopilot: String.localized("Chat and premium request quotas")
+        case .zai: String.localized("z.ai Coding Plan · 5h and weekly")
+        case .zhipu: String.localized("智谱 Coding Plan · 5h and weekly")
         case .miniMax: "5-hour and weekly coding limits"
         case .synthetic: "Rolling 5-hour and weekly limits"
         case .ollamaCloud: "Session and weekly Cloud limits"
@@ -175,9 +175,9 @@ enum LiveActivityMode: String, Codable, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .automatic: "Automatic"
-        case .always: "Always"
-        case .disabled: "Do not show Live Activity"
+        case .automatic: String.localized("Automatic")
+        case .always: String.localized("Always")
+        case .disabled: String.localized("Do not show Live Activity")
         }
     }
 
@@ -205,10 +205,10 @@ enum LiveActivityTrigger: String, Codable, CaseIterable, Sendable {
 
     var title: String {
         switch self {
-        case .remainingPercent: "Percentage remaining"
-        case .remainingHours: "Hours remaining"
-        case .exhausted: "When exhausted"
-        case .never: "Never"
+        case .remainingPercent: String.localized("Percentage remaining")
+        case .remainingHours: String.localized("Hours remaining")
+        case .exhausted: String.localized("When exhausted")
+        case .never: String.localized("Never")
         }
     }
 }
@@ -703,11 +703,10 @@ struct UsageWindow: Codable, Hashable, Sendable {
     var showsCountdown: Bool { reportsReset }
 
     var displayTitle: String {
-        if kind == .additional { return title }
-        return switch windowMinutes {
-        case 300: "5h limit"
-        case 10_080: "Weekly limit"
-        default: title
+        switch windowMinutes {
+        case 300: return String.localized("5h limit")
+        case 10_080: return String.localized("Weekly limit")
+        default: return title
         }
     }
 
