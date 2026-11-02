@@ -782,10 +782,15 @@ enum CountdownDisplay {
 
     static func compactString(until expiry: Date, from date: Date = .now) -> String {
         let remainingSeconds = max(0, Int(expiry.timeIntervalSince(date).rounded(.down)))
-        if remainingSeconds > 48 * 3_600 { return "\(remainingSeconds / 86_400)d" }
+        let locale = AppLanguage.current.locale
+        if remainingSeconds > 48 * 3_600 {
+            return String(format: String.localized("%lldd"), locale: locale, Int64(remainingSeconds / 86_400))
+        }
         let remainingMinutes = remainingSeconds / 60
-        if remainingMinutes < 100 { return "\(remainingMinutes)m" }
-        return "\(remainingMinutes / 60)h"
+        if remainingMinutes < 100 {
+            return String(format: String.localized("%lldm"), locale: locale, Int64(remainingMinutes))
+        }
+        return String(format: String.localized("%lldh"), locale: locale, Int64(remainingMinutes / 60))
     }
 
     static func liveActivityValue(until expiry: Date, from date: Date = .now) -> LiveActivityCountdownValue {

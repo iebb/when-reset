@@ -678,9 +678,9 @@ private struct UsageListHomeWidget: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: family == .systemMedium ? 5 : 6) {
             Text("Usage")
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
             ForEach(rows, id: \.accountID) { snapshot in
                 usageRow(snapshot)
@@ -692,14 +692,21 @@ private struct UsageListHomeWidget: View {
     private func usageRow(_ snapshot: UsageSnapshot) -> some View {
         let headline = snapshot.headlineWindow(pinnedMetricID: nil)
         let secondary = headline.flatMap { snapshot.secondaryLimit(after: $0) }
-        return VStack(alignment: .leading, spacing: 3) {
+        return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 SnapshotAccountIcon(snapshot: snapshot).frame(width: 16, height: 16)
                 Text(snapshot.resolvedAccountName).font(.caption.weight(.semibold)).lineLimit(1)
                 Spacer(minLength: 4)
                 if let headline {
+                    if headline.showsCountdown {
+                        Text(CountdownDisplay.compactString(until: headline.resetsAt))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     Text(UsageText.remainingPercent(headline.remainingPercent))
                         .font(.caption.monospacedDigit())
+                        .lineLimit(1)
                 }
             }
             if let headline {
@@ -708,16 +715,12 @@ private struct UsageListHomeWidget: View {
                 if family == .systemLarge, let secondary {
                     HStack {
                         Text(secondary.displayTitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                        Spacer()
+                        Spacer(minLength: 4)
                         Text(UsageText.remainingPercent(secondary.remainingPercent))
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                }
-                if headline.showsCountdown {
-                    Text(CountdownDisplay.compactString(until: headline.resetsAt))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
                 }
             }
         }
@@ -2090,9 +2093,19 @@ private struct LiveActivityCountdown: View {
     private func countdownValue(at date: Date) -> some View {
         switch CountdownDisplay.liveActivityValue(until: expiry, from: date) {
         case let .days(days, hours):
-            Text("\(days)d \(hours)h")
+            Text(String(
+                format: String.localized("%lldd %lldh"),
+                locale: AppLanguage.current.locale,
+                Int64(days),
+                Int64(hours)
+            ))
         case let .hours(hours, minutes):
-            Text(String(format: "%dh %02dm", hours, minutes))
+            Text(String(
+                format: String.localized("%lldh %02lldm"),
+                locale: AppLanguage.current.locale,
+                Int64(hours),
+                Int64(minutes)
+            ))
         case .timer:
             Text(timerInterval: expiry.addingTimeInterval(-7_200)...expiry,
                  countsDown: true, showsHours: true)
@@ -2178,23 +2191,20 @@ private struct LiveAccountBar: View {
                         .background(.orange.opacity(0.35), in: .capsule)
                 }
                 Spacer(minLength: 4)
-                Text(UsageText.remainingPercent(account.headlineRemainingPercent))
-                    .font(.caption.monospacedDigit())
-            }
-            ProgressView(value: account.headlineRemainingPercent, total: 100)
-            HStack {
-                if let secondary = account.secondaryTitle, let percent = account.secondaryRemainingPercent {
-                    Text("\(secondary) \(UsageText.remainingPercent(percent))")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Spacer()
                 if let reset = account.headlineResetsAt {
                     LiveActivityCountdown(expiry: reset)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                    .font(.caption.monospacedDigit())
+            }
+            ProgressView(value: account.headlineRemainingPercent, total: 100)
+            if let secondary = account.secondaryTitle, let percent = account.secondaryRemainingPercent {
+                Text("\(secondary) \(UsageText.remainingPercent(percent))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
         }
         .foregroundStyle(.white)

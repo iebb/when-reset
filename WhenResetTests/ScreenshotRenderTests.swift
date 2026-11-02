@@ -17,6 +17,15 @@ final class ScreenshotRenderTests: XCTestCase {
         if language == .chineseSimplified {
             XCTAssertEqual(String.localized("5h limit"), "5 小时额度")
             XCTAssertEqual(String.localized("Open %@ linking"), "打开 %@ 关联")
+            let now = Date(timeIntervalSince1970: 1_000)
+            XCTAssertEqual(
+                CountdownDisplay.compactString(until: now.addingTimeInterval(3 * 3_600), from: now),
+                "3小时"
+            )
+            XCTAssertEqual(
+                CountdownDisplay.compactString(until: now.addingTimeInterval(5 * 86_400), from: now),
+                "5天"
+            )
         }
         let seeded = ScreenshotFixture.seed()
         let snapshots = seeded.accounts.compactMap { seeded.snapshots[$0.id] }

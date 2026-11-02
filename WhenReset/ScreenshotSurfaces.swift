@@ -6,15 +6,16 @@ struct ScreenshotUsageList: View {
     var showsSecondLimit: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: showsSecondLimit ? 6 : 5) {
             Text("Usage")
-                .font(.caption.weight(.semibold))
+                .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
             ForEach(snapshots, id: \.accountID) { snapshot in
                 row(snapshot)
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, showsSecondLimit ? 10 : 8)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(.systemBackground))
     }
@@ -22,7 +23,7 @@ struct ScreenshotUsageList: View {
     private func row(_ snapshot: UsageSnapshot) -> some View {
         let headline = snapshot.headlineWindow(pinnedMetricID: nil)
         let secondary = headline.flatMap { snapshot.secondaryLimit(after: $0) }
-        return VStack(alignment: .leading, spacing: 3) {
+        return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 ProviderIcon(providerID: snapshot.accountProviderID ?? .chatGPT)
                     .frame(width: 16, height: 16)
@@ -31,6 +32,12 @@ struct ScreenshotUsageList: View {
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 if let headline {
+                    if headline.showsCountdown {
+                        Text(CountdownDisplay.compactString(until: headline.resetsAt))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                     Text(UsageText.remainingPercent(headline.remainingPercent))
                         .font(.caption.monospacedDigit())
                         .lineLimit(1)
@@ -44,16 +51,12 @@ struct ScreenshotUsageList: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
-                        Spacer()
+                        Spacer(minLength: 4)
                         Text(UsageText.remainingPercent(secondary.remainingPercent))
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                }
-                if headline.showsCountdown {
-                    Text(CountdownDisplay.compactString(until: headline.resetsAt))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.tertiary)
                 }
             }
         }
@@ -80,23 +83,23 @@ struct ScreenshotLiveLock: View {
                                 .background(.orange.opacity(0.85), in: .capsule)
                         }
                         Spacer(minLength: 4)
+                        if let reset = account.headlineResetsAt {
+                            Text(CountdownDisplay.compactString(until: reset))
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.7))
+                                .lineLimit(1)
+                        }
                         Text(UsageText.remainingPercent(account.headlineRemainingPercent))
                             .font(.caption.monospacedDigit())
                             .lineLimit(1)
                     }
                     ScreenshotMeter(remaining: account.headlineRemainingPercent)
-                    HStack {
-                        if let secondary = account.secondaryTitle,
-                           let percent = account.secondaryRemainingPercent {
-                            Text("\(secondary) \(UsageText.remainingPercent(percent))")
-                                .font(.caption2)
-                                .lineLimit(1)
-                        }
-                        Spacer()
-                        if let reset = account.headlineResetsAt {
-                            Text(CountdownDisplay.compactString(until: reset))
-                                .font(.caption2.monospacedDigit())
-                        }
+                    if let secondary = account.secondaryTitle,
+                       let percent = account.secondaryRemainingPercent {
+                        Text("\(secondary) \(UsageText.remainingPercent(percent))")
+                            .font(.caption2)
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(1)
                     }
                 }
             }

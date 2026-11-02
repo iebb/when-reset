@@ -148,47 +148,47 @@ private struct UsageTabView: View {
                 let snapshot = store.snapshots[account.id]
                 let failure = store.refreshFailures[account.id]
                 Section {
-                    if let failure {
-                        AccountFailureView(
-                            account: account,
-                            failure: failure,
-                            cachedAt: snapshot?.fetchedAt,
-                            retry: { Task { await store.refresh(account) } },
-                            relink: { relinkingAccount = account },
-                            remove: { accountPendingRemoval = account }
-                        )
-                    }
-                    if let snapshot {
-                        UsageCard(snapshot: snapshot.filtered(using: store.settings(for: account)))
-                    } else if failure == nil {
-                        HStack { ProgressView(); Text("Loading usage…").foregroundStyle(.secondary) }
+                    if editingAccountOrder {
+                        AccountReorderRow(account: account)
                     } else {
-                        Label("No cached usage is available", systemImage: "tray")
-                            .foregroundStyle(.secondary)
+                        if let failure {
+                            AccountFailureView(
+                                account: account,
+                                failure: failure,
+                                cachedAt: snapshot?.fetchedAt,
+                                retry: { Task { await store.refresh(account) } },
+                                relink: { relinkingAccount = account },
+                                remove: { accountPendingRemoval = account }
+                            )
+                        }
+                        if let snapshot {
+                            UsageCard(snapshot: snapshot.filtered(using: store.settings(for: account)))
+                        } else if failure == nil {
+                            HStack { ProgressView(); Text("Loading usage…").foregroundStyle(.secondary) }
+                        } else {
+                            Label("No cached usage is available", systemImage: "tray")
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 } header: {
-                    ProviderSectionHeader(
-                        account: account,
-                        plan: snapshot?.plan ?? account.plan,
-                        failure: failure
-                    )
+                    if !editingAccountOrder {
+                        ProviderSectionHeader(
+                            account: account,
+                            plan: snapshot?.plan ?? account.plan,
+                            failure: failure
+                        )
+                    }
                 }
                 .swipeActions {
                     Button("Remove", role: .destructive) { accountPendingRemoval = account }
                 }
-                .onDrag {
-                    NSItemProvider(object: account.id.uuidString as NSString)
-                }
-                .onDrop(of: [.text], isTargeted: nil) { providers in
-                    guard let provider = providers.first else { return false }
-                    _ = provider.loadObject(ofClass: NSString.self) { value, _ in
-                        guard let raw = value as? String, let dragged = UUID(uuidString: raw) else { return }
-                        Task { @MainActor in
-                            store.moveAccount(dragged, before: account.id)
-                        }
+                .modifier(AccountDragModifier(
+                    enabled: !editingAccountOrder,
+                    accountID: account.id,
+                    moveBefore: { dragged in
+                        store.moveAccount(dragged, before: account.id)
                     }
-                    return true
-                }
+                ))
             }
             .onMove { offsets, destination in
                 store.moveAccounts(from: offsets, to: destination)
@@ -300,6 +300,70 @@ private struct FirstRunFeatureCard: View {
             RoundedRectangle(cornerRadius: 18)
                 .stroke(Color(.separator).opacity(0.22), lineWidth: 1)
         }
+    }
+}
+
+private struct AccountDragModifier: ViewModifier {
+    var enabled: Bool
+    var accountID: UUID
+    var moveBefore: (UUID) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content
+                .onDrag { NSItemProvider(object: accountID.uuidString as NSString) }
+                .onDrop(of: [.text], isTargeted: nil) { providers in
+                    guard let provider = providers.first else { return false }
+                    _ = provider.loadObject(ofClass: NSString.self) { value, _ in
+                        guard let raw = value as? String, let dragged = UUID(uuidString: raw) else { return }
+                        Task { @MainActor in
+                            moveBefore(dragged)
+                        }
+                    }
+                    return true
+                }
+        } else {
+            content
+        }
+    }
+}
+
+private struct AccountReorderRow: View {
+    @Environment(AppStore.self) private var store
+    let account: MonitoredAccount
+
+    var body: some View {
+        let snapshot = store.snapshots[account.id]?.filtered(using: store.settings(for: account))
+        let headline = snapshot?.headlineWindow(pinnedMetricID: nil)
+        HStack(spacing: 10) {
+            ProviderIcon(providerID: account.providerID, symbolName: account.customSymbolName)
+                .frame(width: 28, height: 28)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.resolvedDisplayName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(account.providerSectionTitle(plan: snapshot?.plan ?? account.plan))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+            if let headline {
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(UsageText.remainingPercent(headline.remainingPercent))
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    if headline.showsCountdown {
+                        Text(CountdownDisplay.compactString(until: headline.resetsAt))
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -1482,8 +1546,10 @@ struct SettingsView: View {
                             }
                         }
                     }
-                    Button(pushServerActionTitle, action: applyPushServerAction)
-                    .disabled(!canApplyPushServerSettings)
+                    if pushServerSettings.mode != .disabled || canApplyPushServerSettings {
+                        Button(pushServerActionTitle, action: applyPushServerAction)
+                            .disabled(!canApplyPushServerSettings)
+                    }
 
                     if pushServerSettings.mode != .disabled
                         || store.pushServerSettings.mode != .disabled
