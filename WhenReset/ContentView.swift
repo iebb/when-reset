@@ -145,7 +145,7 @@ private struct UsageTabView: View {
                         }.disabled(store.isRefreshing)
                     }
                 }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
                     if !store.accounts.isEmpty {
                         Menu {
                             Picker("Sort accounts", selection: Binding(
