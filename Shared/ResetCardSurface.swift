@@ -156,21 +156,24 @@ private struct ResetCardLabelValue: View {
     @Environment(\.interfaceStyle) private var interfaceStyle
 
     var body: some View {
+        // Same pair as the quota rows: a leading label, a flexible gap, a
+        // trailing value. A fixed-width label plus an infinite frame fought
+        // the widget's proposed width and clipped the expiry.
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label)
                 .font(labelFont)
                 .foregroundStyle(labelColor)
                 .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
+            Spacer(minLength: 6)
             if let value, !value.isEmpty {
                 Text(value)
                     .font(valueFont)
                     .foregroundStyle(valueColor)
                     .monospacedDigit()
                     .lineLimit(1)
-                    .minimumScaleFactor(0.65)
+                    .minimumScaleFactor(0.7)
                     .multilineTextAlignment(.trailing)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .layoutPriority(1)
             }
         }
         .accessibilityElement(children: .ignore)
