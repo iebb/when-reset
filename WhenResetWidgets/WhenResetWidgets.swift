@@ -1630,7 +1630,7 @@ private struct SmallHomeWidgetView: View {
                     .monospacedDigit()
                     .minimumScaleFactor(0.6)
                     .lineLimit(1)
-                if entry.target.kind == .bankedReset || entry.target.kind == .apiBalance {
+                if entry.target.kind == .apiBalance || (entry.target.kind == .bankedReset && resetFact == nil) {
                     Text(entry.target.valueCaption.uppercased())
                         .font(.caption2.bold())
                         .foregroundStyle(.secondary)
@@ -1953,7 +1953,9 @@ struct UsageLiveActivity: Widget {
                 DynamicIslandExpandedRegion(.bottom) {
                     if !context.state.accounts.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
-                            ForEach(context.state.accounts.prefix(4)) { account in
+                            // Three rows leave room for a reset-card line. Four
+                            // quota rows already filled this region.
+                            ForEach(context.state.accounts.prefix(3)) { account in
                                 LiveAccountBar(account: account, onDarkSurface: true)
                             }
                         }

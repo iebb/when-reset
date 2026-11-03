@@ -161,17 +161,16 @@ private struct ResetCardLabelValue: View {
                 .font(labelFont)
                 .foregroundStyle(labelColor)
                 .lineLimit(1)
-                .minimumScaleFactor(0.75)
-                .layoutPriority(1)
-            Spacer(minLength: 4)
+                .fixedSize(horizontal: true, vertical: false)
             if let value, !value.isEmpty {
                 Text(value)
                     .font(valueFont)
                     .foregroundStyle(valueColor)
                     .monospacedDigit()
                     .lineLimit(1)
-                    .minimumScaleFactor(0.6)
+                    .minimumScaleFactor(0.65)
                     .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
         }
         .accessibilityElement(children: .ignore)

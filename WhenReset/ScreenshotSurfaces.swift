@@ -74,9 +74,10 @@ struct ScreenshotLiveLock: View {
     var rows: [UsageActivityAccountRow]
     var now: Date = .now
     var onDarkSurface = false
+    var limit = 4
 
     var body: some View {
-        StyledLiveAccountList(rows: rows, onDarkSurface: onDarkSurface, now: now)
+        StyledLiveAccountList(rows: rows, onDarkSurface: onDarkSurface, limit: limit, now: now)
             .padding(12)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background {

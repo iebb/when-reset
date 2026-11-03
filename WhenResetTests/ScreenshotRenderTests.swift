@@ -81,11 +81,11 @@ final class ScreenshotRenderTests: XCTestCase {
                 size: CGSize(width: 360, height: 320)
             )
             attach(
-                ScreenshotLiveLock(rows: Array(rows.prefix(3)), now: now, onDarkSurface: true)
+                ScreenshotLiveLock(rows: rows, now: now, onDarkSurface: true, limit: 3)
                     .screenshotChrome(language: language, scheme: .dark, interfaceStyle: style),
                 name: "\(prefix)-island-\(style.rawValue)",
                 scale: 2,
-                size: CGSize(width: 360, height: 260)
+                size: CGSize(width: 360, height: 300)
             )
         }
         attach(
