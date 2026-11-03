@@ -33,17 +33,20 @@ struct ScreenshotSmallUsage: View {
                     Text(snapshot.resolvedAccountName)
                         .font(.headline)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     Text(quota?.title ?? snapshot.providerName)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
                 Spacer(minLength: 4)
                 if let expiresAt = quota?.expiresAt {
                     VStack(alignment: .trailing, spacing: 1) {
-                        Text(CountdownDisplay.widgetString(until: expiresAt, from: now))
+                        Text(CountdownDisplay.compactString(until: expiresAt, from: now))
                             .font(.caption.bold().monospacedDigit())
                             .lineLimit(1)
+                            .minimumScaleFactor(0.75)
                         Text("RESET")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.secondary)

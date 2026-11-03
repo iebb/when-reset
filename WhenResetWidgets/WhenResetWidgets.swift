@@ -1576,10 +1576,12 @@ private struct SmallHomeWidgetView: View {
                     Text(entry.snapshot.resolvedAccountName)
                         .font(.headline)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                     Text(entry.target.displayTitle)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.75)
                 }
 
                 Spacer(minLength: 4)
@@ -1590,10 +1592,11 @@ private struct SmallHomeWidgetView: View {
                         .foregroundStyle(.secondary)
                 } else if let expiresAt = entry.target.expiresAt {
                     VStack(alignment: .trailing, spacing: 1) {
-                        WidgetCountdown(expiry: expiresAt)
+                        // The full clock ("03:30:00") crowds the name off a small widget.
+                        WidgetCountdown(expiry: expiresAt, compact: true)
                             .font(.caption.bold().monospacedDigit())
                             .foregroundStyle(entry.widgetAccent)
-                            .minimumScaleFactor(0.65)
+                            .minimumScaleFactor(0.75)
                         Text(entry.target.kind == .bankedReset ? "EXPIRY" : "RESET")
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.secondary)
@@ -2354,10 +2357,14 @@ private struct LiveActivityPinnedMarker: View {
 
 private struct WidgetCountdown: View {
     let expiry: Date
+    var compact = false
 
     var body: some View {
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-            Text(CountdownDisplay.widgetString(until: expiry, from: context.date)).monospacedDigit()
+        TimelineView(.periodic(from: .now, by: compact ? 60 : 1)) { context in
+            Text(compact
+                 ? CountdownDisplay.compactString(until: expiry, from: context.date)
+                 : CountdownDisplay.widgetString(until: expiry, from: context.date))
+                .monospacedDigit()
         }
         .lineLimit(1)
     }
