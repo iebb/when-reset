@@ -25,7 +25,9 @@ struct ContentView: View {
         .onAppear {
             #if DEBUG
             if ScreenshotLaunch.isActive,
-               ["settings", "settingsRoot", "forecasts", "about", "notifications", "tokenActivity"]
+               ["settings", "settingsRoot", "forecasts", "about", "notifications",
+                "tokenActivity", "tokenActivityWeekly", "tokenActivityCumulative",
+                "tokenActivityEmpty", "tokenActivityExpanded"]
                 .contains(ScreenshotLaunch.screen) {
                 selectedTab = .settings
             }
@@ -120,6 +122,7 @@ private struct UsageTabView: View {
     @State private var showingAddAccount = false
     @State private var relinkingAccount: MonitoredAccount?
     @State private var accountPendingRemoval: MonitoredAccount?
+    @State private var settingsAccount: MonitoredAccount?
 
     var body: some View {
         NavigationStack {
@@ -138,7 +141,7 @@ private struct UsageTabView: View {
                 }
                 #endif
             }
-            .navigationBarTitleDisplayMode(store.accounts.isEmpty ? .inline : .automatic)
+            .navigationBarTitleDisplayMode(store.accounts.isEmpty ? .inline : .large)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     if !store.accounts.isEmpty {
@@ -177,6 +180,9 @@ private struct UsageTabView: View {
             }
             .refreshable { await store.refreshAll() }
             .blinkyNavigationGlass(interfaceStyle)
+            .navigationDestination(item: $settingsAccount) { account in
+                AccountSettingsView(account: account)
+            }
             .sheet(isPresented: $showingAddAccount) { AddAccountView() }
             .sheet(item: $relinkingAccount) { account in
                 AddAccountView(relinkingAccount: account)
@@ -207,6 +213,7 @@ private struct UsageTabView: View {
                 Button("OK", role: .cancel) {}
             } message: { Text(store.errorMessage ?? "Unknown error") }
         }
+        .blinkyScreenBackdrop(interfaceStyle)
     }
 
     private var emptyState: some View {
@@ -225,33 +232,35 @@ private struct UsageTabView: View {
                 Section {
                     if editingAccountOrder {
                         AccountReorderRow(account: account)
+                            .modifier(UsageAccountChrome(style: interfaceStyle))
                     } else {
-                        if let failure {
-                            AccountFailureView(
+                        VStack(alignment: .leading, spacing: 8) {
+                            ProviderSectionHeader(
                                 account: account,
+                                plan: snapshot?.plan ?? account.plan,
                                 failure: failure,
-                                cachedAt: snapshot?.fetchedAt,
-                                retry: { Task { await store.refresh(account) } },
-                                relink: { relinkingAccount = account },
-                                remove: { accountPendingRemoval = account }
+                                openSettings: { settingsAccount = account }
                             )
+                            if let failure {
+                                AccountFailureView(
+                                    account: account,
+                                    failure: failure,
+                                    cachedAt: snapshot?.fetchedAt,
+                                    retry: { Task { await store.refresh(account) } },
+                                    relink: { relinkingAccount = account },
+                                    remove: { accountPendingRemoval = account }
+                                )
+                            }
+                            if let snapshot {
+                                UsageCard(snapshot: snapshot.filtered(using: store.settings(for: account)))
+                            } else if failure == nil {
+                                HStack { ProgressView(); Text("Loading usage…").foregroundStyle(.secondary) }
+                            } else {
+                                Label("No cached usage is available", systemImage: "tray")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                        if let snapshot {
-                            UsageCard(snapshot: snapshot.filtered(using: store.settings(for: account)))
-                        } else if failure == nil {
-                            HStack { ProgressView(); Text("Loading usage…").foregroundStyle(.secondary) }
-                        } else {
-                            Label("No cached usage is available", systemImage: "tray")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } header: {
-                    if !editingAccountOrder {
-                        ProviderSectionHeader(
-                            account: account,
-                            plan: snapshot?.plan ?? account.plan,
-                            failure: failure
-                        )
+                        .modifier(UsageAccountChrome(style: interfaceStyle))
                     }
                 }
                 .swipeActions {
@@ -270,8 +279,8 @@ private struct UsageTabView: View {
                 store.moveAccounts(from: offsets, to: destination)
             }
         }
-        .accessibilityIdentifier("usage-list")
-        .listStyle(.insetGrouped)
+        .accessibilityIdentifier("usage-style-\(interfaceStyle.rawValue)")
+        .modifier(UsageListSurface(style: interfaceStyle))
         .environment(\.editMode, .constant(editingAccountOrder ? .active : .inactive))
     }
 }
@@ -447,18 +456,20 @@ private struct ProviderSectionHeader: View {
     let account: MonitoredAccount
     let plan: String?
     let failure: AccountRefreshFailure?
+    var openSettings: () -> Void
+    @Environment(\.interfaceStyle) private var interfaceStyle
 
     var body: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: interfaceStyle == .screenTime ? 6 : 7) {
             ProviderIcon(providerID: account.providerID, symbolName: account.customSymbolName)
-                .frame(width: 28, height: 28)
+                .frame(width: iconSide, height: iconSide)
             VStack(alignment: .leading, spacing: 1) {
                 Text(account.resolvedDisplayName)
-                    .font(.headline)
+                    .font(nameFont)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
                 Text(account.providerSectionTitle(plan: plan))
-                    .font(.caption)
+                    .font(interfaceStyle == .screenTime ? .caption2 : .caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -468,16 +479,31 @@ private struct ProviderSectionHeader: View {
                     .accessibilityLabel(failure.title)
             }
             Spacer(minLength: 10)
-            NavigationLink {
-                AccountSettingsView(account: account)
-            } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.body)
-                    .accessibilityLabel("\(account.providerDisplayName) account settings")
+            Button(action: openSettings) {
+                settingsGear
             }
             .buttonStyle(.plain)
         }
         .textCase(nil)
+    }
+
+    /// Screen Time uses a smaller header so the rounded percent stays the figure.
+    /// Classic and Liquid Glass keep the account name as the card title.
+    private var nameFont: Font {
+        interfaceStyle == .screenTime ? .subheadline.weight(.semibold) : .headline
+    }
+
+    private var iconSide: CGFloat {
+        interfaceStyle == .screenTime ? 22 : 28
+    }
+
+    private var settingsGear: some View {
+        Image(systemName: "gearshape.fill")
+            .font(.body)
+            .foregroundStyle(.secondary)
+            .frame(width: 32, height: 32)
+            .contentShape(Rectangle())
+            .accessibilityLabel("\(account.providerDisplayName) account settings")
     }
 }
 
@@ -577,14 +603,12 @@ private struct AccountFailureView: View {
 
 struct UsageCard: View {
     let snapshot: UsageSnapshot
-    @Environment(\.interfaceStyle) private var interfaceStyle
 
     var body: some View {
-        VStack(spacing: 16) {
-            if let balance = snapshot.apiBalance {
+        VStack(alignment: .leading, spacing: 8) {
+            if snapshot.usageWindows.isEmpty, let balance = snapshot.apiBalance {
                 APIBalanceRow(balance: balance)
-            }
-            if snapshot.usageWindows.isEmpty, snapshot.apiBalance == nil {
+            } else if snapshot.usageWindows.isEmpty {
                 Label("No resettable limits reported", systemImage: "checkmark.circle")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
@@ -594,17 +618,8 @@ struct UsageCard: View {
                     LimitRow(window: window)
                 }
             }
-            VStack(alignment: .leading, spacing: 6) {
-                UsageMoreSection(snapshot: snapshot)
-                ForecastCardExtras(snapshot: snapshot)
-                HStack { Text("Updated"); Spacer(); Text(snapshot.fetchedAt, style: .relative) }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, interfaceStyle == .classic ? 0 : 10)
-            .padding(.vertical, interfaceStyle == .classic ? 2 : 8)
-            .modifier(UsageExtrasChrome(style: interfaceStyle))
-        }.padding(.vertical, 6)
+            UsageFooter(snapshot: snapshot)
+        }
     }
 }
 
@@ -687,182 +702,55 @@ struct APIBalanceRow: View {
     }
 }
 
-/// Collapsed banked resets under the limit bars.
-/// Exhaustion and the predicted Codex reset stay in `ForecastCardExtras`, also under the bars.
-private struct UsageMoreSection: View {
-    let snapshot: UsageSnapshot
-
-    private var showsBankedResets: Bool {
-        snapshot.availableResetCount > 0 || !snapshot.availableResetCredits.isEmpty
-    }
-
-    var body: some View {
-        if showsBankedResets {
-            BankedResetBar(snapshot: snapshot)
-        }
-    }
-}
-
-private struct BankedResetBar: View {
-    let snapshot: UsageSnapshot
-    @State private var expanded = false
-
-    private var credits: [ResetCredit] { snapshot.availableResetCredits }
-    private var count: Int { max(snapshot.availableResetCount, credits.count) }
-
-    @ViewBuilder
-    var body: some View {
-        if let nearest = snapshot.nextBankedResetCredit(), let expiry = nearest.expiresAt {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                content(at: context.date, nearest: nearest, expiry: expiry)
-            }
-        } else {
-            content(at: .now, nearest: nil, expiry: nil)
-        }
-    }
-
-    private func content(at date: Date, nearest: ResetCredit?, expiry: Date?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                expanded.toggle()
-            } label: {
-                HStack(spacing: 8) {
-                    Text(count == 1
-                         ? String.localized("1 banked reset")
-                         : String(format: String.localized("%lld banked resets"), locale: AppLanguage.current.locale, Int64(count)))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 8)
-                    if let expiry {
-                        Text(CountdownDisplay.string(until: expiry, from: date))
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
-                    }
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.tertiary)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("usage-more-banked")
-            .accessibilityLabel(expanded
-                                ? String.localized("Hide banked reset details")
-                                : String.localized("Show banked reset details"))
-
-            if expanded {
-                if let nearest, let remaining = nearest.remainingLifetimeFraction(at: date) {
-                    UsageMeter(remainingFraction: remaining)
-                }
-                ForEach(Array(credits.enumerated()), id: \.element.id) { index, credit in
-                    HStack {
-                        Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1)))
-                        Spacer()
-                        if let expiry = credit.expiresAt {
-                            Text(expiry, format: .dateTime.year().month(.abbreviated).day().hour().minute().second())
-                                .multilineTextAlignment(.trailing)
-                        } else {
-                            Text("Expiry unavailable")
-                        }
-                    }
-                    .foregroundStyle(.secondary)
-                }
-                if count > credits.count {
-                    ForEach(credits.count..<count, id: \.self) { index in
-                        HStack {
-                            Text(String(format: String.localized("Reset #%lld"), locale: AppLanguage.current.locale, Int64(index + 1)))
-                            Spacer()
-                            Text("Expiry unavailable")
-                        }
-                        .foregroundStyle(.secondary)
-                    }
-                }
-            }
-        }
-        .font(.caption)
-    }
-}
-
 struct LimitRow: View {
     let window: UsageWindow
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.interfaceStyle) private var interfaceStyle
 
-    private var prominent: Bool { interfaceStyle != .classic }
-
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text(window.displayTitle)
-                        .font(.subheadline.weight(.semibold))
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    if window.showsCountdown {
-                        Text(CountdownDisplay.usageString(until: window.resetsAt, from: context.date))
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.75)
-                    }
+                    Text(UsageText.remainingPercent(window.remainingPercent))
+                        .font(percentFont)
+                        .monospacedDigit()
+                        .foregroundStyle(tint)
+                        .lineLimit(1)
                 }
-                Text(UsageText.remainingPercent(window.remainingPercent))
-                    .font((prominent ? Font.title2 : Font.title3).bold().monospacedDigit())
-                    .foregroundStyle(UsageMeterTint.color(
-                        remainingFraction: window.remainingPercent / 100,
-                        colorScheme: colorScheme
-                    ))
-                UsageMeter(remainingFraction: window.remainingPercent / 100, prominent: prominent)
+                if window.showsCountdown {
+                    Text(QuotaResetClock.subline(until: window.resetsAt, from: context.date))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                }
+                UsageMeter(
+                    remainingFraction: window.remainingPercent / 100,
+                    prominent: interfaceStyle == .screenTime
+                )
             }
+            .accessibilityElement(children: .combine)
         }
     }
-}
 
-private struct UsageExtrasChrome: ViewModifier {
-    var style: InterfaceStyle
-
-    func body(content: Content) -> some View {
-        switch style {
-        case .classic:
-            content
-                .overlay(alignment: .top) { Divider() }
+    /// Screen Time's percent is a larger rounded figure. Classic stays a subheadline.
+    private var percentFont: Font {
+        switch interfaceStyle {
         case .screenTime:
-            content.background(
-                Color.primary.opacity(0.05),
-                in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-            )
-        case .liquidGlass:
-            content.blinkyInsetGlass()
-        }
-    }
-}
-
-private extension View {
-    /// Frosted inset for secondary card details. iOS 26 uses system glass;
-    /// earlier systems use the ultra-thin material.
-    @ViewBuilder
-    func blinkyInsetGlass() -> some View {
-        let shape = RoundedRectangle(cornerRadius: 12, style: .continuous)
-        if #available(iOS 26, *) {
-            self.glassEffect(.regular, in: shape)
-        } else {
-            self.background(.ultraThinMaterial, in: shape)
+            .system(.title3, design: .rounded).weight(.semibold)
+        case .classic, .liquidGlass:
+            .subheadline.weight(.semibold)
         }
     }
 
-    /// System navigation glass on iOS 26. Older systems get an explicit material.
-    @ViewBuilder
-    func blinkyNavigationGlass(_ style: InterfaceStyle) -> some View {
-        if style == .liquidGlass {
-            if #available(iOS 26, *) {
-                self
-            } else {
-                self
-                    .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
-                    .toolbarBackground(.visible, for: .navigationBar)
-            }
-        } else {
-            self
-        }
+    private var tint: Color {
+        UsageMeterTint.color(remainingFraction: window.remainingPercent / 100, colorScheme: colorScheme)
     }
 }
 #endif

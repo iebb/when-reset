@@ -34,6 +34,7 @@ struct WorkerLinkEntryView: View {
                         .disabled(pastedLink.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
+            .blinkySettingsCanvas()
             .navigationTitle("Link Worker")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -195,6 +196,7 @@ struct WorkerLinkReviewView: View {
                     }
                 }
             }
+            .blinkySettingsCanvas()
             .navigationTitle("Review Worker Link")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -377,6 +379,7 @@ struct RemoteWorkerAccountsView: View {
                     }
                 }
             }
+            .blinkySettingsCanvas()
             .navigationTitle(onlyAccountsMissingLocally ? "Import from Worker" : "Add from Worker")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

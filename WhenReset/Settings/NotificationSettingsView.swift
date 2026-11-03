@@ -57,6 +57,7 @@ struct NotificationSettingsView: View {
             } footer: {
                 Text(permissionFooter)
             }
+            .blinkySettingsSection()
 
             Section {
                 Toggle("Unexpected or early resets",
@@ -68,6 +69,7 @@ struct NotificationSettingsView: View {
             } footer: {
                 Text("Unexpected or early resets include an early quota change and an early weekly reset. Scheduled reset times alert when that time arrives. Each account also needs its own switch on.")
             }
+            .blinkySettingsSection()
 
             Section {
                 Text("Detected quota resets and new banked resets use each account’s Notify About Detected Resets switch. Turning off unexpected resets does not turn those alerts off.")
@@ -76,6 +78,7 @@ struct NotificationSettingsView: View {
             } header: {
                 Text("Detected resets")
             }
+            .blinkySettingsSection()
 
             ForEach(configurableAccounts) { account in
                 Section {
@@ -86,8 +89,10 @@ struct NotificationSettingsView: View {
                 } header: {
                     Text(account.resolvedDisplayName)
                 }
+                .blinkySettingsSection()
             }
         }
+        .blinkySettingsCanvas()
         .navigationTitle("Notifications")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { notificationSettings = store.notificationSettings }

@@ -7,7 +7,9 @@ struct ForecastSettingsView: View {
     var body: some View {
         Form {
             ForecastSettingsSection(accounts: store.accounts)
+                .blinkySettingsSection()
         }
+        .blinkySettingsCanvas()
         .navigationTitle("Forecasts")
         .navigationBarTitleDisplayMode(.inline)
     }

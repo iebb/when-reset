@@ -49,6 +49,7 @@ struct AboutSettingsView: View {
             } footer: {
                 Text("Fork of When Reset (iebb/when-reset).")
             }
+            .blinkySettingsSection()
 
             Section {
                 Picker("Update discovery", selection: mode) {
@@ -62,6 +63,7 @@ struct AboutSettingsView: View {
             } footer: {
                 Text(discoveryFooter)
             }
+            .blinkySettingsSection()
 
             Section {
                 Link(destination: AppLinks.sourceCode) {
@@ -71,7 +73,9 @@ struct AboutSettingsView: View {
                     Label("Issues", systemImage: "exclamationmark.bubble")
                 }
             }
+            .blinkySettingsSection()
         }
+        .blinkySettingsCanvas()
         .navigationTitle("About")
         .navigationBarTitleDisplayMode(.inline)
     }

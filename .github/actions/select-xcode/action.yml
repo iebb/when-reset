@@ -1,0 +1,41 @@
+name: Select Xcode 26
+description: Point DEVELOPER_DIR at the newest Xcode 26 installed on this runner.
+
+runs:
+  using: composite
+  steps:
+    - name: Select the newest installed Xcode 26
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Prefer a newer Xcode 26 when the image has one. macos-15 stops at
+        # 26.3; macos-26 also has 26.5 and 26.6. BSD sort has no -V.
+        selected=""
+        for name in \
+          Xcode_26.6.app \
+          Xcode_26.5.app \
+          Xcode_26.4.1.app \
+          Xcode_26.4.app \
+          Xcode_26.3.app \
+          Xcode_26.2.app \
+          Xcode_26.1.1.app \
+          Xcode_26.1.app \
+          Xcode_26.0.1.app \
+          Xcode_26.0.app \
+          Xcode_26.app
+        do
+          if [[ -d "/Applications/$name" ]]; then
+            selected="/Applications/$name"
+            break
+          fi
+        done
+        if [[ -z "$selected" ]]; then
+          echo "No Xcode 26 is installed on this runner." >&2
+          ls -d /Applications/Xcode*.app >&2 || true
+          exit 1
+        fi
+        echo "Using $selected"
+        sudo xcode-select -s "$selected/Contents/Developer"
+        echo "DEVELOPER_DIR=$selected/Contents/Developer" >> "$GITHUB_ENV"
+        xcodebuild -version
+        xcode-select -p

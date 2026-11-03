@@ -22,7 +22,9 @@ struct RefreshSettingsView: View {
             } footer: {
                 Text("The in-app interval runs while Blinky is open. Background refresh and Live Activity use the second interval.")
             }
+            .blinkySettingsSection()
         }
+        .blinkySettingsCanvas()
         .navigationTitle("Refresh")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { refreshSettings = store.refreshSettings }

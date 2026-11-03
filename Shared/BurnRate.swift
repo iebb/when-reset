@@ -174,6 +174,8 @@ enum BurnRate {
         }
 
         let text: String
+        /// One short line for the collapsed card. `text` is the full sentence.
+        let brief: String
         let tone: Tone
         /// A quieter line under `text`. Set only while `Reading.earlyPace`
         /// is true and the line is an exhaustion estimate, not the
@@ -211,9 +213,13 @@ enum BurnRate {
             )
         }
         if reading.exhaustsBeforeReset, beforeReset, let seconds = reading.timeToExhaustion {
+            // `seconds` is time from now until the quota hits zero, and only
+            // when that moment is still before the reset. It is not the gap
+            // between empty and the reset, and it is not time past the reset.
             let when = span(seconds)
             return stated(
-                ForecastCopy.format("At the current pace, about %@ before the next reset.", when),
+                ForecastCopy.format("At the current pace, runs out in about %@.", when),
+                brief: ForecastCopy.format("Runs out in ~%@", compactSpan(seconds)),
                 tone: .beforeReset,
                 reading: reading
             )
@@ -227,19 +233,48 @@ enum BurnRate {
             )
         }
         if !reading.exhaustsBeforeReset {
-            return stated(ForecastCopy.text("Expected to last the window"), tone: .lasts, reading: reading)
+            return stated(
+                ForecastCopy.text("Expected to last the window"),
+                brief: ForecastCopy.text("At this pace: lasts until reset"),
+                tone: .lasts,
+                reading: reading
+            )
         }
         return nil
     }
 
-    private static func stated(_ text: String, tone: CardLine.Tone, reading: Reading) -> CardLine {
+    private static func stated(
+        _ text: String,
+        brief: String? = nil,
+        tone: CardLine.Tone,
+        reading: Reading
+    ) -> CardLine {
         CardLine(
             text: text,
+            brief: brief ?? text,
             tone: tone,
             note: reading.earlyPace && tone != .lasts
                 ? ForecastCopy.text("A fast start. The estimate is only a guide.")
                 : nil
         )
+    }
+
+    /// A short count for the collapsed card: "19.5h", "1d 13h".
+    static func compactSpan(_ seconds: TimeInterval) -> String {
+        switch rounded(seconds) {
+        case .underQuarter:
+            return ForecastCopy.text("<15m")
+        case .minutes(let minutes):
+            return ForecastCopy.format("%@m", "\(minutes)")
+        case .hour:
+            return ForecastCopy.text("1h")
+        case .hours(let text):
+            return ForecastCopy.format("%@h", text)
+        case .days(let days, nil):
+            return ForecastCopy.format("%@d", "\(days)")
+        case .days(let days, let hours?):
+            return ForecastCopy.format("%@d %@h", "\(days)", "\(hours)")
+        }
     }
 
     /// The line the card draws under one window.

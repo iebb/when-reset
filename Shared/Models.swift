@@ -780,6 +780,29 @@ enum CountdownDisplay {
         string(until: expiry, from: date)
     }
 
+    /// Secondary countdown: "Resets in 3h 29m", not a clock the size of the label.
+    static func resetsInPhrase(until expiry: Date, from date: Date = .now) -> String {
+        let remaining = max(0, Int(expiry.timeIntervalSince(date).rounded(.down)))
+        let locale = AppLanguage.current.locale
+        let days = remaining / 86_400
+        let hours = (remaining % 86_400) / 3_600
+        let minutes = (remaining % 3_600) / 60
+        let body: String
+        if days > 0 {
+            body = String(format: String.localized("%lldd %lldh"), locale: locale, Int64(days), Int64(hours))
+        } else if hours > 0 {
+            body = String(
+                format: String.localized("%lldh %02lldm"),
+                locale: locale,
+                Int64(hours),
+                Int64(minutes)
+            )
+        } else {
+            body = String(format: String.localized("%lldm"), locale: locale, Int64(max(minutes, remaining == 0 ? 0 : 1)))
+        }
+        return String(format: String.localized("Resets in %@"), locale: locale, body)
+    }
+
     static func compactString(until expiry: Date, from date: Date = .now) -> String {
         let remainingSeconds = max(0, Int(expiry.timeIntervalSince(date).rounded(.down)))
         let locale = AppLanguage.current.locale

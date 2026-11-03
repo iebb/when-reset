@@ -48,6 +48,7 @@ struct AppearanceSettingsView: View {
             } footer: {
                 Text("Follows the system until you choose light or dark.")
             }
+            .blinkySettingsSection()
             Section {
                 Picker("Interface style", selection: interfaceStyleSelection) {
                     ForEach(InterfaceStyle.allCases) { style in
@@ -56,8 +57,9 @@ struct AppearanceSettingsView: View {
                 }
                 .accessibilityIdentifier("interface-style")
             } footer: {
-                Text("Classic is a plain list. Screen Time sets the meter apart from the extra lines. Liquid Glass uses the system glass.")
+                Text("Classic is a plain grouped list. Screen Time uses a rounded percent and block bars. Liquid Glass is one glass card.")
             }
+            .blinkySettingsSection()
             Section {
                 Picker("Progress bars", selection: barStyleSelection) {
                     ForEach(UsageBarStyle.allCases) { style in
@@ -68,7 +70,9 @@ struct AppearanceSettingsView: View {
             } footer: {
                 Text("Segmented draws remaining allowance as ticks. Continuous draws one bar.")
             }
+            .blinkySettingsSection()
         }
+        .blinkySettingsCanvas()
         .navigationTitle("Appearance")
         .navigationBarTitleDisplayMode(.inline)
     }

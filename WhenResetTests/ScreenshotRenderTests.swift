@@ -32,11 +32,11 @@ final class ScreenshotRenderTests: XCTestCase {
             let now = Date(timeIntervalSince1970: 1_000)
             XCTAssertEqual(
                 CountdownDisplay.compactString(until: now.addingTimeInterval(3 * 3_600), from: now),
-                "3小时"
+                "3 小时"
             )
             XCTAssertEqual(
                 CountdownDisplay.compactString(until: now.addingTimeInterval(5 * 86_400), from: now),
-                "5天"
+                "5 天"
             )
         }
         let seeded = ScreenshotFixture.seed()
@@ -44,26 +44,28 @@ final class ScreenshotRenderTests: XCTestCase {
         let rows = ScreenshotFixture.activityRows()
         let prefix = "\(language.screenshotPrefix)-\(appearance.rawValue)"
         let scheme = appearance.colorScheme ?? .light
-        attach(
-            ScreenshotUsageList(snapshots: Array(snapshots.prefix(4)), showsSecondLimit: false)
-                .screenshotChrome(language: language, scheme: scheme),
-            name: "\(prefix)-06-widget-medium",
-            scale: 2,
-            size: CGSize(width: 364, height: 170)
-        )
+        for style in [InterfaceStyle.classic, .screenTime, .liquidGlass] {
+            attach(
+                ScreenshotUsageList(snapshots: Array(snapshots.prefix(4)), showsSecondLimit: false)
+                    .screenshotChrome(language: language, scheme: scheme, interfaceStyle: style),
+                name: "\(prefix)-widget-medium-\(style.rawValue)",
+                scale: 2,
+                size: CGSize(width: 364, height: 170)
+            )
+            attach(
+                ScreenshotLiveLock(rows: rows)
+                    .screenshotChrome(language: language, scheme: scheme, interfaceStyle: style),
+                name: "\(prefix)-live-\(style.rawValue)",
+                scale: 2,
+                size: CGSize(width: 360, height: 320)
+            )
+        }
         attach(
             ScreenshotUsageList(snapshots: snapshots, showsSecondLimit: true)
-                .screenshotChrome(language: language, scheme: scheme),
+                .screenshotChrome(language: language, scheme: scheme, interfaceStyle: .liquidGlass),
             name: "\(prefix)-07-widget-large",
             scale: 2,
             size: CGSize(width: 364, height: 382)
-        )
-        attach(
-            ScreenshotLiveLock(rows: rows)
-                .screenshotChrome(language: language, scheme: scheme),
-            name: "\(prefix)-08-live-activity-lock",
-            scale: 2,
-            size: CGSize(width: 360, height: 280)
         )
         attach(
             ScreenshotLiveCompact(rows: rows)
@@ -97,9 +99,14 @@ private extension AppLanguage {
 }
 
 private extension View {
-    func screenshotChrome(language: AppLanguage, scheme: ColorScheme) -> some View {
+    func screenshotChrome(
+        language: AppLanguage,
+        scheme: ColorScheme,
+        interfaceStyle: InterfaceStyle = .liquidGlass
+    ) -> some View {
         environment(\.locale, language.locale)
             .environment(\.usageBarStyle, .continuous)
+            .environment(\.interfaceStyle, interfaceStyle)
             .environment(\.colorScheme, scheme)
             .preferredColorScheme(scheme)
     }

@@ -26,6 +26,9 @@ final class CodexResetStore {
     private var poll: Task<Void, Never>?
     private var sleeper: Task<Void, Never>?
     private var lastWindows: [UUID: [ForecastWindow]] = [:]
+    #if DEBUG
+    private var didInstallScreenshotFixture = false
+    #endif
 
     private init() {
         guard let disk = CodexResetDisk.load() else { return }
@@ -39,8 +42,22 @@ final class CodexResetStore {
         freshUntil = plan.freshUntil
     }
 
+    #if DEBUG
+    /// Screenshot launches never reach the network. The fixture status is what the card draws.
+    func useScreenshotFixture(_ status: CodexResetStatus) {
+        self.status = status
+        freshUntil = .distantFuture
+    }
+    #endif
+
     func display(at now: Date = .now) -> CodexResetStatus? {
-        CodexResetQuiet.displayed(status, quiet: quiet, now: now)
+        #if DEBUG
+        if ScreenshotLaunch.isActive, !didInstallScreenshotFixture {
+            ScreenshotLaunch.installCodexFixture(now: now)
+            didInstallScreenshotFixture = true
+        }
+        #endif
+        return CodexResetQuiet.displayed(status, quiet: quiet, now: now)
     }
 
     func ensurePolling() {

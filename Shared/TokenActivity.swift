@@ -169,19 +169,19 @@ struct TokenPerformanceRow: Equatable, Identifiable, Sendable {
 
 struct TokenPerformanceTable: Equatable, Sendable {
     enum Column: String, CaseIterable, Identifiable, Sendable {
-        case speed
         case cache
         case input
         case output
+        case speed
 
         var id: String { rawValue }
 
         var title: String {
             switch self {
-            case .speed: String.localized("tok/s")
             case .cache: String.localized("Cache")
             case .input: String.localized("Input")
             case .output: String.localized("Output")
+            case .speed: String.localized("Speed")
             }
         }
     }
@@ -202,10 +202,151 @@ struct TokenPerformanceTable: Equatable, Sendable {
 extension TokenPerformanceRow {
     func value(for column: TokenPerformanceTable.Column) -> Double? {
         switch column {
-        case .speed: tokensPerSecond
         case .cache: cache.map(Double.init)
         case .input: input.map(Double.init)
         case .output: output.map(Double.init)
+        case .speed: tokensPerSecond
         }
+    }
+}
+
+/// One model's tokens on one day. Cache, input, and output partition `total`.
+/// A missing cache is unreported, not zero.
+struct TokenModelUsage: Equatable, Sendable, Identifiable {
+    var name: String
+    var cache: Int?
+    var input: Int
+    var output: Int
+    var tokensPerSecond: Double?
+
+    var id: String { name }
+    var total: Int { (cache ?? 0) + input + output }
+}
+
+struct TokenDayUsage: Equatable, Sendable {
+    var date: Date
+    var models: [TokenModelUsage]
+    var total: Int { models.reduce(0) { $0 + $1.total } }
+}
+
+/// The performance block's window. Independent of how the year chart is drawn.
+enum TokenPerformanceSpan: String, CaseIterable, Identifiable, Sendable {
+    case sevenDays
+    case thirtyDays
+    case all
+
+    static let `default` = TokenPerformanceSpan.thirtyDays
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .sevenDays: String.localized("7d")
+        case .thirtyDays: String.localized("30d")
+        case .all: String.localized("All")
+        }
+    }
+
+    var caption: String {
+        switch self {
+        case .sevenDays: String.localized("Last 7 days")
+        case .thirtyDays: String.localized("Last 30 days")
+        case .all: String.localized("Last 12 months")
+        }
+    }
+
+    /// Rolling length. Nil means the same twelve-month window as the chart.
+    var dayCount: Int? {
+        switch self {
+        case .sevenDays: 7
+        case .thirtyDays: 30
+        case .all: nil
+        }
+    }
+}
+
+struct TokenSpanSummary: Equatable, Sendable {
+    var total = 0
+    /// Cache reads divided by cache reads plus fresh input. Nil when nobody reported cache.
+    var cacheHit: Double?
+    var averageSpeed: Double?
+    var models: [TokenModelUsage] = []
+}
+
+enum TokenSpanMath {
+    private struct Bucket {
+        var cache: Int?
+        var input = 0
+        var output = 0
+        var speedWeight = 0
+        var speedSum = 0.0
+    }
+
+    static func summary(
+        records: [TokenDayUsage],
+        span: TokenPerformanceSpan,
+        now: Date = .now,
+        calendar: Calendar = .current
+    ) -> TokenSpanSummary {
+        let today = calendar.startOfDay(for: now)
+        let filtered = records.filter { record in
+            let day = calendar.startOfDay(for: record.date)
+            guard day <= today else { return false }
+            if let count = span.dayCount {
+                let start = calendar.date(byAdding: .day, value: -(count - 1), to: today) ?? today
+                return day >= calendar.startOfDay(for: start)
+            }
+            return day >= TokenActivity.window(today: today, calendar: calendar).start
+        }
+
+        var buckets: [String: Bucket] = [:]
+        var order: [String] = []
+        for record in filtered {
+            for model in record.models {
+                var bucket = buckets[model.name] ?? Bucket()
+                if buckets[model.name] == nil { order.append(model.name) }
+                bucket.input += model.input
+                bucket.output += model.output
+                if let cache = model.cache {
+                    bucket.cache = (bucket.cache ?? 0) + cache
+                }
+                if let speed = model.tokensPerSecond, model.total > 0 {
+                    bucket.speedWeight += model.total
+                    bucket.speedSum += speed * Double(model.total)
+                }
+                buckets[model.name] = bucket
+            }
+        }
+
+        var models: [TokenModelUsage] = order.compactMap { name in
+            guard let bucket = buckets[name] else { return nil }
+            return TokenModelUsage(
+                name: name,
+                cache: bucket.cache,
+                input: bucket.input,
+                output: bucket.output,
+                tokensPerSecond: bucket.speedWeight > 0 ? bucket.speedSum / Double(bucket.speedWeight) : nil
+            )
+        }
+        models.sort { $0.total > $1.total }
+        let cache = models.reduce(0) { $0 + ($1.cache ?? 0) }
+        let input = models.reduce(0) { $0 + $1.input }
+        let speedWeight = models.reduce(0) { $0 + ($1.tokensPerSecond == nil ? 0 : $1.total) }
+        let speedSum = models.reduce(0.0) { partial, model in
+            guard let speed = model.tokensPerSecond else { return partial }
+            return partial + speed * Double(model.total)
+        }
+        let hit: Double?
+        if models.contains(where: { $0.cache != nil }), cache + input > 0 {
+            hit = Double(cache) / Double(cache + input)
+        } else {
+            hit = nil
+        }
+        return TokenSpanSummary(
+            total: models.reduce(0) { $0 + $1.total },
+            cacheHit: hit,
+            averageSpeed: speedWeight > 0 ? speedSum / Double(speedWeight) : nil,
+            models: models
+        )
     }
 }

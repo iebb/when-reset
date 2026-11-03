@@ -4,6 +4,7 @@ import SwiftUI
 struct SettingsView: View {
     let onStageWorkerLink: (WorkerLinkDraft) -> Void
     @Environment(UpdateCheckController.self) private var updates
+    @Environment(\.interfaceStyle) private var interfaceStyle
 
     var body: some View {
         NavigationStack {
@@ -34,15 +35,20 @@ struct SettingsView: View {
                         WorkerSettingsView(onStageWorkerLink: onStageWorkerLink)
                     }
                 }
+                .blinkySettingsSection()
                 Section {
                     moduleLink("About", systemImage: "info.circle", identifier: "settings-module-about") {
                         AboutSettingsView()
                     }
                     .badge(updates.showsAboutBadge ? 1 : 0)
                 }
+                .blinkySettingsSection()
             }
+            .blinkySettingsCanvas()
             .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.large)
         }
+        .blinkyScreenBackdrop(interfaceStyle)
     }
 
     private func moduleLink<Destination: View>(

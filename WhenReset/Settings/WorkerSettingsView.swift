@@ -70,6 +70,7 @@ struct WorkerSettingsView: View {
                 }
             }
         }
+        .blinkySettingsCanvas()
         .navigationTitle("Self-hosted Worker")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { pushServerSettings = store.pushServerSettings }

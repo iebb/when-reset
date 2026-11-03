@@ -1,9 +1,8 @@
 name: UI screenshots
 
 on:
+  workflow_call:
   workflow_dispatch:
-  pull_request:
-    branches: [master]
 
 permissions:
   contents: read
@@ -15,13 +14,23 @@ concurrency:
 jobs:
   screenshots:
     name: Simulator screenshots
-    runs-on: macos-26
-    timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+    # Intel pool, same Xcode 26 image as CI. workflow_dispatch is declared
+    # above so this can be started by hand after the iOS job is green.
+    # timeout-minutes starts when a runner starts the job, not while queued.
+    # One Intel pass of the full en/zh × light/dark × 3 styles matrix, plus
+    # export, ran into the old 45 minute limit and the job was cancelled
+    # after the artifact uploaded. 90 covers that pass and a simulator retry.
+    # A second parallel macOS job would queue behind the same scarce runner.
+    runs-on: macos-15-intel
+    timeout-minutes: 90
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Select Xcode 26
+        uses: ./.github/actions/select-xcode
 
       - name: Generate the Xcode project
         run: |

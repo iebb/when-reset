@@ -23,6 +23,30 @@ enum ScreenshotLaunch {
     }
 
     /// Forces a light or dark interface and the continuous bar so captures stay deterministic.
+    /// A fixed Codex Resets reading so the expanded card can show the prediction
+    /// and the last announcement without calling the network.
+    @MainActor
+    static func installCodexFixture(now: Date = .now) {
+        guard isActive else { return }
+        CodexResetStore.shared.useScreenshotFixture(CodexResetStatus(
+            scheduled: nil,
+            watch: CodexResetStatus.Watch(
+                level: "elevated",
+                chancePercent: 40,
+                forecastWindow: "this week",
+                windowEnds: now.addingTimeInterval(21 * 3_600),
+                text: nil,
+                resetType: "regular"
+            ),
+            latest: CodexResetStatus.Latest(
+                id: "screenshot-latest",
+                resetType: "regular",
+                announcedAt: now.addingTimeInterval(-2 * 86_400),
+                text: nil
+            )
+        ))
+    }
+
     static func applyChrome() {
         guard isActive else { return }
         switch argument(after: "-BlinkyScreenshotAppearance") {
@@ -40,6 +64,72 @@ enum ScreenshotLaunch {
             InterfaceStyle.choose(.screenTime)
         default:
             InterfaceStyle.choose(.liquidGlass)
+        }
+    }
+
+    static var tokenChart: TokenActivityChart {
+        switch screen {
+        case "tokenActivityWeekly": .weekly
+        case "tokenActivityCumulative": .cumulative
+        default: .daily
+        }
+    }
+
+    static var seedsTokenActivity: Bool {
+        switch screen {
+        case "tokenActivity", "tokenActivityWeekly", "tokenActivityCumulative", "tokenActivityExpanded": true
+        default: false
+        }
+    }
+
+    /// A year of days. Each day's cache, input, and output sum to that day's total.
+    /// Only the screenshot launch uses this. A phone with no transcripts stays empty.
+    static func tokenActivityRecords(now: Date = .now, calendar: Calendar = .current) -> [TokenDayUsage] {
+        let today = calendar.startOfDay(for: now)
+        var records: [TokenDayUsage] = []
+        for offset in 0..<360 {
+            guard let date = calendar.date(byAdding: .day, value: -offset, to: today) else { continue }
+            let weekday = calendar.component(.weekday, from: date)
+            let weekend = weekday == 1 || weekday == 7
+            if offset % 13 == 0 { continue }
+            let wave = (offset * 17) % 40
+            var total = (weekend ? 12_000 : 48_000) + wave * 2_200
+            if offset % 23 == 0 { total += 220_000 }
+            let shares = split(total, weights: [50, 32, 18])
+            records.append(TokenDayUsage(date: date, models: [
+                model("gpt-5.4", total: shares[0], cache: 55, input: 32, output: 13, speed: 51.4),
+                model("claude-sonnet", total: shares[1], cache: 45, input: 38, output: 17, speed: 38.2),
+                model("grok-4", total: shares[2], cache: nil, input: 75, output: 25, speed: 62.0),
+            ]))
+        }
+        return records
+    }
+
+    private static func model(
+        _ name: String,
+        total: Int,
+        cache: Int?,
+        input: Int,
+        output: Int,
+        speed: Double
+    ) -> TokenModelUsage {
+        if let cache {
+            let parts = split(total, weights: [cache, input, output])
+            return TokenModelUsage(name: name, cache: parts[0], input: parts[1], output: parts[2], tokensPerSecond: speed)
+        }
+        let parts = split(total, weights: [input, output])
+        return TokenModelUsage(name: name, cache: nil, input: parts[0], output: parts[1], tokensPerSecond: speed)
+    }
+
+    /// Integer parts that sum to `total`. The last weight takes the remainder.
+    private static func split(_ total: Int, weights: [Int]) -> [Int] {
+        let sum = max(weights.reduce(0, +), 1)
+        var assigned = 0
+        return weights.enumerated().map { index, weight in
+            if index == weights.count - 1 { return total - assigned }
+            let part = total * weight / sum
+            assigned += part
+            return part
         }
     }
 
@@ -61,9 +151,10 @@ enum ScreenshotFixture {
         let samples: [(ProviderID, String, String, Double, Double, Bool)] = [
             // Remaining percents are intentionally not sorted. Widgets must
             // keep this custom order instead of lining up lowest-remaining first.
+            // Three remaining tiers, in custom order: comfortable, warning (≤25%), exhausted.
             (.chatGPT, "Kong Yi", "Pro", 15, 25, true),
-            (.chatGPT, "Work", "Plus", 10, 55, true),
-            (.grok, "Grok", "Heavy", 78, 42, false),
+            (.chatGPT, "Work", "Plus", 80, 78, true),
+            (.grok, "Grok", "Heavy", 100, 42, false),
             (.kimi, "Kimi Code", "Plus", 0, 8, false),
             (.zai, "z.ai", "Pro", 40, 33, false),
             (.zhipu, "智谱", "Max", 26, 41, false),
@@ -89,7 +180,7 @@ enum ScreenshotFixture {
                         id: "banked-\(index)",
                         expiresAt: now.addingTimeInterval(5 * 3_600),
                         status: "available",
-                        grantedAt: now.addingTimeInterval(-86_400)
+                        grantedAt: now.addingTimeInterval(-3 * 3_600)
                     )
                 ]
             }

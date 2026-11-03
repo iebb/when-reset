@@ -121,10 +121,8 @@ jobs:
     needs: prepare
     if: needs.prepare.outputs.should_release == 'true'
     name: Upload ${{ matrix.platform }}
-    runs-on: macos-26
+    runs-on: macos-15-intel
     timeout-minutes: 90
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -133,6 +131,9 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@v6
+
+      - name: Select Xcode 26
+        uses: ./.github/actions/select-xcode
 
       - name: Verify toolchain
         run: xcodebuild -version

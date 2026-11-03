@@ -86,6 +86,7 @@ enum InterfaceStyle: String, CaseIterable, Identifiable, Sendable {
     static func choose(_ style: InterfaceStyle) {
         UserDefaults.standard.set(style.rawValue, forKey: storageKey)
         UserDefaults(suiteName: AppIdentity.appGroupIdentifier)?.set(style.rawValue, forKey: storageKey)
+        AppAppearance.reloadWidgets()
         NotificationCenter.default.post(name: .blinkyInterfaceStyleChanged, object: style)
     }
 }
@@ -162,6 +163,7 @@ extension View {
     func blinkyUsageChrome(colorScheme: ColorScheme? = AppAppearance.current.colorScheme) -> some View {
         environment(\.locale, AppLanguage.current.locale)
             .environment(\.usageBarStyle, UsageBarStyle.current)
+            .environment(\.interfaceStyle, InterfaceStyle.current)
             .preferredColorScheme(colorScheme)
     }
 }
@@ -202,6 +204,7 @@ struct UsageBar: View {
     let track: Color
     let style: UsageBarStyle
     var scale: CGFloat = 1
+    var cap: UsageMeterCap = .round
 
     nonisolated static let continuousHeight: CGFloat = 6
     nonisolated static let segmentedHeight: CGFloat = 12
@@ -213,23 +216,43 @@ struct UsageBar: View {
             let clamped = min(max(fraction, 0), 1)
             switch style {
             case .continuous:
-                ZStack(alignment: .leading) {
-                    Capsule().fill(track)
-                    Capsule().fill(accent).frame(width: max(0, proxy.size.width * clamped))
+                let width = max(0, proxy.size.width * clamped)
+                switch cap {
+                case .round:
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(track)
+                        Capsule().fill(accent).frame(width: width)
+                    }
+                case .square:
+                    let shape = RoundedRectangle(cornerRadius: 2, style: .continuous)
+                    ZStack(alignment: .leading) {
+                        shape.fill(track)
+                        shape.fill(accent).frame(width: width)
+                    }
                 }
             case .segmented:
                 let ticks = Self.ticks(width: proxy.size.width, fraction: clamped, scale: scale)
                 HStack(spacing: Self.tickGap * scale) {
                     ForEach(0..<ticks.count, id: \.self) { index in
-                        Capsule()
-                            .fill(index < ticks.lit ? accent : track)
-                            .frame(width: Self.tickWidth * scale)
+                        tick(index < ticks.lit ? accent : track, width: Self.tickWidth * scale)
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             }
         }
         .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private func tick(_ color: Color, width: CGFloat) -> some View {
+        switch cap {
+        case .round:
+            Capsule().fill(color).frame(width: width)
+        case .square:
+            RoundedRectangle(cornerRadius: 1, style: .continuous)
+                .fill(color)
+                .frame(width: width)
+        }
     }
 
     nonisolated static func ticks(width: CGFloat, fraction: Double, scale: CGFloat = 1) -> (count: Int, lit: Int) {
@@ -249,16 +272,20 @@ struct UsageMeter: View {
     /// Usage cards draw a thicker continuous bar. Widgets stay compact.
     var prominent: Bool = false
     @Environment(\.usageBarStyle) private var style
+    @Environment(\.interfaceStyle) private var interfaceStyle
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
+        let metrics = interfaceStyle.continuousMeter(prominent: prominent)
+        let continuous = style == .continuous
         UsageBar(
             fraction: remainingFraction,
             accent: UsageMeterTint.color(remainingFraction: remainingFraction, colorScheme: colorScheme),
-            track: Color.primary.opacity(0.16),
-            style: style
+            track: Color.primary.opacity(continuous ? metrics.trackOpacity : 0.16),
+            style: style,
+            cap: metrics.cap
         )
         .frame(maxWidth: .infinity)
-        .frame(height: prominent && style == .continuous ? 14 : style.barHeight)
+        .frame(height: continuous ? metrics.height : style.barHeight)
     }
 }

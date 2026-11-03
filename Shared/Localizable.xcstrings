@@ -28,7 +28,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld天"
+            "value": "%lld 天"
           }
         }
       }
@@ -44,7 +44,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld小时"
+            "value": "%lld 小时"
           }
         }
       }
@@ -60,7 +60,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld小时%02lld分"
+            "value": "%lld 小时 %02lld 分"
           }
         }
       }
@@ -76,7 +76,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld天%lld小时"
+            "value": "%lld 天 %lld 小时"
           }
         }
       }
@@ -92,7 +92,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld分钟"
+            "value": "%lld 分钟"
           }
         }
       }
@@ -108,7 +108,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld%% 剩余"
+            "value": "剩余 %lld%%"
           }
         }
       }
@@ -657,18 +657,18 @@
         }
       }
     },
-    "Classic is a plain list. Screen Time sets the meter apart from the extra lines. Liquid Glass uses the system glass.": {
+    "Classic is a plain grouped list. Screen Time uses a rounded percent and block bars. Liquid Glass is one glass card.": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Classic is a plain list. Screen Time sets the meter apart from the extra lines. Liquid Glass uses the system glass."
+            "value": "Classic is a plain grouped list. Screen Time uses a rounded percent and block bars. Liquid Glass is one glass card."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "经典是普通列表。屏幕使用时间把额度条和附加信息分开。液态玻璃使用系统玻璃。"
+            "value": "经典是普通分组列表。屏幕使用时间用圆体百分比和方块进度条。液态玻璃是一张玻璃卡片。"
           }
         }
       }
@@ -716,7 +716,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "累计总量"
+            "value": "累计"
           }
         }
       }
@@ -748,7 +748,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "每天"
+            "value": "每日"
           }
         }
       }
@@ -796,7 +796,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "收起已存储的重置"
+            "value": "收起重置卡"
           }
         }
       }
@@ -893,6 +893,246 @@
           "stringUnit": {
             "state": "translated",
             "value": "剩余最少"
+          }
+        }
+      }
+    },
+    "No local transcripts": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No local transcripts"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有本地记录"
+          }
+        }
+      }
+    },
+    "This iPhone has no agent transcripts to read, so there is no token chart yet.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone has no agent transcripts to read, so there is no token chart yet."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这台 iPhone 上没有可读取的代理对话记录，所以这里还没有 Token 图表。"
+          }
+        }
+      }
+    },
+    "Less": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Less"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "少"
+          }
+        }
+      }
+    },
+    "More": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "多"
+          }
+        }
+      }
+    },
+    "7d": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "7d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "7 天"
+          }
+        }
+      }
+    },
+    "30d": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "30d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "30 天"
+          }
+        }
+      }
+    },
+    "All": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "All"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "全部"
+          }
+        }
+      }
+    },
+    "Last 7 days": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last 7 days"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近 7 天"
+          }
+        }
+      }
+    },
+    "Last 30 days": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last 30 days"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近 30 天"
+          }
+        }
+      }
+    },
+    "Last 12 months": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last 12 months"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近 12 个月"
+          }
+        }
+      }
+    },
+    "Total tokens": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Total tokens"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Token 总量"
+          }
+        }
+      }
+    },
+    "Cache hit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cache hit"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "缓存命中"
+          }
+        }
+      }
+    },
+    "Avg speed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Avg speed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "平均速度"
+          }
+        }
+      }
+    },
+    "Overall": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Overall"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "合计"
+          }
+        }
+      }
+    },
+    "Speed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Speed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "速度"
           }
         }
       }
@@ -1020,7 +1260,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "展开已存储的重置"
+            "value": "展开重置卡"
           }
         }
       }
@@ -1100,7 +1340,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已存储的重置"
+            "value": "重置卡"
           }
         }
       }
@@ -3996,7 +4236,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "显示已存储的重置"
+            "value": "显示重置卡"
           }
         }
       }
@@ -4573,6 +4813,86 @@
           "stringUnit": {
             "state": "translated",
             "value": "已更新"
+          }
+        }
+      }
+    },
+    "Updated %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Updated %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@更新"
+          }
+        }
+      }
+    },
+    "%llds ago": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%llds ago"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld 秒前"
+          }
+        }
+      }
+    },
+    "%lldm ago": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lldm ago"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld分钟前"
+          }
+        }
+      }
+    },
+    "%lldh ago": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lldh ago"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld小时前"
+          }
+        }
+      }
+    },
+    "%lldd ago": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lldd ago"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld天前"
           }
         }
       }
@@ -5564,7 +5884,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "用量额度和已存储的重置"
+            "value": "用量额度和重置卡"
           }
         }
       }
@@ -5665,18 +5985,50 @@
         }
       }
     },
-    "1 banked reset": {
+    "expires in %@": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 banked reset"
+            "value": "expires in %@"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "1 个已存储的重置"
+            "value": "%@后过期"
+          }
+        }
+      }
+    },
+    "next expires in %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "next expires in %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近一个 %@后过期"
+          }
+        }
+      }
+    },
+    "1 banked reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 reset card"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置卡 1 张"
           }
         }
       }
@@ -5686,13 +6038,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld banked resets"
+            "value": "%lld reset cards"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%lld 个已存储的重置"
+            "value": "重置卡 %lld 张"
           }
         }
       }
@@ -6172,7 +6524,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "检测到的额度重置和新增的已储存重置使用这个开关。意外或提前的重置，以及计划时间的提醒，还需要在「设置 → 通知」中打开对应开关。"
+            "value": "检测到的额度重置和新增的重置卡使用这个开关。意外或提前的重置，以及计划时间的提醒，还需要在「设置 → 通知」中打开对应开关。"
           }
         }
       }
@@ -6364,7 +6716,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "检测到的额度重置和新增的已储存重置，由每个账号的「发现重置时通知」开关控制。关闭意外重置不会关闭这两类提醒。"
+            "value": "检测到的额度重置和新增的重置卡，由每个账号的「发现重置时通知」开关控制。关闭意外重置不会关闭这两类提醒。"
           }
         }
       }
@@ -6492,7 +6844,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "只要至少有一个已包含的额度或已储存重置，就会显示。"
+            "value": "只要至少有一个已包含的额度或重置卡，就会显示。"
           }
         }
       }
@@ -6524,7 +6876,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有新的已储存重置"
+            "value": "有新的重置卡"
           }
         }
       }
@@ -6540,7 +6892,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "有新的已储存重置"
+            "value": "有新的重置卡"
           }
         }
       }
@@ -6556,7 +6908,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已为 %@ 添加一次新的已储存重置。"
+            "value": "已为 %@ 添加一张新的重置卡。"
           }
         }
       }
@@ -6572,7 +6924,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已为 %2$@ 添加 %1$lld 次新的已储存重置。"
+            "value": "已为 %2$@ 添加 %1$lld 张新的重置卡。"
           }
         }
       }
@@ -6588,7 +6940,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "已储存重置增加了"
+            "value": "重置卡增加了"
           }
         }
       }
@@ -6604,7 +6956,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$@ 现在有 %2$lld 次已储存重置可用。"
+            "value": "%1$@ 现在有 %2$lld 张重置卡可用。"
           }
         }
       }
@@ -6636,7 +6988,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%1$@ 的每周额度在计划重置前从 %2$lld%% 增加到 %3$lld%%。可能已使用一次已储存重置。"
+            "value": "%1$@ 的每周额度在计划重置前从 %2$lld%% 增加到 %3$lld%%。可能已使用一张重置卡。"
           }
         }
       }
@@ -6876,7 +7228,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "约 %@天"
+            "value": "约 %@ 天"
           }
         }
       }
@@ -6892,7 +7244,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "约 %@天%@小时"
+            "value": "约 %@ 天 %@ 小时"
           }
         }
       }
@@ -6908,7 +7260,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@天"
+            "value": "%@ 天"
           }
         }
       }
@@ -6924,7 +7276,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "%@天%@小时"
+            "value": "%@ 天 %@ 小时"
           }
         }
       }
@@ -7005,6 +7357,150 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@ · 重置前可能会用尽"
+          }
+        }
+      }
+    },
+    "Runs out in ~%@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Runs out in ~%@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "约 %@后用尽"
+          }
+        }
+      }
+    },
+    "At the current pace, runs out in about %@.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "At the current pace, runs out in about %@."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按当前速度，约 %@后用尽。"
+          }
+        }
+      }
+    },
+    "At this pace: lasts until reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "At this pace: lasts until reset"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "按当前速度：可撑到重置"
+          }
+        }
+      }
+    },
+    "~%@ before reset": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "~%@ before reset"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重置前约 %@"
+          }
+        }
+      }
+    },
+    "%@h": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@h"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 小时"
+          }
+        }
+      }
+    },
+    "%@m": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@m"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ 分钟"
+          }
+        }
+      }
+    },
+    "<15m": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15m"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟"
+          }
+        }
+      }
+    },
+    "1h": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1h"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 小时"
+          }
+        }
+      }
+    },
+    "Resets in %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resets in %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@后重置"
           }
         }
       }
@@ -7117,6 +7613,124 @@
           "stringUnit": {
             "state": "translated",
             "value": "限额"
+          }
+        }
+      }
+    },
+    "in ~%@": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "in ~%@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "约 %@后" } }
+      }
+    },
+    "Exhaustion forecast": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Exhaustion forecast" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "用尽预测" } }
+      }
+    },
+    "%@ is used up": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "%@ is used up" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%@已用尽" } }
+      }
+    },
+    "%@ runs out in ~%@": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "%@ out in ~%@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%@约 %@后用尽" } }
+      }
+    },
+    "Before reset · current pace": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Before reset · current pace" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "早于重置 · 按当前速度" } }
+      }
+    },
+    "tomorrow %@": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "tomorrow %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "明天 %@" } }
+      }
+    },
+    "Reset cards": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reset cards" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "重置卡" } }
+      }
+    },
+    "1 available": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "1 available" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "可用 1 张" } }
+      }
+    },
+    "%lld available": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "%lld available" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "可用 %lld 张" } }
+      }
+    },
+    "banked today %@": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "banked today %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "今天 %@ 存入" } }
+      }
+    },
+    "banked yesterday %@": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "banked yesterday %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "昨天 %@ 存入" } }
+      }
+    },
+    "banked %@": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "banked %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "%@ 存入" } }
+      }
+    },
+    "%lld more": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "%lld more" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "再显示 %lld 个" } }
+      }
+    },
+    "Expanded": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Expanded" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已展开" } }
+      }
+    },
+    "Collapsed": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Collapsed" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已收起" } }
+      }
+    },
+    "Spent %@": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Spent %@" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已用 %@" } }
+      }
+    },
+    "Unlimited": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Unlimited" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无限制" } }
+      }
+    },
+    "Forecast": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forecast"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预测"
           }
         }
       }

@@ -71,13 +71,18 @@ jobs:
 
   app:
     name: iOS and macOS
-    runs-on: macos-26
+    # Standard Intel image. It has Xcode 26.3, and it is a different pool
+    # from the arm64 macOS runners that GitHub cancels after 15 minutes
+    # with runner_id 0. timeout-minutes starts only after a runner starts
+    # the job. macos-15-large is a paid larger runner and is not required.
+    runs-on: macos-15-intel
     timeout-minutes: 45
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
     steps:
       - name: Check out source
         uses: actions/checkout@v4
+
+      - name: Select Xcode 26
+        uses: ./.github/actions/select-xcode
 
       - name: Verify toolchain
         run: |
@@ -183,3 +188,9 @@ jobs:
 
       - name: Test Linux installation and upgrade
         run: sudo env WHEN_RESET_INSTALL_TEST=1 bash scripts/test-linux-install.sh
+
+  screenshots:
+    name: Simulator screenshots
+    needs: app
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/ui-screenshots.yml

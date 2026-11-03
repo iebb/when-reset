@@ -20,6 +20,7 @@ struct LiveActivitySettingsView: View {
             } footer: {
                 Text(modeExplanation)
             }
+            .blinkySettingsSection()
             Section("Content") {
                 Toggle("Show percentage remaining", isOn: $settings.showRemainingPercentage)
                 Toggle("Show banked resets", isOn: $settings.showBankedResets)
@@ -27,7 +28,9 @@ struct LiveActivitySettingsView: View {
                     Toggle(account.resolvedDisplayName, isOn: liveActivityInclusion(account.id))
                 }
             }
+            .blinkySettingsSection()
         }
+        .blinkySettingsCanvas()
         .navigationTitle("Live Activity")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { settings = store.liveActivitySettings }

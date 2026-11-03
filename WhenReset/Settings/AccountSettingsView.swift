@@ -350,6 +350,7 @@ struct AccountSettingsView: View {
                 AccountUsageHistorySections(account: currentAccount, range: $historyRange)
             }
         }
+        .blinkySettingsCanvas()
         .navigationTitle(currentAccount.resolvedDisplayName)
         .onAppear {
             settings = store.settings(for: account)

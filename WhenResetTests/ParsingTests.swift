@@ -89,19 +89,29 @@ final class ParsingTests: XCTestCase {
 
     func testBankedCountdownUsesDaysAndSubdayClock() {
         let now = Date(timeIntervalSince1970: 1_000)
-        let expiry = now.addingTimeInterval(2 * 86_400 + 3 * 3_600 + 4 * 60 + 5)
-        XCTAssertEqual(CountdownDisplay.string(until: expiry, from: now), "2 days, 03:04:05")
+        let offset: TimeInterval = 183_845
+        let expiry = now.addingTimeInterval(offset)
+        let shown = CountdownDisplay.string(until: expiry, from: now)
+        XCTAssertEqual(shown, "2 days, 03:04:05")
     }
 
     func testCompactCountdownSwitchesFromMinutesToHoursAtOneHundredMinutes() {
         let now = Date(timeIntervalSince1970: 1_000)
-        XCTAssertEqual(CountdownDisplay.compactString(until: now.addingTimeInterval(99 * 60 + 59), from: now), "99m")
-        XCTAssertEqual(CountdownDisplay.compactString(until: now.addingTimeInterval(100 * 60), from: now), "1h")
-        XCTAssertEqual(CountdownDisplay.compactString(until: now.addingTimeInterval(48 * 3_600), from: now), "48h")
-        XCTAssertEqual(CountdownDisplay.compactString(until: now.addingTimeInterval(49 * 3_600), from: now), "2d")
-        XCTAssertEqual(CountdownDisplay.usageString(
-            until: now.addingTimeInterval(6 * 86_400 + 21 * 3_600 + 4 * 60 + 5), from: now
-        ), "6 days, 21:04:05")
+        let almostHundred = now.addingTimeInterval(5_999)
+        let hundred = now.addingTimeInterval(6_000)
+        let twoDays = now.addingTimeInterval(172_800)
+        let pastTwoDays = now.addingTimeInterval(176_400)
+        let week = now.addingTimeInterval(594_245)
+        let almostHundredText = CountdownDisplay.compactString(until: almostHundred, from: now)
+        let hundredText = CountdownDisplay.compactString(until: hundred, from: now)
+        let twoDaysText = CountdownDisplay.compactString(until: twoDays, from: now)
+        let pastTwoDaysText = CountdownDisplay.compactString(until: pastTwoDays, from: now)
+        let weekText = CountdownDisplay.usageString(until: week, from: now)
+        XCTAssertEqual(almostHundredText, "99m")
+        XCTAssertEqual(hundredText, "1h")
+        XCTAssertEqual(twoDaysText, "48h")
+        XCTAssertEqual(pastTwoDaysText, "2d")
+        XCTAssertEqual(weekText, "6 days, 21:04:05")
     }
 
     func testLiveActivityCountdownUsesRequestedDayHourAndNativeTimerTiers() {

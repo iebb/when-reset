@@ -9,27 +9,48 @@ final class ScreenshotUITests: XCTestCase {
         capture(language: "zh-Hans", prefix: "zh-Hans")
     }
 
+    /// Collapsed and expanded usage in both languages, both appearances, and
+    /// all three styles, plus a low-remaining card. Token activity stays on
+    /// its own screen and is not part of this pass.
     private func capture(language: String, prefix: String) {
         for appearance in ["light", "dark"] {
-            let name = "\(prefix)-\(appearance)"
-            for style in ["classic", "screenTime", "liquidGlass"] {
+            for style in ["liquidGlass", "classic", "screenTime"] {
+                let name = "\(prefix)-\(appearance)-\(style)"
                 shot(
                     language: language,
                     appearance: appearance,
                     interfaceStyle: style,
                     screen: "usage",
-                    name: "\(name)-\(style)-usage"
+                    name: "\(name)-usage"
+                )
+                shot(
+                    language: language,
+                    appearance: appearance,
+                    interfaceStyle: style,
+                    screen: "usageExpanded",
+                    name: "\(name)-usage-expanded"
                 )
             }
-            shot(language: language, appearance: appearance, screen: "reorder", name: "\(name)-02-usage-reorder")
-            shot(language: language, appearance: appearance, screen: "addAccount", name: "\(name)-03-add-account")
-            shot(language: language, appearance: appearance, screen: "deviceCode", name: "\(name)-04-device-code")
-            shot(language: language, appearance: appearance, screen: "settings", name: "\(name)-05-settings")
-            shot(language: language, appearance: appearance, screen: "settingsRoot", name: "\(name)-07-settings-root")
-            shot(language: language, appearance: appearance, screen: "about", name: "\(name)-08-about")
-            shot(language: language, appearance: appearance, screen: "notifications", name: "\(name)-09-notifications")
-            shot(language: language, appearance: appearance, screen: "forecasts", name: "\(name)-06-forecasts")
-            shot(language: language, appearance: appearance, screen: "tokenActivity", name: "\(name)-10-token-activity")
+        }
+        for appearance in ["light", "dark"] {
+            shot(
+                language: language,
+                appearance: appearance,
+                interfaceStyle: "liquidGlass",
+                screen: "usageDanger",
+                name: "\(prefix)-\(appearance)-liquidGlass-usage-danger"
+            )
+        }
+        if language == "zh-Hans" {
+            for style in ["classic", "screenTime"] {
+                shot(
+                    language: language,
+                    appearance: "light",
+                    interfaceStyle: style,
+                    screen: "usageDanger",
+                    name: "\(prefix)-light-\(style)-usage-danger"
+                )
+            }
         }
     }
 
@@ -49,6 +70,7 @@ final class ScreenshotUITests: XCTestCase {
             "-BlinkyScreenshotScreen", screen,
         ]
         app.launch()
+        dismissSystemAlerts(app)
 
         switch screen {
         case "addAccount":
@@ -81,9 +103,8 @@ final class ScreenshotUITests: XCTestCase {
             let style = app.staticTexts["Interface style"]
             let chineseStyle = app.staticTexts["界面风格"]
             XCTAssertTrue(style.exists || chineseStyle.waitForExistence(timeout: 4))
-            let glass = app.staticTexts["Liquid Glass"]
-            let chineseGlass = app.staticTexts["液态玻璃"]
-            XCTAssertTrue(glass.exists || chineseGlass.exists)
+            let selected = selectedInterfaceStyleTitle(language: language, interfaceStyle: interfaceStyle)
+            XCTAssertTrue(app.staticTexts[selected].waitForExistence(timeout: 4))
             let bars = app.staticTexts["Progress bars"]
             let chineseBars = app.staticTexts["进度条"]
             XCTAssertTrue(bars.exists || chineseBars.exists)
@@ -144,24 +165,115 @@ final class ScreenshotUITests: XCTestCase {
                     || chineseUnexpected.exists
             )
         case "tokenActivity":
-            openSettingsModule(app, english: "Token activity", chinese: "Token 活动")
-            let empty = app.staticTexts["No token records on this iPhone yet."]
-            let chineseEmpty = app.staticTexts["这台 iPhone 上还没有 Token 记录。"]
-            XCTAssertTrue(empty.waitForExistence(timeout: 8) || chineseEmpty.waitForExistence(timeout: 4))
+            openTokenActivity(app)
+            let legend = language == "zh-Hans" ? "少" : "Less"
+            XCTAssertTrue(app.staticTexts[legend].waitForExistence(timeout: 15))
+            XCTAssertTrue(app.staticTexts["gpt-5.4"].waitForExistence(timeout: 8))
+        case "tokenActivityWeekly":
+            openTokenActivity(app)
+            XCTAssertTrue(app.descendants(matching: .any)["token-activity-weekly"].waitForExistence(timeout: 12))
+        case "tokenActivityCumulative":
+            openTokenActivity(app)
+            XCTAssertTrue(app.descendants(matching: .any)["token-activity-cumulative"].waitForExistence(timeout: 12))
+        case "tokenActivityEmpty":
+            openTokenActivity(app)
+            XCTAssertTrue(app.descendants(matching: .any)["token-activity-empty"].waitForExistence(timeout: 12))
+            let empty = app.staticTexts["No local transcripts"]
+            let chineseEmpty = app.staticTexts["没有本地记录"]
+            XCTAssertTrue(empty.exists || chineseEmpty.exists)
+        case "tokenActivityExpanded":
+            openTokenActivity(app)
+            let missingCache = app.staticTexts["—"]
+            var swipes = 0
+            while !missingCache.isHittable && swipes < 5 {
+                app.swipeUp()
+                swipes += 1
+            }
+            XCTAssertTrue(missingCache.waitForExistence(timeout: 8))
+        case "usageExpanded":
+            let disclosure = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier == %@", "forecasts-disclosure"))
+                .element(boundBy: 0)
+            XCTAssertTrue(disclosure.waitForExistence(timeout: 12))
+            disclosure.tap()
+            let forecastHeader = language == "zh-Hans" ? "用尽预测" : "Exhaustion forecast"
+            let resetHeader = language == "zh-Hans" ? "重置卡" : "Reset cards"
+            let pace = language == "zh-Hans" ? "早于重置" : "Before reset"
+            XCTAssertTrue(
+                app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", forecastHeader))
+                    .firstMatch
+                    .waitForExistence(timeout: 6)
+            )
+            XCTAssertTrue(
+                app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", resetHeader))
+                    .firstMatch
+                    .waitForExistence(timeout: 4)
+            )
+            XCTAssertTrue(app.descendants(matching: .any)["usage-footer-codex"].waitForExistence(timeout: 4))
+            XCTAssertTrue(
+                app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", pace))
+                    .firstMatch
+                    .waitForExistence(timeout: 4)
+            )
+            XCTAssertFalse(app.staticTexts["估算价值"].exists)
+            XCTAssertFalse(app.staticTexts["Estimated value"].exists)
+        case "usageDanger":
+            let exhausted = language == "zh-Hans" ? "剩余 0%" : "0% left"
+            var swipes = 0
+            while !app.staticTexts[exhausted].isHittable && swipes < 4 {
+                app.swipeUp()
+                swipes += 1
+            }
+            XCTAssertTrue(app.staticTexts[exhausted].waitForExistence(timeout: 8))
         case "reorder":
             let done = app.buttons["Done"]
             let chineseDone = app.buttons["完成"]
             XCTAssertTrue(done.waitForExistence(timeout: 12) || chineseDone.waitForExistence(timeout: 4))
         default:
             XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 15))
+            XCTAssertTrue(
+                app.descendants(matching: .any)["usage-style-\(interfaceStyle)"].waitForExistence(timeout: 8)
+            )
         }
 
         RunLoop.current.run(until: Date().addingTimeInterval(0.8))
+        dismissSystemAlerts(app)
         let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
         app.terminate()
+    }
+
+    /// The simulator sometimes asks for an Apple Account. That sheet covers the card.
+    private func dismissSystemAlerts(_ app: XCUIApplication) {
+        let monitor = addUIInterruptionMonitor(withDescription: "System alert") { alert in
+            for label in ["Not Now", "以后", "Cancel", "取消", "Don't Allow", "不允许"] {
+                if alert.buttons[label].exists {
+                    alert.buttons[label].tap()
+                    return true
+                }
+            }
+            return false
+        }
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        var dismissed = false
+        for label in ["Not Now", "以后", "Cancel", "取消"] {
+            let systemButton = springboard.buttons[label]
+            if systemButton.exists {
+                systemButton.tap()
+                dismissed = true
+            }
+            let appButton = app.buttons[label]
+            if appButton.exists {
+                appButton.tap()
+                dismissed = true
+            }
+        }
+        if !dismissed && (springboard.alerts.firstMatch.exists || app.alerts.firstMatch.exists) {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.08)).tap()
+        }
+        removeUIInterruptionMonitor(monitor)
     }
 
     private func openIdentifier(_ app: XCUIApplication, _ identifier: String) {
@@ -173,6 +285,10 @@ final class ScreenshotUITests: XCTestCase {
         }
         XCTAssertTrue(row.waitForExistence(timeout: 8))
         row.tap()
+    }
+
+    private func openTokenActivity(_ app: XCUIApplication) {
+        openSettingsModule(app, english: "Token activity", chinese: "Token 活动")
     }
 
     private func openSettingsModule(_ app: XCUIApplication, english: String, chinese: String) {
@@ -188,6 +304,19 @@ final class ScreenshotUITests: XCTestCase {
             row.tap()
         } else {
             chineseRow.tap()
+        }
+    }
+
+    /// The appearance picker shows only the selected style until it is opened.
+    private func selectedInterfaceStyleTitle(language: String, interfaceStyle: String) -> String {
+        let chinese = language == "zh-Hans"
+        switch interfaceStyle {
+        case "classic":
+            return chinese ? "经典" : "Classic"
+        case "screenTime":
+            return chinese ? "屏幕使用时间" : "Screen Time"
+        default:
+            return chinese ? "液态玻璃" : "Liquid Glass"
         }
     }
 }

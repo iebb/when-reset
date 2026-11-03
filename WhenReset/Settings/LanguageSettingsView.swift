@@ -25,7 +25,9 @@ struct LanguageSettingsView: View {
             } footer: {
                 Text("English and Simplified Chinese follow the system language until you choose one here.")
             }
+            .blinkySettingsSection()
         }
+        .blinkySettingsCanvas()
         .navigationTitle("Language")
         .navigationBarTitleDisplayMode(.inline)
     }
