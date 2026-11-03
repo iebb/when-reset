@@ -39,29 +39,57 @@ final class ScreenshotRenderTests: XCTestCase {
                 "5 天"
             )
         }
-        let seeded = ScreenshotFixture.seed()
+        let now = Date()
+        let seeded = ScreenshotFixture.seed(now: now)
         let snapshots = seeded.accounts.compactMap { seeded.snapshots[$0.id] }
-        let rows = ScreenshotFixture.activityRows()
+        let rows = ScreenshotFixture.activityRows(now: now)
         let prefix = "\(language.screenshotPrefix)-\(appearance.rawValue)"
         let scheme = appearance.colorScheme ?? .light
+        let withCards = snapshots.first { ResetCardSurface.fact(snapshot: $0, now: now) != nil }
+        let withoutCards = snapshots.first { ResetCardSurface.fact(snapshot: $0, now: now) == nil }
         for style in [InterfaceStyle.classic, .screenTime, .liquidGlass] {
+            if let withCards {
+                attach(
+                    ScreenshotSmallUsage(snapshot: withCards, now: now)
+                        .screenshotChrome(language: language, scheme: scheme, interfaceStyle: style),
+                    name: "\(prefix)-widget-small-\(style.rawValue)",
+                    scale: 2,
+                    size: CGSize(width: 170, height: 170)
+                )
+            }
+            if let withoutCards {
+                attach(
+                    ScreenshotSmallUsage(snapshot: withoutCards, now: now)
+                        .screenshotChrome(language: language, scheme: scheme, interfaceStyle: style),
+                    name: "\(prefix)-widget-small-none-\(style.rawValue)",
+                    scale: 2,
+                    size: CGSize(width: 170, height: 170)
+                )
+            }
             attach(
-                ScreenshotUsageList(snapshots: Array(snapshots.prefix(4)), showsSecondLimit: false)
+                ScreenshotUsageList(snapshots: Array(snapshots.prefix(4)), showsSecondLimit: false, now: now)
                     .screenshotChrome(language: language, scheme: scheme, interfaceStyle: style),
                 name: "\(prefix)-widget-medium-\(style.rawValue)",
                 scale: 2,
                 size: CGSize(width: 364, height: 170)
             )
             attach(
-                ScreenshotLiveLock(rows: rows)
+                ScreenshotLiveLock(rows: rows, now: now)
                     .screenshotChrome(language: language, scheme: scheme, interfaceStyle: style),
                 name: "\(prefix)-live-\(style.rawValue)",
                 scale: 2,
                 size: CGSize(width: 360, height: 320)
             )
+            attach(
+                ScreenshotLiveLock(rows: Array(rows.prefix(3)), now: now, onDarkSurface: true)
+                    .screenshotChrome(language: language, scheme: .dark, interfaceStyle: style),
+                name: "\(prefix)-island-\(style.rawValue)",
+                scale: 2,
+                size: CGSize(width: 360, height: 260)
+            )
         }
         attach(
-            ScreenshotUsageList(snapshots: snapshots, showsSecondLimit: true)
+            ScreenshotUsageList(snapshots: snapshots, showsSecondLimit: true, now: now)
                 .screenshotChrome(language: language, scheme: scheme, interfaceStyle: .liquidGlass),
             name: "\(prefix)-07-widget-large",
             scale: 2,

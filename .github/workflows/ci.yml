@@ -4,7 +4,9 @@ on:
   push:
     branches: [master]
   pull_request:
-    branches: [master]
+    # The reset-card widget PR is based on the unmerged usage-card branch.
+    # Retargeting that PR to master still matches the first entry.
+    branches: [master, cursor/ios-product-polish-faf9]
 
 permissions:
   contents: read

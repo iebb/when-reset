@@ -38,7 +38,7 @@ enum WidgetSurface {
             let activeCreditCount = snapshot.availableResetCredits.filter { credit in
                 credit.expiresAt.map { $0 > date } ?? true
             }.count
-            result.append(Metric(kind: .bankedReset, metricID: "banked-resets", title: "Banked resets",
+            result.append(Metric(kind: .bankedReset, metricID: "banked-resets", title: "Reset cards",
                                  expiresAt: expiry, remainingPercent: nil,
                                  resetCount: max(snapshot.availableResetCount, activeCreditCount),
                                  grantedAt: credit.grantedAt, apiBalance: nil))

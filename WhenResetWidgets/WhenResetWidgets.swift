@@ -163,7 +163,7 @@ private enum WidgetDataCatalog {
                         WidgetMetricEntity(
                             id: metricEntityID(accountID: snapshot.accountID, metricID: target.metricID),
                             accountID: snapshot.accountID.uuidString, metricID: target.metricID,
-                            name: target.title, accountName: snapshot.resolvedAccountName
+                            name: target.displayTitle, accountName: snapshot.resolvedAccountName
                         ),
                         target.expiresAt ?? .distantFuture
                     )
@@ -258,6 +258,11 @@ private struct WidgetMetricTarget: Hashable, Sendable {
 
     var condensedValueLabel: String {
         kind == .apiBalance ? compactValueLabel : valueLabel
+    }
+
+    /// Reset cards use the usage-card name. Other titles are already localized.
+    var displayTitle: String {
+        kind == .bankedReset ? String.localized("Reset cards") : title
     }
 
     var tint: Color {
@@ -427,7 +432,7 @@ private enum WidgetEntryResolver {
         if let selectedMetricID {
             target = futureTargets.first { $0.metricID == selectedMetricID }
                 ?? .unavailable(
-                    title: allTargets.first { $0.metricID == selectedMetricID }?.title
+                    title: allTargets.first { $0.metricID == selectedMetricID }?.displayTitle
                         ?? metric?.name
                         ?? "No reset data",
                     metricID: selectedMetricID,
@@ -565,9 +570,12 @@ private struct UsageLockScreenWidgetProvider: AppIntentTimelineProvider {
 
 private enum WidgetTimelinePolicy {
     static func reloadDate(for entry: UsageEntry, now: Date = .now) -> Date {
-        let regularReload = now.addingTimeInterval(15 * 60)
-        guard let expiresAt = entry.target.expiresAt, expiresAt > now else { return regularReload }
-        return min(regularReload, expiresAt.addingTimeInterval(1))
+        let snapshots = entry.orderedSnapshots.isEmpty ? [entry.snapshot] : entry.orderedSnapshots
+        return ResetCardSurface.reloadDate(
+            targetExpiresAt: entry.target.expiresAt,
+            snapshots: snapshots,
+            now: now
+        )
     }
 }
 
@@ -599,8 +607,31 @@ private struct HomeWidgetView: View {
         }
     }
 
+    /// Single-account styles other than the small market card get one compact
+    /// line under the quota. The small market card draws that line itself so
+    /// the hero percent can give up a little height. The multi-account list
+    /// draws a per-account row and must not grow a second footer.
+    private var showsResetFooter: Bool {
+        guard resolvedStyle != .usageList else { return false }
+        guard !(resolvedStyle == .market && family == .systemSmall) else { return false }
+        return ResetCardSurface.fact(snapshot: entry.snapshot, now: entry.date) != nil
+    }
+
     @ViewBuilder
     var body: some View {
+        if showsResetFooter {
+            VStack(alignment: .leading, spacing: 4) {
+                styledBody
+                ResetCardCompactLine(snapshot: entry.snapshot)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            styledBody
+        }
+    }
+
+    @ViewBuilder
+    private var styledBody: some View {
         switch resolvedStyle {
         case .market:
             if family == .systemSmall {
@@ -701,7 +732,7 @@ private struct MarketHomeWidgetView: View {
                     Text(entry.snapshot.resolvedAccountName)
                         .font(.headline)
                         .lineLimit(1)
-                    Text(entry.target.title)
+                    Text(entry.target.displayTitle)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -746,7 +777,7 @@ private struct MarketHomeWidgetView: View {
                 }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(entry.target.title)
+            .accessibilityLabel(entry.target.displayTitle)
             .accessibilityValue(entry.target.accessibilityValue)
 
             if entry.hasWidgetHistory {
@@ -771,7 +802,7 @@ private struct MarketTargetChip: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(target.title)
+            Text(target.displayTitle)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -799,7 +830,7 @@ private struct MarketTargetChip: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.45), in: .rect(cornerRadius: 10))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(target.title)
+        .accessibilityLabel(target.displayTitle)
         .accessibilityValue(target.accessibilityValue)
     }
 }
@@ -848,7 +879,7 @@ private struct RingHomeWidgetView: View {
                                height: family == .systemLarge ? 132 : 78)
 
                         VStack(alignment: .leading, spacing: family == .systemLarge ? 8 : 6) {
-                            Text(entry.target.title)
+                            Text(entry.target.displayTitle)
                                 .font(.headline)
                                 .lineLimit(1)
                             Group {
@@ -895,7 +926,7 @@ private struct RingHomeWidgetView: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.displayTitle)")
         .accessibilityValue(entry.target.accessibilityValue)
     }
 
@@ -908,7 +939,7 @@ private struct RingHomeWidgetView: View {
                 Text(entry.snapshot.resolvedAccountName)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
-                Text(entry.target.title)
+                Text(entry.target.displayTitle)
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -978,7 +1009,7 @@ private struct RingSecondaryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
-                Text(target.title)
+                Text(target.displayTitle)
                     .font(.caption2.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 0)
@@ -997,7 +1028,7 @@ private struct RingSecondaryRow: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(target.title)
+        .accessibilityLabel(target.displayTitle)
         .accessibilityValue(target.accessibilityValue)
     }
 }
@@ -1017,7 +1048,7 @@ private struct GaugeHomeWidgetView: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.displayTitle)")
         .accessibilityValue(entry.target.accessibilityValue)
     }
 
@@ -1053,7 +1084,7 @@ private struct GaugeHomeWidgetView: View {
             .frame(maxWidth: .infinity)
 
             VStack(alignment: .leading, spacing: 7) {
-                Text(entry.target.title)
+                Text(entry.target.displayTitle)
                     .font(.headline)
                     .lineLimit(1)
                 gaugeFooter
@@ -1085,7 +1116,7 @@ private struct GaugeHomeWidgetView: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(alignment: .firstTextBaseline) {
-                        Text(entry.target.title)
+                        Text(entry.target.displayTitle)
                             .font(.title3.bold())
                             .lineLimit(1)
                         Spacer(minLength: 6)
@@ -1233,7 +1264,7 @@ private struct GaugeTargetSummary: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
-                Text(target.title)
+                Text(target.displayTitle)
                     .font(.caption2.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1254,7 +1285,7 @@ private struct GaugeTargetSummary: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.42), in: .rect(cornerRadius: 9))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(target.title)
+        .accessibilityLabel(target.displayTitle)
         .accessibilityValue(target.accessibilityValue)
     }
 }
@@ -1354,7 +1385,7 @@ private struct HeatmapQuotaTile: View {
     var body: some View {
         VStack(alignment: .leading, spacing: featured ? 6 : 4) {
             HStack(spacing: 4) {
-                Text(target.title)
+                Text(target.displayTitle)
                     .font(featured ? .caption.weight(.semibold) : .caption2.weight(.semibold))
                     .lineLimit(featured ? 2 : 1)
                 Spacer(minLength: 0)
@@ -1400,7 +1431,7 @@ private struct HeatmapQuotaTile: View {
                 .stroke(accent.opacity(0.24), lineWidth: 1)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(target.title)
+        .accessibilityLabel(target.displayTitle)
         .accessibilityValue(target.accessibilityValue)
     }
 }
@@ -1477,7 +1508,7 @@ private struct BoardTargetRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: compact ? 3 : 4) {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(target.title)
+                Text(target.displayTitle)
                     .font(compact ? .caption2.weight(.semibold) : .caption.weight(.semibold))
                     .lineLimit(1)
                 Spacer(minLength: 2)
@@ -1508,13 +1539,31 @@ private struct BoardTargetRow: View {
         .padding(compact ? 6 : 8)
         .background(.quaternary.opacity(0.42), in: .rect(cornerRadius: 8))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(target.title)
+        .accessibilityLabel(target.displayTitle)
         .accessibilityValue(target.accessibilityValue)
     }
 }
 
 private struct SmallHomeWidgetView: View {
     let entry: UsageEntry
+
+    private var resetFact: ResetCardSurface.Fact? {
+        ResetCardSurface.fact(snapshot: entry.snapshot, now: entry.date)
+    }
+
+    private var accessibilitySummary: String {
+        let base = entry.target.accessibilityValue
+        guard let resetFact else { return base }
+        let name = ResetCardSurface.name(count: resetFact.count)
+        guard let expiry = ResetCardSurface.expiryPhrase(
+            count: resetFact.count,
+            expiresAt: resetFact.expiresAt,
+            now: entry.date
+        ) else {
+            return "\(base). \(name)"
+        }
+        return "\(base). \(name). \(expiry)"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1527,7 +1576,7 @@ private struct SmallHomeWidgetView: View {
                     Text(entry.snapshot.resolvedAccountName)
                         .font(.headline)
                         .lineLimit(1)
-                    Text(entry.target.title)
+                    Text(entry.target.displayTitle)
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -1569,10 +1618,15 @@ private struct SmallHomeWidgetView: View {
 
             Spacer(minLength: 2)
 
+            if resetFact != nil {
+                ResetCardCompactLine(snapshot: entry.snapshot)
+                    .padding(.bottom, 2)
+            }
+
             HStack(alignment: .lastTextBaseline, spacing: 4) {
                 Spacer(minLength: 0)
                 Text(entry.widgetValueText)
-                    .font(.system(size: 42, weight: .medium, design: .rounded))
+                    .font(.system(size: resetFact == nil ? 42 : 34, weight: .medium, design: .rounded))
                     .monospacedDigit()
                     .minimumScaleFactor(0.6)
                     .lineLimit(1)
@@ -1583,9 +1637,9 @@ private struct SmallHomeWidgetView: View {
                 }
             }
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
-        .accessibilityValue(entry.target.accessibilityValue)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.displayTitle)")
+        .accessibilityValue(accessibilitySummary)
     }
 }
 
@@ -1707,7 +1761,7 @@ private struct LockWidgetView: View {
             }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.title)")
+        .accessibilityLabel("\(entry.snapshot.resolvedAccountName), \(entry.target.displayTitle)")
         .accessibilityValue(entry.target.accessibilityValue)
     }
 }
@@ -1770,10 +1824,10 @@ private struct LockInlineView: View {
                     Text(entry.snapshot.resolvedAccountName)
                     Text("· \(entry.target.condensedValueLabel)")
                 case .progress:
-                    Text(entry.target.title)
+                    Text(entry.target.displayTitle)
                     Text("· \(entry.target.condensedValueLabel)")
                 case .countdown:
-                    Text(entry.target.title)
+                    Text(entry.target.displayTitle)
                     if let expiresAt = entry.target.expiresAt {
                         Text("·")
                         WidgetCountdown(expiry: expiresAt)
@@ -1782,7 +1836,7 @@ private struct LockInlineView: View {
                     }
                 case .automatic, .detailed:
                     Text(entry.snapshot.resolvedAccountName)
-                    Text("· \(entry.target.title)")
+                    Text("· \(entry.target.displayTitle)")
                     if let expiresAt = entry.target.expiresAt {
                         Text("·")
                         WidgetCountdown(expiry: expiresAt)
@@ -1809,7 +1863,7 @@ private struct LockRectangularView: View {
         case .countdown:
             VStack(alignment: .leading, spacing: 2) {
                 LockAccountHeader(snapshot: entry.snapshot)
-                Text(entry.target.title).font(.caption2).lineLimit(1)
+                Text(entry.target.displayTitle).font(.caption2).lineLimit(1)
                 if let expiresAt = entry.target.expiresAt {
                     WidgetCountdown(expiry: expiresAt)
                         .font(.headline.monospacedDigit()).minimumScaleFactor(0.65)
@@ -1820,13 +1874,13 @@ private struct LockRectangularView: View {
         case .remaining:
             VStack(alignment: .leading, spacing: 2) {
                 LockAccountHeader(snapshot: entry.snapshot)
-                Text(entry.target.title).font(.caption2).lineLimit(1)
+                Text(entry.target.displayTitle).font(.caption2).lineLimit(1)
                 Text(entry.target.condensedValueLabel).font(.headline).lineLimit(1)
             }
         case .progress:
             VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(entry.target.title).font(.caption).lineLimit(1)
+                    Text(entry.target.displayTitle).font(.caption).lineLimit(1)
                     Spacer()
                     Text(entry.target.condensedValueLabel).font(.caption.bold())
                 }
@@ -1842,7 +1896,7 @@ private struct LockRectangularView: View {
             VStack(alignment: .leading, spacing: 2) {
                 LockAccountHeader(snapshot: entry.snapshot)
                 HStack {
-                    Text(entry.target.title).font(.caption).lineLimit(1)
+                    Text(entry.target.displayTitle).font(.caption).lineLimit(1)
                     Spacer()
                     Text(entry.target.condensedValueLabel).font(.caption.bold()).lineLimit(1)
                 }
@@ -1966,7 +2020,7 @@ private struct LivePrimaryIslandDetail: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 5) {
                 if target.isPinned { LiveActivityPinnedMarker() }
-                Text(target.title).lineLimit(1)
+                Text(target.displayTitle).lineLimit(1)
                 Spacer()
                 if let value = target.valueLabel {
                     Text(value).monospacedDigit().lineLimit(1)
@@ -1987,7 +2041,7 @@ private struct LiveIslandMiniTarget: View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 4) {
                 if target.isPinned { LiveActivityPinnedMarker() }
-                Text(target.title).font(.caption2).lineLimit(1).foregroundStyle(.secondary)
+                Text(target.displayTitle).font(.caption2).lineLimit(1).foregroundStyle(.secondary)
                 Spacer(minLength: 2)
                 if let value = target.valueLabel {
                     Text(value).font(.caption2.bold()).lineLimit(1)
@@ -2191,10 +2245,26 @@ private struct LiveAccountBar: View {
             }
             UsageMeter(remainingFraction: account.headlineRemainingPercent / 100)
             if let secondary = account.secondaryTitle, let percent = account.secondaryRemainingPercent {
-                Text("\(secondary) \(UsageText.remainingPercent(percent))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(secondary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(UsageText.remainingPercent(percent))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            // Compact and minimal Dynamic Island stay on the quota. The count
+            // and expiry live on this expanded / Lock Screen row only.
+            if account.resetCardCount > 0 {
+                ResetCardAccountRow(
+                    count: account.resetCardCount,
+                    expiresAt: account.resetCardExpiresAt,
+                    onDarkSurface: onDarkSurface
+                )
             }
         }
         .foregroundStyle(onDarkSurface ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
@@ -2223,7 +2293,7 @@ private struct LiveHeroTargetCard: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 if target.isPinned { LiveActivityPinnedMarker() }
-                Text(target.title).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                Text(target.displayTitle).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 4)
                 if let value = target.valueLabel {
                     Text(value).font(.headline).lineLimit(1).layoutPriority(1)
@@ -2246,7 +2316,7 @@ private struct LiveCompactTargetCard: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 if target.isPinned { LiveActivityPinnedMarker() }
-                Text(target.title).font(.caption2).lineLimit(1)
+                Text(target.displayTitle).font(.caption2).lineLimit(1)
                 Spacer(minLength: 3)
                 if let value = target.valueLabel {
                     Text(value).font(.caption2.bold()).lineLimit(1).layoutPriority(1)
@@ -2323,5 +2393,5 @@ private extension UsageActivityTarget {
 #endif
 
 private func resetCountLabel(_ count: Int) -> String {
-    "\(count) reset\(count == 1 ? "" : "s")"
+    ResetCardSurface.countValue(count: count)
 }

@@ -237,6 +237,7 @@ enum ScreenshotFixture {
             if let reset, soonest == nil || reset < soonest!.1 {
                 soonest = (account.id.uuidString, reset)
             }
+            let cards = ResetCardSurface.fact(snapshot: snapshot, now: now)
             rows.append(UsageActivityAccountRow(
                 id: account.id.uuidString,
                 accountName: account.resolvedDisplayName,
@@ -246,7 +247,9 @@ enum ScreenshotFixture {
                 headlineRemainingPercent: headline.remainingPercent,
                 secondaryTitle: secondary?.displayTitle,
                 secondaryRemainingPercent: secondary?.remainingPercent,
-                headlineResetsAt: reset
+                headlineResetsAt: reset,
+                resetCardCount: cards?.count ?? 0,
+                resetCardExpiresAt: cards?.expiresAt
             ))
         }
         return rows.map { row in
