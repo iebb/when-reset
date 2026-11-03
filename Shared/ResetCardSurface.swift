@@ -146,6 +146,28 @@ struct ResetCardAccountRow: View {
     }
 }
 
+/// Compact Dynamic Island trailing mark. The word stays visible; the count is the number.
+struct ResetCardCompactMark: View {
+    var count: Int
+
+    var body: some View {
+        if count > 0 {
+            VStack(alignment: .trailing, spacing: 0) {
+                Text(ResetCardSurface.sectionLabel)
+                    .font(.system(size: 9, weight: .semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text("\(count)")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(ResetCardSurface.name(count: count))
+        }
+    }
+}
+
 /// One horizontal pair. The label takes the leading side; the value trails.
 private struct ResetCardLabelValue: View {
     var label: String

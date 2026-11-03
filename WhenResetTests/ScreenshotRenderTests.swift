@@ -76,7 +76,7 @@ final class ScreenshotRenderTests: XCTestCase {
             attach(
                 ScreenshotLiveLock(rows: rows, now: now)
                     .screenshotChrome(language: language, scheme: scheme, interfaceStyle: style),
-                name: "\(prefix)-live-\(style.rawValue)",
+                name: "\(prefix)-lock-\(style.rawValue)",
                 scale: 2,
                 size: CGSize(width: 360, height: 320)
             )
@@ -98,7 +98,7 @@ final class ScreenshotRenderTests: XCTestCase {
         attach(
             ScreenshotLiveCompact(rows: rows)
                 .screenshotChrome(language: language, scheme: scheme),
-            name: "\(prefix)-09-live-activity-compact",
+            name: "\(prefix)-island-compact",
             scale: 2,
             size: CGSize(width: 280, height: 48)
         )

@@ -98,22 +98,28 @@ struct ScreenshotLiveCompact: View {
     var rows: [UsageActivityAccountRow]
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(rows.prefix(4)) { account in
-                VStack(spacing: 1) {
-                    ProviderIcon(providerID: account.providerID)
-                        .frame(width: 14, height: 14)
-                    Text(UsageText.remainingPercent(account.headlineRemainingPercent))
-                        .font(.system(size: 9, weight: .semibold))
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
+        HStack(spacing: 10) {
+            HStack(spacing: 8) {
+                ForEach(rows.prefix(3)) { account in
+                    VStack(spacing: 1) {
+                        ProviderIcon(providerID: account.providerID)
+                            .frame(width: 14, height: 14)
+                        Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                            .font(.system(size: 9, weight: .semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                    }
                 }
             }
+            Spacer(minLength: 6)
+            if let count = rows.first(where: { $0.resetCardCount > 0 })?.resetCardCount {
+                ResetCardCompactMark(count: count)
+            }
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 14)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(.systemBackground))
-        .foregroundStyle(.primary)
+        .background(Capsule().fill(Color.black))
+        .foregroundStyle(.white)
     }
 }
 #endif

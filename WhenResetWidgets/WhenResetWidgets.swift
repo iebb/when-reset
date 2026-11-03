@@ -1981,7 +1981,10 @@ struct UsageLiveActivity: Widget {
                     LiveAccountStrip(accounts: context.state.accounts)
                 } else if let target = context.state.targets.first { LiveProviderStack(target: target) }
             } compactTrailing: {
-                if context.state.accounts.isEmpty, let target = context.state.targets.first {
+                if let cards = context.state.accounts.first(where: { $0.resetCardCount > 0 }) {
+                    ResetCardCompactMark(count: cards.resetCardCount)
+                        .foregroundStyle(.white)
+                } else if context.state.accounts.isEmpty, let target = context.state.targets.first {
                     LiveActivityCountdown(expiry: target.expiresAt)
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .minimumScaleFactor(0.78)
