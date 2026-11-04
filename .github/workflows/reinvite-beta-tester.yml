@@ -1,0 +1,53 @@
+name: Reinvite internal tester
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reinvite-beta-tester
+  cancel-in-progress: false
+
+jobs:
+  reinvite:
+    name: Reinvite TestFlight tester
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Prepare App Store Connect credential
+        id: credential
+        env:
+          PRIVATE_KEY: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          if [[ -z "$PRIVATE_KEY" || -z "$KEY_ID" || -z "$ISSUER_ID" ]]; then
+            echo "App Store Connect API secrets are missing." >&2
+            exit 1
+          fi
+          key_path="$RUNNER_TEMP/AuthKey_${KEY_ID}.p8"
+          umask 077
+          printf '%s' "$PRIVATE_KEY" > "$key_path"
+          echo "path=$key_path" >> "$GITHUB_OUTPUT"
+
+      - name: List testers and send a fresh invite
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_BUNDLE_ID: com.harrisliangsu.whenreset
+          BETA_TESTER_EMAIL: sharkchili.su@gmail.com
+          MARKETING_VERSION: "1.8"
+          BUILD_NUMBER: "2"
+        run: ruby .github/scripts/reinvite-beta-tester.rb
+
+      - name: Remove temporary credential
+        if: always()
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+        run: rm -f "$ASC_KEY_PATH"
