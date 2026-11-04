@@ -85,7 +85,7 @@ final class ScreenshotRenderTests: XCTestCase {
                     .screenshotChrome(language: language, scheme: .dark, interfaceStyle: style),
                 name: "\(prefix)-island-\(style.rawValue)",
                 scale: 2,
-                size: CGSize(width: 360, height: 300)
+                size: CGSize(width: 360, height: 240)
             )
         }
         attach(

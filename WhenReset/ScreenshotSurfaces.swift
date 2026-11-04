@@ -47,7 +47,7 @@ struct ScreenshotSmallUsage: View {
                             .font(.caption.bold().monospacedDigit())
                             .lineLimit(1)
                             .minimumScaleFactor(0.75)
-                        Text("RESET")
+                        Text(String.localized("RESET"))
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.secondary)
                     }

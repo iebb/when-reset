@@ -1597,7 +1597,7 @@ private struct SmallHomeWidgetView: View {
                             .font(.caption.bold().monospacedDigit())
                             .foregroundStyle(entry.widgetAccent)
                             .minimumScaleFactor(0.75)
-                        Text(entry.target.kind == .bankedReset ? "EXPIRY" : "RESET")
+                        Text(String.localized(entry.target.kind == .bankedReset ? "EXPIRY" : "RESET"))
                             .font(.system(size: 8, weight: .bold))
                             .foregroundStyle(.secondary)
                     }

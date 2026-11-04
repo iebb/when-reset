@@ -146,24 +146,19 @@ struct ResetCardAccountRow: View {
     }
 }
 
-/// Compact Dynamic Island trailing mark. The word stays visible; the count is the number.
+/// Compact Dynamic Island trailing mark.
+/// One phrase, "重置卡 1 张" / "1 reset card", so the number is not a bare digit
+/// beside the quota percents.
 struct ResetCardCompactMark: View {
     var count: Int
 
     var body: some View {
         if count > 0 {
-            VStack(alignment: .trailing, spacing: 0) {
-                Text(ResetCardSurface.sectionLabel)
-                    .font(.system(size: 9, weight: .semibold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                Text("\(count)")
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .lineLimit(1)
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(ResetCardSurface.name(count: count))
+            Text(ResetCardSurface.name(count: count))
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
+                .accessibilityLabel(ResetCardSurface.name(count: count))
         }
     }
 }

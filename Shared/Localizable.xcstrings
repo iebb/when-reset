@@ -8807,6 +8807,18 @@
         }
       }
     },
+    "RESET": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "RESET" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "重置" } }
+      }
+    },
+    "EXPIRY": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "EXPIRY" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "到期" } }
+      }
+    },
     "You’re on the latest version.": {
       "localizations": {
         "en": {
