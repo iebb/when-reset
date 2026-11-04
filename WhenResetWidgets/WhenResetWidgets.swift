@@ -2317,8 +2317,8 @@ private struct LiveAccountBar: View {
                         .lineLimit(1)
                 }
             }
-            // Compact and minimal Dynamic Island stay on the quota. The count
-            // and expiry live on this expanded / Lock Screen row only.
+            // Minimal stays the provider mark. Compact shows the full name.
+            // This expanded / Lock Screen row adds the expiry beside it.
             if account.resetCardCount > 0 {
                 ResetCardAccountRow(
                     count: account.resetCardCount,

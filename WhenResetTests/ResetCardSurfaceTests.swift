@@ -129,10 +129,10 @@ final class ResetCardSurfaceTests: XCTestCase {
             "next expires in 4h 59m"
         )
         XCTAssertEqual(
-            ResetCardSurface.rowValue(count: 1, expiresAt: expiry, now: now),
-            "1 available · expires in 4h 59m"
+            ResetCardSurface.roomyCopy(count: 1, expiresAt: expiry, now: now),
+            ResetCardSurface.RoomyCopy(label: "1 reset card", value: "expires in 4h 59m")
         )
-        XCTAssertFalse(ResetCardSurface.rowValue(count: 1, expiresAt: expiry, now: now).contains("$"))
+        XCTAssertFalse(ResetCardSurface.roomyCopy(count: 1, expiresAt: expiry, now: now).label.contains("$"))
         XCTAssertFalse(ResetCardSurface.name(count: 1).contains("已存储"))
 
         AppLanguage.choose(.chineseSimplified)
@@ -145,12 +145,15 @@ final class ResetCardSurfaceTests: XCTestCase {
             "4 小时 59 分后过期"
         )
         XCTAssertEqual(
-            ResetCardSurface.rowValue(count: 2, expiresAt: expiry, now: now),
-            "可用 2 张 · 最近一个 4 小时 59 分后过期"
+            ResetCardSurface.roomyCopy(count: 2, expiresAt: expiry, now: now),
+            ResetCardSurface.RoomyCopy(label: "重置卡 2 张", value: "最近一个 4 小时 59 分后过期")
         )
-        let chinese = ResetCardSurface.rowValue(count: 1, expiresAt: expiry, now: now)
-        XCTAssertFalse(chinese.contains("已存储"))
-        XCTAssertFalse(chinese.contains("$"))
+        let chinese = ResetCardSurface.roomyCopy(count: 1, expiresAt: expiry, now: now)
+        XCTAssertEqual(chinese.value, "4 小时 59 分后过期")
+        XCTAssertFalse(chinese.label.contains("已存储"))
+        XCTAssertFalse(chinese.label.contains("可用"))
+        XCTAssertFalse(chinese.value?.contains("可用") ?? true)
+        XCTAssertFalse(chinese.label.contains("$"))
         XCTAssertEqual(
             ResetCardSurface.name(count: 1),
             BankedResetCopy.collapsedLine(count: 1, expiresAt: nil, now: now)
@@ -163,7 +166,30 @@ final class ResetCardSurfaceTests: XCTestCase {
         XCTAssertEqual(fact?.count, 1)
         XCTAssertNil(fact?.expiresAt)
         AppLanguage.choose(.english)
-        XCTAssertEqual(ResetCardSurface.rowValue(count: 1, expiresAt: nil, now: now), "1 available")
+        XCTAssertEqual(
+            ResetCardSurface.roomyCopy(count: 1, expiresAt: nil, now: now),
+            ResetCardSurface.RoomyCopy(label: "1 reset card", value: nil)
+        )
+    }
+
+    func testRoomySurfacesUseTheFullNameAndCrowdedRowsStayShort() {
+        let expiry = now.addingTimeInterval(5 * 3_600)
+        AppLanguage.choose(.chineseSimplified)
+        XCTAssertEqual(
+            ResetCardSurface.roomyCopy(count: 1, expiresAt: expiry, now: now),
+            ResetCardSurface.RoomyCopy(label: "重置卡 1 张", value: "5 小时后过期")
+        )
+        XCTAssertEqual(ResetCardSurface.roomyCopy(count: 4, expiresAt: expiry, now: now).label, "重置卡 4 张")
+        XCTAssertEqual(ResetCardSurface.compactBadge(count: 1), "卡×1")
+        XCTAssertEqual(ResetCardSurface.compactBadge(count: 4), "卡×4")
+        XCTAssertNotEqual(ResetCardSurface.compactBadge(count: 1), ResetCardSurface.name(count: 1))
+
+        AppLanguage.choose(.english)
+        XCTAssertEqual(
+            ResetCardSurface.roomyCopy(count: 2, expiresAt: expiry, now: now),
+            ResetCardSurface.RoomyCopy(label: "2 reset cards", value: "next expires in 5h")
+        )
+        XCTAssertEqual(ResetCardSurface.compactBadge(count: 1), "×1")
     }
 
 #if os(iOS)

@@ -4,8 +4,9 @@ import SwiftUI
 ///
 /// The count and the soonest expiry come from the same snapshot fields as the
 /// usage card (`availableResetCount`, `availableResetCredits`). Wording is the
-/// card's too: "重置卡" / "Reset cards", never a stored-reset label. A count of
-/// zero is absence — callers omit the row entirely.
+/// card's too: "重置卡 N 张" / "N reset cards", never a stored-reset label.
+/// A crowded square row (2–4 accounts) uses the short badge instead.
+/// A count of zero is absence — callers omit the row entirely.
 enum ResetCardSurface {
     struct Fact: Equatable, Sendable {
         var count: Int
@@ -76,7 +77,8 @@ enum ResetCardSurface {
         )
     }
 
-    /// "可用 1 张" / "1 available". The card's expanded value.
+    /// "可用 1 张" / "1 available". The card's expanded value, and the
+    /// banked-reset activity target. Widget rows with room use `roomyCopy`.
     static func countValue(count: Int) -> String {
         ResetCardCopy.availableText(count: max(count, 0))
     }
@@ -86,13 +88,19 @@ enum ResetCardSurface {
         return BankedResetCopy.expiresPhrase(until: expiresAt, from: now, soonestOfMany: count > 1)
     }
 
-    /// Trailing value: count, then the soonest expiry when there is one.
-    static func rowValue(count: Int, expiresAt: Date?, now: Date) -> String {
-        let countText = countValue(count: count)
-        guard let expiry = expiryPhrase(count: count, expiresAt: expiresAt, now: now) else {
-            return countText
-        }
-        return ForecastCopy.format("%@ · %@", countText, expiry)
+    /// Full phrase for a surface that has the width: one account, medium,
+    /// lock screen, and the island. The name carries the count. The expiry
+    /// trails alone, so the row does not also say "可用 N 张".
+    struct RoomyCopy: Equatable, Sendable {
+        var label: String
+        var value: String?
+    }
+
+    static func roomyCopy(count: Int, expiresAt: Date?, now: Date) -> RoomyCopy {
+        RoomyCopy(
+            label: name(count: count),
+            value: expiryPhrase(count: count, expiresAt: expiresAt, now: now)
+        )
     }
 }
 
@@ -115,18 +123,18 @@ struct ResetCardCompactLine: View {
     @ViewBuilder
     private func line(at date: Date) -> some View {
         if let fact = ResetCardSurface.fact(snapshot: snapshot, now: date) {
-            let expiry = ResetCardSurface.expiryPhrase(count: fact.count, expiresAt: fact.expiresAt, now: date)
+            let copy = ResetCardSurface.roomyCopy(count: fact.count, expiresAt: fact.expiresAt, now: date)
             ResetCardLabelValue(
-                label: ResetCardSurface.name(count: fact.count),
-                value: expiry,
+                label: copy.label,
+                value: copy.value,
                 emphasizesLabel: true
             )
         }
     }
 }
 
-/// Per-account row for the multi-account widget and the expanded Live Activity.
-/// Hidden when the count is zero, so accounts without cards do not keep a gap.
+/// Per-account row for the medium widget, the Lock Screen, and the expanded island.
+/// The full name leads. Hidden when the count is zero, so accounts without cards do not keep a gap.
 struct ResetCardAccountRow: View {
     var count: Int
     var expiresAt: Date?
@@ -146,10 +154,11 @@ struct ResetCardAccountRow: View {
     }
 
     private func labeled(at date: Date) -> some View {
-        ResetCardLabelValue(
-            label: ResetCardSurface.sectionLabel,
-            value: ResetCardSurface.rowValue(count: count, expiresAt: expiresAt, now: date),
-            emphasizesLabel: false,
+        let copy = ResetCardSurface.roomyCopy(count: count, expiresAt: expiresAt, now: date)
+        return ResetCardLabelValue(
+            label: copy.label,
+            value: copy.value,
+            emphasizesLabel: true,
             onDarkSurface: onDarkSurface
         )
     }
@@ -219,13 +228,13 @@ private struct ResetCardLabelValue: View {
     }
 
     private var labelColor: Color {
-        if onDarkSurface { return Color.white.opacity(0.72) }
+        if onDarkSurface { return Color.white.opacity(emphasizesLabel ? 0.95 : 0.72) }
         return emphasizesLabel ? Color.primary : Color.secondary
     }
 
     private var valueColor: Color {
         if onDarkSurface { return Color.white.opacity(emphasizesLabel ? 0.72 : 0.92) }
-        // The small-widget expiry is support text. The account-row value is the fact.
+        // The name is the fact. The expiry is support text.
         return emphasizesLabel ? Color.secondary : Color.primary
     }
 }
