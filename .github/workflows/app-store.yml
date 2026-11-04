@@ -182,6 +182,18 @@ jobs:
 
           echo "path=$key_path" >> "$GITHUB_OUTPUT"
 
+      # Hosted runners share an image machine identity and discard the keychain.
+      # The previous archive's "Created via API" development certificate is still
+      # on the team, and Xcode will not revoke it unless this step does.
+      - name: Revoke orphaned CI development certificates
+        env:
+          ASC_KEY_PATH: ${{ steps.credential.outputs.path }}
+          ASC_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_BUNDLE_IDENTIFIER: ${{ vars.APP_BUNDLE_IDENTIFIER != '' && vars.APP_BUNDLE_IDENTIFIER || 'com.harrisliangsu.whenreset' }}
+          WIDGET_BUNDLE_IDENTIFIER: ${{ vars.WIDGET_BUNDLE_IDENTIFIER != '' && vars.WIDGET_BUNDLE_IDENTIFIER || 'com.harrisliangsu.whenreset.widgets' }}
+        run: ruby .github/scripts/revoke-ci-signing.rb
+
       - name: Archive
         env:
           ASC_KEY_PATH: ${{ steps.credential.outputs.path }}

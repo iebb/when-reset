@@ -1,7 +1,10 @@
+require "base64"
 require "minitest/autorun"
 require "open3"
+require "openssl"
 require "tmpdir"
 require_relative "next-app-store-build"
+require_relative "revoke-ci-signing"
 
 class AppStoreReleaseSelectionTest < Minitest::Test
   def version(number, state, platform = "IOS", state_key = "appVersionState")
@@ -216,5 +219,142 @@ class AppStoreExportTest < Minitest::Test
       assert_equal 65, status
       assert_equal 1, calls.length
     end
+  end
+end
+
+class CiSigningHygieneTest < Minitest::Test
+  APP = "com.harrisliangsu.whenreset"
+  WIDGET = "com.harrisliangsu.whenreset.widgets"
+  TEAM = "AB12CD34EF"
+
+  def certificate_content(common_name)
+    key = OpenSSL::PKey::EC.generate("prime256v1")
+    certificate = OpenSSL::X509::Certificate.new
+    certificate.version = 2
+    certificate.serial = 1
+    certificate.subject = OpenSSL::X509::Name.new([["CN", common_name, OpenSSL::ASN1::UTF8STRING]])
+    certificate.issuer = certificate.subject
+    certificate.public_key = key
+    certificate.not_before = Time.now - 60
+    certificate.not_after = Time.now + 3600
+    certificate.sign(key, OpenSSL::Digest::SHA256.new)
+    Base64.strict_encode64(certificate.to_der)
+  end
+
+  def certificate(id, type, common_name)
+    {
+      "id" => id,
+      "attributes" => {
+        "certificateType" => type,
+        "certificateContent" => certificate_content(common_name),
+        "name" => common_name
+      }
+    }
+  end
+
+  def profile(id, type, name)
+    { "id" => id, "attributes" => { "profileType" => type, "name" => name } }
+  end
+
+  def targets(certificates, profiles)
+    CiSigningHygiene.targets(certificates, profiles, CiSigningHygiene.bundle_ids(APP, WIDGET))
+  end
+
+  def test_only_api_created_development_certificates_and_team_profiles_are_removed
+    plan = targets(
+      [
+        certificate("CiDevCert1", "DEVELOPMENT", "Apple Development: Created via API (#{TEAM})"),
+        certificate("LegacyDev1", "IOS_DEVELOPMENT", "iPhone Developer: Created via API (#{TEAM})"),
+        certificate("MacCiCert1", "MAC_APP_DEVELOPMENT", "Mac Developer: Created via API (#{TEAM})"),
+        certificate("Personal01", "DEVELOPMENT", "Apple Development: Local Developer (#{TEAM})"),
+        certificate("DistViaApi", "DISTRIBUTION", "Apple Distribution: Created via API (#{TEAM})")
+      ],
+      [
+        profile("AppDevProf", "IOS_APP_DEVELOPMENT", "iOS Team Provisioning Profile: #{APP}"),
+        profile("WidgetDev1", "IOS_APP_DEVELOPMENT", "iOS Team Provisioning Profile: #{WIDGET}"),
+        profile("MacDevProf", "MAC_APP_DEVELOPMENT", "Mac Team Provisioning Profile: #{APP}"),
+        profile("OtherApp01", "IOS_APP_DEVELOPMENT", "iOS Team Provisioning Profile: com.example.other"),
+        profile("StoreProf1", "IOS_APP_STORE", "iOS Team Provisioning Profile: #{APP}"),
+        profile("PrefixOnly", "IOS_APP_DEVELOPMENT", "iOS Team Provisioning Profile: #{APP}.extra"),
+        profile("ManualDev1", "IOS_APP_DEVELOPMENT", "WhenReset Development")
+      ]
+    )
+
+    assert_equal [
+      "/v1/certificates/CiDevCert1",
+      "/v1/certificates/LegacyDev1",
+      "/v1/certificates/MacCiCert1"
+    ], plan.fetch(:certificates)
+    assert_equal [
+      "/v1/profiles/AppDevProf",
+      "/v1/profiles/WidgetDev1",
+      "/v1/profiles/MacDevProf"
+    ], plan.fetch(:profiles)
+  end
+
+  def test_distribution_content_is_not_parsed_or_revoked
+    plan = targets(
+      [{
+        "id" => "DistIgnore",
+        "attributes" => { "certificateType" => "IOS_DISTRIBUTION", "certificateContent" => "not-a-certificate" }
+      }],
+      []
+    )
+    assert_empty plan.fetch(:certificates)
+  end
+
+  def test_unreadable_development_certificate_stops_before_any_revoke
+    error = assert_raises(RuntimeError) do
+      targets(
+        [{
+          "id" => "BrokenDev1",
+          "attributes" => { "certificateType" => "DEVELOPMENT", "certificateContent" => "not-a-certificate" }
+        }],
+        []
+      )
+    end
+    assert_equal "Development certificate could not be classified", error.message
+  end
+
+  def test_resource_ids_cannot_escape_the_api_path
+    error = assert_raises(RuntimeError) do
+      CiSigningHygiene.resource_path("certificates", "../profiles/manual")
+    end
+    assert_equal "Refusing an unexpected App Store Connect resource id", error.message
+    error = assert_raises(RuntimeError) { CiSigningHygiene.resource_path("apps", "AB12CD34EF") }
+    assert_equal "Refusing an unexpected App Store Connect collection", error.message
+  end
+
+  def test_bundle_ids_must_be_explicit
+    error = assert_raises(RuntimeError) { CiSigningHygiene.bundle_ids("com.ok.app", "") }
+    assert_equal "App and widget bundle ids are required", error.message
+    error = assert_raises(RuntimeError) { CiSigningHygiene.bundle_ids("com.ok.app", "com.ok.app/extra") }
+    assert_equal "Refusing an unexpected bundle id", error.message
+    assert_equal ["com.ok.app"], CiSigningHygiene.bundle_ids("com.ok.app", "com.ok.app")
+  end
+
+  def test_pagination_never_follows_an_unexpected_origin
+    ["https://example.invalid/v1/certificates", "http://api.appstoreconnect.apple.com/v1/certificates",
+     "https://canary@api.appstoreconnect.apple.com/v1/certificates", "malformed URL canary"].each do |next_url|
+      requests = []
+      fetch_page = lambda do |url|
+        requests << url
+        { "data" => [], "links" => { "next" => next_url } }
+      end
+      error = assert_raises(RuntimeError) { CiSigningHygiene.collect("/v1/certificates", fetch_page) }
+      assert_equal "Refusing an unexpected App Store Connect pagination URL", error.message
+      assert_equal ["#{API_ROOT}/v1/certificates"], requests
+    end
+  end
+
+  def test_pagination_loop_is_detected_for_signing_assets
+    requests = 0
+    fetch_page = lambda do |_url|
+      requests += 1
+      { "data" => [], "links" => { "next" => "/v1/certificates" } }
+    end
+    error = assert_raises(RuntimeError) { CiSigningHygiene.collect("/v1/certificates", fetch_page) }
+    assert_equal "App Store Connect returned a pagination loop", error.message
+    assert_equal 1, requests
   end
 end
