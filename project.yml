@@ -16,8 +16,8 @@ settings:
     # `xcodegen generate --spec project.yml` and commit the Xcode project.
     SWIFT_VERSION: "6.0"
     CODE_SIGN_STYLE: Automatic
-    MARKETING_VERSION: "1.10"
-    CURRENT_PROJECT_VERSION: "35"
+    MARKETING_VERSION: "1.11"
+    CURRENT_PROJECT_VERSION: "36"
 targets:
   WhenReset:
     type: application
