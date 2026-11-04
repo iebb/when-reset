@@ -7,13 +7,13 @@
 #   https://raw.githubusercontent.com/harrisliangsu/blinky-ios/master/update-check.json
 #
 # The App Store Release workflow runs this after a successful iOS TestFlight
-# upload and pushes the result to master. Until this script is on master, that
-# job copies it out of the release commit first. To refresh the feed by hand:
+# upload and opens a pull request. It does not push master. Until this script
+# is on master, that job copies it out of the release commit first. To refresh
+# the feed by hand, commit the file on a branch and open a pull request:
 #
 #   Scripts/bump-update-check.sh 1.8 31
 #   git add update-check.json
 #   git commit -m "Update iOS update-check feed to 1.8 (31)"
-#   git push origin master
 #
 # Usage: Scripts/bump-update-check.sh VERSION BUILD [OUTPUT]
 

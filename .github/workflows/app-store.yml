@@ -353,8 +353,8 @@ jobs:
           fi
 
   # iTunes Lookup cannot see TestFlight builds. After the iOS binary is already on
-  # App Store Connect, publish the version and build to master so installed TestFlight
-  # clients can compare against it. This job writes update-check.json only. It does not
+  # App Store Connect, open a pull request that records the version and build.
+  # master is protected, so this job does not push the feed there. It does not
   # download, archive, or upload an app binary.
   publish-update-feed:
     name: Publish TestFlight update feed
@@ -364,6 +364,7 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - name: Check out release commit
         uses: actions/checkout@v6
@@ -371,20 +372,36 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Commit update-check.json on master
+      # Same shape as blinky-bot's appcast step: push a feed branch, open a
+      # pull request, and do not push the default branch. Opening the pull
+      # request needs Settings → Actions → General → Workflow permissions →
+      # "Allow GitHub Actions to create and approve pull requests". Without
+      # that, the branch push still stands and a person opens the pull request.
+      # Auto-merge is requested only when the repository allows it.
+      - name: Open a pull request for update-check.json
         env:
           MARKETING_VERSION: ${{ needs.prepare.outputs.marketing_version }}
           BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          if [[ ! "$MARKETING_VERSION" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "Refusing an unexpected marketing version." >&2
+            exit 1
+          fi
+          if [[ ! "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "Refusing an unexpected build number." >&2
+            exit 1
+          fi
           if [[ ! -f Scripts/bump-update-check.sh ]]; then
             echo "Scripts/bump-update-check.sh is missing from this release commit." >&2
             exit 1
           fi
           script_path="$(mktemp)"
           cp Scripts/bump-update-check.sh "$script_path"
+          branch="update-check-${MARKETING_VERSION}-${BUILD_NUMBER}"
           git fetch origin master
-          git checkout -B master origin/master
+          git checkout -B "$branch" origin/master
           bash "$script_path" "$MARKETING_VERSION" "$BUILD_NUMBER" update-check.json
           git add update-check.json
           if git diff --cached --quiet; then
@@ -394,8 +411,26 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Update iOS update-check feed to ${MARKETING_VERSION} (${BUILD_NUMBER})"
-          git push origin master
-          echo "Published update-check.json ${MARKETING_VERSION} (${BUILD_NUMBER}) to master." >> "$GITHUB_STEP_SUMMARY"
+          git push --force origin "HEAD:refs/heads/${branch}"
+          existing="$(gh pr list --head "$branch" --base master --state open --json number --jq '.[0].number // empty' || true)"
+          if [[ -z "$existing" ]]; then
+            if ! gh pr create --base master --head "$branch" \
+              --title "Update iOS update-check feed to ${MARKETING_VERSION} (${BUILD_NUMBER})" \
+              --body "TestFlight build ${MARKETING_VERSION} (${BUILD_NUMBER}) is already on App Store Connect. Merge this pull request to publish update-check.json on master. The release workflow does not push to master."; then
+              echo "::warning::Could not open a pull request for ${branch}. The branch was pushed. Open the pull request by hand and merge it. Settings → Actions → General → Workflow permissions must include \"Allow GitHub Actions to create and approve pull requests\" if Actions should open it. The TestFlight upload already stands."
+              exit 0
+            fi
+          fi
+          number="$(gh pr list --head "$branch" --base master --state open --json number --jq '.[0].number // empty' || true)"
+          if [[ -z "$number" ]]; then
+            echo "::warning::Branch ${branch} was pushed, and no open pull request was found. Open it by hand and merge it. The TestFlight upload already stands."
+            exit 0
+          fi
+          if gh pr merge "$number" --squash --auto; then
+            echo "Auto-merge is enabled for update-check pull request #${number}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Update-check pull request #${number} is open. Auto-merge is not enabled, so merge it after CI. The workflow does not push to master." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   # Submission is deliberately manual-only: neither the daily cron nor a testflight-* tag can
   # reach it, so a routine TestFlight build never turns into an App Store review submission.

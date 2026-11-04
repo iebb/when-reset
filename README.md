@@ -100,7 +100,7 @@ Apple Developer steps before the first signed upload:
 
 Push from the self-hosted server is separate. The vendored APNs key under `server/apns/` is the upstream author's production key and is topic-specific to `ad.neko.when`. It cannot send to `com.harrisliangsu.whenreset`. For Harris's bundle, set `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC` (`com.harrisliangsu.whenreset`), and `APNS_PRIVATE_KEY` (the `.p8` contents) in the server environment, using a key created for Harris's team.
 
-中文对照：PR 上的 CI 不需要 Apple 密钥。模拟器测试在 runner 上做 ad-hoc 签名，这样钥匙串测试才能通过；Release 构建保持未签名。打上 `v*` 版本标签后，TestFlight 工作流才会用 Apple 团队签名上传。归档前会撤销名为 Created via API 的开发证书，并删除 App 与 Widget 的 Xcode 开发描述文件；个人开发证书和发布证书保留。缺上面四个 secret 时，该工作流会直接失败并列出缺哪几个，不会假成功。开发者网站要先建好 App ID、Widget ID、App Group，并打开主 App 的 Push Notifications。上游的 APNs 密钥不能给这个新 Bundle ID 发推送。应用内检查更新只比较版本并打开 App Store 或 TestFlight，不会下载安装包。App Store 用 iTunes Lookup（id `6829609877`）；TestFlight 读 `master` 上的 `update-check.json`。iOS 上传成功后，`publish-update-feed` 会运行 `Scripts/bump-update-check.sh` 并把该文件推到 `master`。
+中文对照：PR 上的 CI 不需要 Apple 密钥。模拟器测试在 runner 上做 ad-hoc 签名，这样钥匙串测试才能通过；Release 构建保持未签名。打上 `v*` 版本标签后，TestFlight 工作流才会用 Apple 团队签名上传。归档前会撤销名为 Created via API 的开发证书，并删除 App 与 Widget 的 Xcode 开发描述文件；个人开发证书和发布证书保留。缺上面四个 secret 时，该工作流会直接失败并列出缺哪几个，不会假成功。开发者网站要先建好 App ID、Widget ID、App Group，并打开主 App 的 Push Notifications。上游的 APNs 密钥不能给这个新 Bundle ID 发推送。应用内检查更新只比较版本并打开 App Store 或 TestFlight，不会下载安装包。App Store 用 iTunes Lookup（id `6829609877`）；TestFlight 读 `master` 上的 `update-check.json`。iOS 上传成功后，`publish-update-feed` 会运行 `Scripts/bump-update-check.sh` 并打开拉取请求，不会直接推到 `master`。
 
 Release preparation reads `MARKETING_VERSION` only from `project.yml`. That file is
 the only place to bump the marketing version and build number. `xcodegen generate --spec project.yml`
@@ -124,12 +124,15 @@ version with iTunes Lookup for app id `6829609877`. That lookup does not include
 builds, so TestFlight installs compare version and build with
 `https://raw.githubusercontent.com/harrisliangsu/blinky-ios/master/update-check.json`.
 `master` is the durable branch that tracks released builds. After a successful iOS upload,
-the `publish-update-feed` job runs `Scripts/bump-update-check.sh` and pushes that file to
-`master`. A pre-release build reports a failed check until the file exists on `master`,
-instead of reading the temporary `cursor/ios-overhaul-verify` branch. Refresh the feed by
-hand with `Scripts/bump-update-check.sh <version> <build>`, then commit `update-check.json`
-on `master`. If `master` is protected, the feed job fails visibly and the TestFlight upload
-itself still stands.
+the `publish-update-feed` job runs `Scripts/bump-update-check.sh`, pushes
+`update-check-<version>-<build>`, and opens a pull request. It does not push `master`.
+If the repository allows auto-merge, the job requests a squash auto-merge; otherwise the
+pull request stays open until someone merges it after CI. A pre-release build reports a
+failed check until the file exists on `master`, instead of reading the temporary
+`cursor/ios-overhaul-verify` branch. Refresh the feed by hand with
+`Scripts/bump-update-check.sh <version> <build>`, then commit `update-check.json` on a
+branch and open a pull request. If Actions cannot open that pull request, the branch is
+still pushed and the TestFlight upload itself still stands.
 
 The release workflow reads these encrypted GitHub Actions repository secrets:
 
