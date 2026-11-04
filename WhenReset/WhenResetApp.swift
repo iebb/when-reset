@@ -178,6 +178,7 @@ struct WhenResetApp: App {
     @State private var appearance = AppAppearance.current
     @State private var barStyle = UsageBarStyle.current
     @State private var interfaceStyle = InterfaceStyle.current
+    @State private var percentBasis = QuotaPercentBasis.current
 
     init() {
         #if DEBUG
@@ -187,6 +188,7 @@ struct WhenResetApp: App {
         _appearance = State(initialValue: AppAppearance.current)
         _barStyle = State(initialValue: UsageBarStyle.current)
         _interfaceStyle = State(initialValue: InterfaceStyle.current)
+        _percentBasis = State(initialValue: QuotaPercentBasis.current)
         #endif
         let store = AppStore()
         _store = State(initialValue: store)
@@ -203,6 +205,7 @@ struct WhenResetApp: App {
                 .environment(\.locale, interfaceLanguage.locale)
                 .environment(\.usageBarStyle, barStyle)
                 .environment(\.interfaceStyle, interfaceStyle)
+                .environment(\.quotaPercentBasis, percentBasis)
                 .preferredColorScheme(appearance.colorScheme)
                 .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
                     if let language = note.object as? AppLanguage { interfaceLanguage = language }
@@ -215,6 +218,9 @@ struct WhenResetApp: App {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .blinkyInterfaceStyleChanged)) { note in
                     if let style = note.object as? InterfaceStyle { interfaceStyle = style }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyQuotaPercentBasisChanged)) { note in
+                    if let basis = note.object as? QuotaPercentBasis { percentBasis = basis }
                 }
                 .task { await startStore() }
                 .task(id: scenePhase) {
@@ -249,6 +255,7 @@ struct WhenResetApp: App {
                 .environment(\.locale, interfaceLanguage.locale)
                 .environment(\.usageBarStyle, barStyle)
                 .environment(\.interfaceStyle, interfaceStyle)
+                .environment(\.quotaPercentBasis, percentBasis)
                 .preferredColorScheme(appearance.colorScheme)
                 .onReceive(NotificationCenter.default.publisher(for: .blinkyLanguageChanged)) { note in
                     if let language = note.object as? AppLanguage { interfaceLanguage = language }
@@ -261,6 +268,9 @@ struct WhenResetApp: App {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .blinkyInterfaceStyleChanged)) { note in
                     if let style = note.object as? InterfaceStyle { interfaceStyle = style }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .blinkyQuotaPercentBasisChanged)) { note in
+                    if let basis = note.object as? QuotaPercentBasis { percentBasis = basis }
                 }
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }

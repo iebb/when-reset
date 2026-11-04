@@ -8807,6 +8807,90 @@
         }
       }
     },
+    "×%lld": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "×%lld" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "卡×%lld" } }
+      }
+    },
+    "%lld%% used": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "%lld%% used" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已用 %lld%%" } }
+      }
+    },
+    "Remaining": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Remaining" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "剩余" } }
+      }
+    },
+    "Used": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Used" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已用" } }
+      }
+    },
+    "Percentages": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Percentages" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "百分比" } }
+      }
+    },
+    "Remaining shows what is left. Used shows what is already spent. Widgets show the number only. The bar fills the same way.": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Remaining shows what is left. Used shows what is already spent. Widgets show the number only. The bar fills the same way." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "剩余表示还剩多少。已用表示已经用掉多少。小组件只显示数字。进度条按同样的方式填充。" } }
+      }
+    },
+    "Square accounts": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Square accounts" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "方块账号数" } }
+      }
+    },
+    "As many as fit": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "As many as fit" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "尽量显示" } }
+      }
+    },
+    "1 account": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "1 account" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "1 个账号" } }
+      }
+    },
+    "2 accounts": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "2 accounts" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "2 个账号" } }
+      }
+    },
+    "3 accounts": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "3 accounts" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "3 个账号" } }
+      }
+    },
+    "4 accounts": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "4 accounts" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "4 个账号" } }
+      }
+    },
+    "RESET": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "RESET" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "重置" } }
+      }
+    },
+    "EXPIRY": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "EXPIRY" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "到期" } }
+      }
+    },
     "You’re on the latest version.": {
       "localizations": {
         "en": {

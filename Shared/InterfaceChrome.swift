@@ -356,14 +356,35 @@ extension View {
 struct StyledMultiAccountList: View {
     var snapshots: [UsageSnapshot]
     var showsSecondLimit: Bool
+    /// Frozen clock for screenshots. Nil follows the widget timeline.
+    var now: Date? = nil
+
+    private var clock: Date { now ?? .now }
+
+    /// Medium is short. A reset-card line replaces the "Usage" title so the
+    /// last account in the stored order still fits. Large keeps the title.
+    private var tight: Bool {
+        !ResetCardSurface.showsUsageTitle(
+            showsSecondLimit: showsSecondLimit,
+            snapshots: snapshots,
+            now: clock
+        )
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Usage")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: tight ? 3 : 5) {
+            if !tight {
+                Text("Usage")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
             ForEach(snapshots, id: \.accountID) { snapshot in
-                StyledMultiAccountRow(snapshot: snapshot, showsSecondLimit: showsSecondLimit)
+                StyledMultiAccountRow(
+                    snapshot: snapshot,
+                    showsSecondLimit: showsSecondLimit,
+                    now: now,
+                    tight: tight
+                )
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -373,17 +394,23 @@ struct StyledMultiAccountList: View {
 private struct StyledMultiAccountRow: View {
     var snapshot: UsageSnapshot
     var showsSecondLimit: Bool
+    var now: Date? = nil
+    var tight = false
     @Environment(\.interfaceStyle) private var interfaceStyle
     @Environment(\.colorScheme) private var colorScheme
+
+    private var resetFact: ResetCardSurface.Fact? {
+        ResetCardSurface.fact(snapshot: snapshot, now: now ?? .now)
+    }
 
     var body: some View {
         switch interfaceStyle {
         case .classic, .screenTime:
-            row.padding(.vertical, 1)
+            row.padding(.vertical, tight ? 0 : 1)
         case .liquidGlass:
             row
                 .padding(.horizontal, 6)
-                .padding(.vertical, 4)
+                .padding(.vertical, tight ? 2 : 4)
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
     }
@@ -406,7 +433,7 @@ private struct StyledMultiAccountRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
-                    Text(UsageText.remainingPercent(headline.remainingPercent))
+                    Text(UsageText.widgetFigure(headline.remainingPercent))
                         .font(.caption.weight(interfaceStyle == .screenTime ? .bold : .regular).monospacedDigit())
                         .foregroundStyle(interfaceStyle == .screenTime ? AnyShapeStyle(tint) : AnyShapeStyle(.primary))
                         .lineLimit(1)
@@ -421,12 +448,15 @@ private struct StyledMultiAccountRow: View {
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer(minLength: 4)
-                        Text(UsageText.remainingPercent(secondary.remainingPercent))
+                        Text(UsageText.widgetFigure(secondary.remainingPercent))
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
                 }
+            }
+            if let resetFact {
+                ResetCardAccountRow(count: resetFact.count, expiresAt: resetFact.expiresAt, now: now)
             }
         }
     }
@@ -442,12 +472,13 @@ struct StyledLiveAccountList: View {
     var rows: [UsageActivityAccountRow]
     var onDarkSurface = false
     var limit = 4
+    var now: Date? = nil
     @Environment(\.interfaceStyle) private var interfaceStyle
 
     var body: some View {
         VStack(alignment: .leading, spacing: interfaceStyle == .screenTime ? 10 : 8) {
             ForEach(rows.prefix(limit)) { account in
-                StyledLiveAccountRow(account: account, onDarkSurface: onDarkSurface)
+                StyledLiveAccountRow(account: account, onDarkSurface: onDarkSurface, now: now)
             }
         }
     }
@@ -456,6 +487,7 @@ struct StyledLiveAccountList: View {
 struct StyledLiveAccountRow: View {
     var account: UsageActivityAccountRow
     var onDarkSurface = false
+    var now: Date? = nil
     @Environment(\.interfaceStyle) private var interfaceStyle
     @Environment(\.colorScheme) private var colorScheme
 
@@ -501,7 +533,7 @@ struct StyledLiveAccountRow: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
-                Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                Text(UsageText.widgetFigure(account.headlineRemainingPercent))
                     .font((interfaceStyle == .screenTime ? Font.subheadline.weight(.bold) : Font.caption).monospacedDigit())
                     .foregroundStyle(interfaceStyle == .screenTime ? AnyShapeStyle(tint) : AnyShapeStyle(.primary))
                     .lineLimit(1)
@@ -511,10 +543,25 @@ struct StyledLiveAccountRow: View {
                 prominent: interfaceStyle == .screenTime
             )
             if let secondary = account.secondaryTitle, let percent = account.secondaryRemainingPercent {
-                Text("\(secondary) \(UsageText.remainingPercent(percent))")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(secondary)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(UsageText.widgetFigure(percent))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+            if account.resetCardCount > 0 {
+                ResetCardAccountRow(
+                    count: account.resetCardCount,
+                    expiresAt: account.resetCardExpiresAt,
+                    now: now,
+                    onDarkSurface: onDarkSurface
+                )
             }
         }
         .foregroundStyle(onDarkSurface ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))

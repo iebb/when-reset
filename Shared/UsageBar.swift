@@ -49,7 +49,7 @@ enum AppAppearance: String, CaseIterable, Identifiable, Sendable {
         NotificationCenter.default.post(name: .blinkyAppearanceChanged, object: appearance)
     }
 
-    fileprivate static func reloadWidgets() {
+    static func reloadWidgets() {
         #if canImport(WidgetKit)
         Task { @MainActor in
             WidgetCenter.shared.reloadAllTimelines()
@@ -100,6 +100,87 @@ extension EnvironmentValues {
         get { self[InterfaceStyleKey.self] }
         set { self[InterfaceStyleKey.self] = newValue }
     }
+}
+
+/// What a quota percentage and its bar represent.
+///
+/// Remaining is the default: 75% and a bar filled to 75% means three quarters
+/// are left. Used inverts both the number and the fill. The color stays tied
+/// to how much is left, so a full used bar is still the warning color.
+enum QuotaPercentBasis: String, CaseIterable, Identifiable, Sendable {
+    case remaining
+    case used
+
+    var id: String { rawValue }
+
+    static let storageKey = "settings.quotaPercentBasis"
+    static let `default` = QuotaPercentBasis.remaining
+
+    var title: String {
+        switch self {
+        case .remaining: String.localized("Remaining")
+        case .used: String.localized("Used")
+        }
+    }
+
+    static var current: QuotaPercentBasis {
+        let raw = UserDefaults(suiteName: AppIdentity.appGroupIdentifier)?.string(forKey: storageKey)
+            ?? UserDefaults.standard.string(forKey: storageKey)
+        return QuotaPercentBasis(rawValue: raw ?? "") ?? .default
+    }
+
+    static func choose(_ basis: QuotaPercentBasis) {
+        UserDefaults.standard.set(basis.rawValue, forKey: storageKey)
+        UserDefaults(suiteName: AppIdentity.appGroupIdentifier)?.set(basis.rawValue, forKey: storageKey)
+        AppAppearance.reloadWidgets()
+        NotificationCenter.default.post(name: .blinkyQuotaPercentBasisChanged, object: basis)
+    }
+
+    func displayed(remainingPercent: Double) -> Int {
+        let remaining = min(100, max(0, remainingPercent))
+        switch self {
+        case .remaining:
+            return Int(remaining.rounded())
+        case .used:
+            return Int((100 - remaining).rounded())
+        }
+    }
+
+    /// Bare number for widgets and Live Activity. No "剩余" or "已用".
+    func figure(remainingPercent: Double) -> String {
+        "\(displayed(remainingPercent: remainingPercent))%"
+    }
+
+    /// In-app label. Widgets do not use this.
+    func labeled(remainingPercent: Double) -> String {
+        let percent = Int64(displayed(remainingPercent: remainingPercent))
+        let key = self == .remaining ? "%lld%% left" : "%lld%% used"
+        return String(
+            format: String.localized(String.LocalizationValue(stringLiteral: key)),
+            locale: AppLanguage.current.locale,
+            percent
+        )
+    }
+
+    func fillFraction(remainingFraction: Double) -> Double {
+        let remaining = min(1, max(0, remainingFraction))
+        return self == .used ? 1 - remaining : remaining
+    }
+}
+
+private struct QuotaPercentBasisKey: EnvironmentKey {
+    static let defaultValue = QuotaPercentBasis.default
+}
+
+extension EnvironmentValues {
+    var quotaPercentBasis: QuotaPercentBasis {
+        get { self[QuotaPercentBasisKey.self] }
+        set { self[QuotaPercentBasisKey.self] = newValue }
+    }
+}
+
+extension Notification.Name {
+    static let blinkyQuotaPercentBasisChanged = Notification.Name("blinky.quotaPercentBasis.changed")
 }
 
 /// How a remaining-allowance meter is drawn. Continuous is the default.
@@ -162,8 +243,9 @@ extension View {
     /// Pass `.dark` for surfaces that stay on a black background, such as the Dynamic Island.
     func blinkyUsageChrome(colorScheme: ColorScheme? = AppAppearance.current.colorScheme) -> some View {
         environment(\.locale, AppLanguage.current.locale)
-            .environment(\.usageBarStyle, UsageBarStyle.current)
+            .        environment(\.usageBarStyle, UsageBarStyle.current)
             .environment(\.interfaceStyle, InterfaceStyle.current)
+            .environment(\.quotaPercentBasis, QuotaPercentBasis.current)
             .preferredColorScheme(colorScheme)
     }
 }
@@ -275,12 +357,15 @@ struct UsageMeter: View {
     @Environment(\.interfaceStyle) private var interfaceStyle
     @Environment(\.colorScheme) private var colorScheme
 
+    @Environment(\.quotaPercentBasis) private var percentBasis
+
     var body: some View {
         let metrics = interfaceStyle.continuousMeter(prominent: prominent)
         let continuous = style == .continuous
+        let remaining = min(1, max(0, remainingFraction))
         UsageBar(
-            fraction: remainingFraction,
-            accent: UsageMeterTint.color(remainingFraction: remainingFraction, colorScheme: colorScheme),
+            fraction: percentBasis.fillFraction(remainingFraction: remaining),
+            accent: UsageMeterTint.color(remainingFraction: remaining, colorScheme: colorScheme),
             track: Color.primary.opacity(continuous ? metrics.trackOpacity : 0.16),
             style: style,
             cap: metrics.cap

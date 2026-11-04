@@ -6,6 +6,7 @@ struct AppearanceSettingsView: View {
     @State private var appearance = AppAppearance.current
     @State private var barStyle = UsageBarStyle.current
     @State private var interfaceStyle = InterfaceStyle.current
+    @State private var percentBasis = QuotaPercentBasis.current
 
     private var appearanceSelection: Binding<AppAppearance> {
         Binding {
@@ -23,6 +24,16 @@ struct AppearanceSettingsView: View {
         } set: { newValue in
             interfaceStyle = newValue
             InterfaceStyle.choose(newValue)
+        }
+    }
+
+    private var percentBasisSelection: Binding<QuotaPercentBasis> {
+        Binding {
+            percentBasis
+        } set: { newValue in
+            percentBasis = newValue
+            QuotaPercentBasis.choose(newValue)
+            Task { await store.reconcileLiveActivityAfterForegroundActivation() }
         }
     }
 
@@ -58,6 +69,17 @@ struct AppearanceSettingsView: View {
                 .accessibilityIdentifier("interface-style")
             } footer: {
                 Text("Classic is a plain grouped list. Screen Time uses a rounded percent and block bars. Liquid Glass is one glass card.")
+            }
+            .blinkySettingsSection()
+            Section {
+                Picker("Percentages", selection: percentBasisSelection) {
+                    ForEach(QuotaPercentBasis.allCases) { basis in
+                        Text(basis.title).tag(basis)
+                    }
+                }
+                .accessibilityIdentifier("quota-percent-basis")
+            } footer: {
+                Text("Remaining shows what is left. Used shows what is already spent. Widgets show the number only. The bar fills the same way.")
             }
             .blinkySettingsSection()
             Section {

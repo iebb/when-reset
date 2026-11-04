@@ -4214,7 +4214,7 @@ final class AppStore {
                 events.append(.init(
                     account: account, kind: .bankedReset,
                     metricID: AccountMonitorSettings.bankedResetMetricID,
-                    title: "Banked resets", remainingPercent: nil,
+                    title: "Reset cards", remainingPercent: nil,
                     progressFraction: credit.remainingLifetimeFraction(at: date),
                     resetCount: snapshot.availableResetCount,
                     isPinned: accountSettings.isBankedResetPinnedInLiveActivity,
@@ -4262,6 +4262,13 @@ final class AppStore {
             if let reset, soonest == nil || reset < soonest!.date {
                 soonest = (account.id.uuidString, reset)
             }
+            let showsResetCards = liveActivitySettings.showBankedResets
+                && accountSettings.showBankedResetsInLiveActivity
+            let resetCards = ResetCardSurface.fact(
+                snapshot: presented,
+                now: date,
+                included: showsResetCards
+            )
             rows.append(UsageActivityAccountRow(
                 id: account.id.uuidString,
                 accountName: account.resolvedDisplayName,
@@ -4272,7 +4279,9 @@ final class AppStore {
                 secondaryTitle: secondary?.displayTitle,
                 secondaryRemainingPercent: secondary?.remainingPercent,
                 headlineResetsAt: reset,
-                isSoonestReset: false
+                isSoonestReset: false,
+                resetCardCount: resetCards?.count ?? 0,
+                resetCardExpiresAt: resetCards?.expiresAt
             ))
         }
         return rows.map { row in

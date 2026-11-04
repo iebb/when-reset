@@ -69,6 +69,11 @@ struct UsageActivityTarget: Codable, Hashable, Identifiable, Sendable {
         try values.encode(expiresAt, forKey: .expiresAt)
     }
 
+    /// Reset cards use the usage-card name. Quota titles are already localized.
+    var displayTitle: String {
+        kind == .bankedReset ? String.localized("Reset cards") : title
+    }
+
     static func ordered(_ targets: [UsageActivityTarget], limit: Int = 4) -> [UsageActivityTarget] {
         Array(targets.sorted {
             if $0.isPinned != $1.isPinned { return $0.isPinned }
@@ -98,11 +103,15 @@ struct UsageActivityAccountRow: Codable, Hashable, Identifiable, Sendable {
     var secondaryRemainingPercent: Double?
     var headlineResetsAt: Date?
     var isSoonestReset: Bool
+    /// Zero hides the reset-card row. The widget localizes the count itself.
+    var resetCardCount: Int
+    var resetCardExpiresAt: Date?
 
     init(id: String, accountName: String, providerID: ProviderID, symbolName: String?,
          headlineTitle: String, headlineRemainingPercent: Double,
          secondaryTitle: String? = nil, secondaryRemainingPercent: Double? = nil,
-         headlineResetsAt: Date? = nil, isSoonestReset: Bool = false) {
+         headlineResetsAt: Date? = nil, isSoonestReset: Bool = false,
+         resetCardCount: Int = 0, resetCardExpiresAt: Date? = nil) {
         self.id = id
         self.accountName = String(accountName.prefix(64))
         self.providerID = providerID
@@ -113,6 +122,62 @@ struct UsageActivityAccountRow: Codable, Hashable, Identifiable, Sendable {
         self.secondaryRemainingPercent = secondaryRemainingPercent.map { min(100, max(0, $0)) }
         self.headlineResetsAt = headlineResetsAt
         self.isSoonestReset = isSoonestReset
+        self.resetCardCount = max(0, resetCardCount)
+        self.resetCardExpiresAt = resetCardCount > 0 ? resetCardExpiresAt : nil
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let count = try values.decodeIfPresent(Int.self, forKey: .resetCardCount) ?? 0
+        let id = try values.decode(String.self, forKey: .id)
+        let accountName = try values.decode(String.self, forKey: .accountName)
+        let providerID = try values.decode(ProviderID.self, forKey: .providerID)
+        let symbolName = try values.decodeIfPresent(String.self, forKey: .symbolName)
+        let headlineTitle = try values.decode(String.self, forKey: .headlineTitle)
+        let headlineRemainingPercent = try values.decode(Double.self, forKey: .headlineRemainingPercent)
+        let secondaryTitle = try values.decodeIfPresent(String.self, forKey: .secondaryTitle)
+        let secondaryRemainingPercent = try values.decodeIfPresent(Double.self, forKey: .secondaryRemainingPercent)
+        let headlineResetsAt = try values.decodeIfPresent(Date.self, forKey: .headlineResetsAt)
+        let isSoonestReset = try values.decodeIfPresent(Bool.self, forKey: .isSoonestReset) ?? false
+        let resetCardExpiresAt = try values.decodeIfPresent(Date.self, forKey: .resetCardExpiresAt)
+        self.init(
+            id: id,
+            accountName: accountName,
+            providerID: providerID,
+            symbolName: symbolName,
+            headlineTitle: headlineTitle,
+            headlineRemainingPercent: headlineRemainingPercent,
+            secondaryTitle: secondaryTitle,
+            secondaryRemainingPercent: secondaryRemainingPercent,
+            headlineResetsAt: headlineResetsAt,
+            isSoonestReset: isSoonestReset,
+            resetCardCount: count,
+            resetCardExpiresAt: resetCardExpiresAt
+        )
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(accountName, forKey: .accountName)
+        try values.encode(providerID, forKey: .providerID)
+        try values.encodeIfPresent(symbolName, forKey: .symbolName)
+        try values.encode(headlineTitle, forKey: .headlineTitle)
+        try values.encode(headlineRemainingPercent, forKey: .headlineRemainingPercent)
+        try values.encodeIfPresent(secondaryTitle, forKey: .secondaryTitle)
+        try values.encodeIfPresent(secondaryRemainingPercent, forKey: .secondaryRemainingPercent)
+        try values.encodeIfPresent(headlineResetsAt, forKey: .headlineResetsAt)
+        try values.encode(isSoonestReset, forKey: .isSoonestReset)
+        if resetCardCount > 0 {
+            try values.encode(resetCardCount, forKey: .resetCardCount)
+            try values.encodeIfPresent(resetCardExpiresAt, forKey: .resetCardExpiresAt)
+        }
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, accountName, providerID, symbolName, headlineTitle, headlineRemainingPercent
+        case secondaryTitle, secondaryRemainingPercent, headlineResetsAt, isSoonestReset
+        case resetCardCount, resetCardExpiresAt
     }
 }
 
