@@ -67,6 +67,15 @@ enum ResetCardSurface {
 
     static var sectionLabel: String { String.localized("Reset cards") }
 
+    /// Small badge on a crowded row. "卡×1" / "×1".
+    static func compactBadge(count: Int) -> String {
+        String(
+            format: String.localized("×%lld"),
+            locale: AppLanguage.current.locale,
+            Int64(max(count, 0))
+        )
+    }
+
     /// "可用 1 张" / "1 available". The card's expanded value.
     static func countValue(count: Int) -> String {
         ResetCardCopy.availableText(count: max(count, 0))

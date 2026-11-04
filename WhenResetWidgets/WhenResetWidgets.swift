@@ -90,8 +90,32 @@ struct UsageWidgetConfigurationIntent: WidgetConfigurationIntent {
     var metric: WidgetMetricEntity?
     @Parameter(title: "Appearance", default: .automatic)
     var appearance: HomeWidgetDisplayStyle
+    /// How many accounts the square widget shows, from the custom order.
+    /// Automatic uses every account, up to four.
+    @Parameter(title: "Square accounts", default: .automatic)
+    var accountLimit: SmallWidgetAccountLimit
 
     init() {}
+}
+
+enum SmallWidgetAccountLimit: Int, AppEnum, Sendable {
+    case automatic = 0
+    case one = 1
+    case two = 2
+    case three = 3
+    case four = 4
+
+    static let typeDisplayRepresentation: TypeDisplayRepresentation = "Square accounts"
+    static let caseDisplayRepresentations: [SmallWidgetAccountLimit: DisplayRepresentation] = [
+        .automatic: "As many as fit",
+        .one: "1 account",
+        .two: "2 accounts",
+        .three: "3 accounts",
+        .four: "4 accounts"
+    ]
+
+    /// Automatic asks for the cap. The view shortens the list when fewer exist.
+    var requestedCount: Int { self == .automatic ? SmallSquareAccounts.maximum : rawValue }
 }
 
 enum HomeWidgetDisplayStyle: String, AppEnum, Sendable {
@@ -231,7 +255,7 @@ private struct WidgetMetricTarget: Hashable, Sendable {
 
     var valueLabel: String {
         switch kind {
-        case .quota: "\(Int((remainingPercent ?? 0).rounded()))% left"
+        case .quota: UsageText.widgetFigure(remainingPercent ?? 0)
         case .bankedReset: resetCountLabel(resetCount ?? 0)
         case .apiBalance: apiBalance?.widgetValueLabel ?? "Balance unavailable"
         case .unavailable: "No data"
@@ -240,7 +264,7 @@ private struct WidgetMetricTarget: Hashable, Sendable {
 
     var compactValueLabel: String {
         switch kind {
-        case .quota: "\(Int((remainingPercent ?? 0).rounded()))%"
+        case .quota: UsageText.widgetFigure(remainingPercent ?? 0)
         case .bankedReset: "\(resetCount ?? 0)"
         case .apiBalance: apiBalance?.widgetPrimaryValue ?? "—"
         case .unavailable: "—"
@@ -373,12 +397,14 @@ private struct UsageEntry: TimelineEntry {
     var displayStyle: LockScreenDisplayStyle
     var history: [UsageHistoryPoint]
     var orderedSnapshots: [UsageSnapshot] = []
+    var accountLimit: SmallWidgetAccountLimit = .automatic
 }
 
 private enum WidgetEntryResolver {
     static func resolve(account: WidgetAccountEntity?, metric: WidgetMetricEntity?,
                         homeStyle: HomeWidgetDisplayStyle = .automatic,
                         displayStyle: LockScreenDisplayStyle = .automatic,
+                        accountLimit: SmallWidgetAccountLimit = .automatic,
                         usesPreviewData: Bool = false,
                         now: Date = .now) -> UsageEntry {
         if usesPreviewData {
@@ -388,7 +414,8 @@ private enum WidgetEntryResolver {
             return UsageEntry(date: now, snapshot: snapshot, target: target,
                               homeStyle: homeStyle,
                               displayStyle: displayStyle,
-                              history: previewHistory(snapshot: snapshot, target: target, now: now))
+                              history: previewHistory(snapshot: snapshot, target: target, now: now),
+                              accountLimit: accountLimit)
         }
 
         let stored = SharedSnapshotStore.load()
@@ -450,7 +477,8 @@ private enum WidgetEntryResolver {
         return UsageEntry(date: now, snapshot: snapshot, target: target,
                           homeStyle: homeStyle,
                           displayStyle: displayStyle, history: history,
-                          orderedSnapshots: stored)
+                          orderedSnapshots: stored,
+                          accountLimit: accountLimit)
     }
 
     private static func unavailableEntry(
@@ -484,7 +512,8 @@ private enum WidgetEntryResolver {
         )
         return UsageEntry(date: now, snapshot: snapshot, target: target,
                           homeStyle: homeStyle,
-                          displayStyle: displayStyle, history: [])
+                          displayStyle: displayStyle, history: [],
+                          accountLimit: accountLimit)
     }
 
     private static func nearestDate(in snapshot: UsageSnapshot, after date: Date) -> Date {
@@ -536,12 +565,14 @@ private struct UsageWidgetProvider: AppIntentTimelineProvider {
     func snapshot(for configuration: UsageWidgetConfigurationIntent, in context: Context) async -> UsageEntry {
         WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric,
                                     homeStyle: configuration.appearance,
+                                    accountLimit: configuration.accountLimit,
                                     usesPreviewData: context.isPreview)
     }
 
     func timeline(for configuration: UsageWidgetConfigurationIntent, in context: Context) async -> Timeline<UsageEntry> {
         let entry = WidgetEntryResolver.resolve(account: configuration.account, metric: configuration.metric,
-                                                homeStyle: configuration.appearance)
+                                                homeStyle: configuration.appearance,
+                                                accountLimit: configuration.accountLimit)
         return Timeline(entries: [entry], policy: .after(WidgetTimelinePolicy.reloadDate(for: entry)))
     }
 }
@@ -607,11 +638,27 @@ private struct HomeWidgetView: View {
         }
     }
 
+    /// Square widget rows, in the stored custom order, capped at four.
+    private var squareRows: [UsageSnapshot] {
+        let ordered = entry.orderedSnapshots.isEmpty ? [entry.snapshot] : entry.orderedSnapshots
+        return SmallSquareAccounts.visible(ordered, limit: entry.accountLimit.requestedCount)
+    }
+
+    /// More than one account on the square widget uses the adaptive rows.
+    /// An explicit chart style keeps the single-account drawing unless the
+    /// person also set a count above one.
+    private var showsSquareStack: Bool {
+        guard family == .systemSmall, squareRows.count > 1 else { return false }
+        if entry.accountLimit != .automatic { return true }
+        return entry.homeStyle == .automatic || entry.homeStyle == .usageList
+    }
+
     /// Single-account styles other than the small market card get one compact
     /// line under the quota. The small market card draws that line itself so
     /// the hero percent can give up a little height. The multi-account list
     /// draws a per-account row and must not grow a second footer.
     private var showsResetFooter: Bool {
+        guard !showsSquareStack else { return false }
         guard resolvedStyle != .usageList else { return false }
         guard !(resolvedStyle == .market && family == .systemSmall) else { return false }
         return ResetCardSurface.fact(snapshot: entry.snapshot, now: entry.date) != nil
@@ -619,7 +666,9 @@ private struct HomeWidgetView: View {
 
     @ViewBuilder
     var body: some View {
-        if showsResetFooter {
+        if showsSquareStack {
+            SmallSquareAccountStack(snapshots: squareRows, now: entry.date)
+        } else if showsResetFooter {
             VStack(alignment: .leading, spacing: 4) {
                 styledBody
                 ResetCardCompactLine(snapshot: entry.snapshot)
@@ -2177,7 +2226,7 @@ private struct LiveAccountStrip: View {
                 VStack(spacing: 1) {
                     ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
                         .frame(width: 12, height: 12)
-                    Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                    Text(UsageText.widgetFigure(account.headlineRemainingPercent))
                         .font(.system(size: 8, weight: .semibold))
                         .lineLimit(1)
                         .minimumScaleFactor(0.6)
@@ -2246,7 +2295,7 @@ private struct LiveAccountBar: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
-                Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                Text(UsageText.widgetFigure(account.headlineRemainingPercent))
                     .font(.caption.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(tint)
@@ -2259,7 +2308,7 @@ private struct LiveAccountBar: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    Text(UsageText.remainingPercent(percent))
+                    Text(UsageText.widgetFigure(percent))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
@@ -2390,14 +2439,14 @@ private struct SnapshotAccountIcon: View {
 private extension UsageActivityTarget {
     var valueLabel: String? {
         switch kind {
-        case .quota: remainingPercent.map { "\(Int($0))% left" }
+        case .quota: remainingPercent.map { UsageText.widgetFigure($0) }
         case .bankedReset: resetCountLabel(resetCount ?? 0)
         }
     }
 
     var compactValueLabel: String? {
         switch kind {
-        case .quota: remainingPercent.map { "\(Int($0))%" }
+        case .quota: remainingPercent.map { UsageText.widgetFigure($0) }
         case .bankedReset: resetCount.map(String.init)
         }
     }

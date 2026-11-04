@@ -9,6 +9,36 @@ final class ResetCardSurfaceTests: XCTestCase {
         super.tearDown()
     }
 
+    func testSquareWidgetKeepsCustomOrderAndCapsAtFour() {
+        let ordered = (0..<6).map { make(count: $0 == 0 || $0 == 3 ? 1 : 0, credits: [], name: "A\($0)") }
+        XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 4).map(\.accountName), ["A0", "A1", "A2", "A3"])
+        XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 2).map(\.accountName), ["A0", "A1"])
+        XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 1).map(\.accountName), ["A0"])
+        XCTAssertEqual(SmallSquareAccounts.visible(Array(ordered.prefix(2)), limit: 4).map(\.accountName), ["A0", "A1"])
+        XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 99).count, 4)
+    }
+
+    func testPercentBasisDefaultsToRemainingAndInvertsTheNumberAndFill() {
+        let previous = QuotaPercentBasis.current
+        defer { QuotaPercentBasis.choose(previous) }
+        QuotaPercentBasis.choose(.remaining)
+        XCTAssertEqual(QuotaPercentBasis.current, .remaining)
+        XCTAssertEqual(QuotaPercentBasis.remaining.displayed(remainingPercent: 75), 75)
+        XCTAssertEqual(QuotaPercentBasis.remaining.figure(remainingPercent: 75), "75%")
+        XCTAssertEqual(QuotaPercentBasis.remaining.fillFraction(remainingFraction: 0.75), 0.75)
+        QuotaPercentBasis.choose(.used)
+        XCTAssertEqual(QuotaPercentBasis.current, .used)
+        XCTAssertEqual(QuotaPercentBasis.used.displayed(remainingPercent: 75.4), 25)
+        XCTAssertEqual(QuotaPercentBasis.used.figure(remainingPercent: 75), "25%")
+        XCTAssertEqual(QuotaPercentBasis.used.fillFraction(remainingFraction: 0.75), 0.25, accuracy: 0.001)
+        XCTAssertEqual(UsageText.widgetFigure(80), "20%")
+        AppLanguage.choose(.chineseSimplified)
+        XCTAssertEqual(ResetCardSurface.compactBadge(count: 1), "卡×1")
+        XCTAssertFalse(UsageText.widgetFigure(75).contains("剩余"))
+        XCTAssertFalse(UsageText.widgetFigure(75).contains("已用"))
+        XCTAssertEqual(QuotaPercentBasis.used.labeled(remainingPercent: 75), "已用 25%")
+    }
+
     func testZeroCardsAreAbsent() {
         let snapshot = make(count: 0, credits: [])
         XCTAssertNil(ResetCardSurface.fact(snapshot: snapshot, now: now))

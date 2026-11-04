@@ -416,6 +416,7 @@ private struct AccountDragModifier: ViewModifier {
 
 private struct AccountReorderRow: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.quotaPercentBasis) private var percentBasis
     let account: MonitoredAccount
 
     var body: some View {
@@ -437,7 +438,7 @@ private struct AccountReorderRow: View {
             Spacer(minLength: 8)
             if let headline {
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text(UsageText.remainingPercent(headline.remainingPercent))
+                    Text(percentBasis.labeled(remainingPercent: headline.remainingPercent))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                     if headline.showsCountdown {
@@ -706,6 +707,7 @@ struct LimitRow: View {
     let window: UsageWindow
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.interfaceStyle) private var interfaceStyle
+    @Environment(\.quotaPercentBasis) private var percentBasis
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -716,7 +718,7 @@ struct LimitRow: View {
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                     Spacer(minLength: 8)
-                    Text(UsageText.remainingPercent(window.remainingPercent))
+                    Text(percentBasis.labeled(remainingPercent: window.remainingPercent))
                         .font(percentFont)
                         .monospacedDigit()
                         .foregroundStyle(tint)

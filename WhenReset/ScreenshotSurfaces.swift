@@ -15,6 +15,22 @@ struct ScreenshotUsageList: View {
     }
 }
 
+struct ScreenshotSmallSquare: View {
+    var snapshots: [UsageSnapshot]
+    var now: Date
+
+    var body: some View {
+        if snapshots.count <= 1, let only = snapshots.first {
+            ScreenshotSmallUsage(snapshot: only, now: now)
+        } else {
+            SmallSquareAccountStack(snapshots: snapshots, now: now)
+                .padding(12)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+                .background(InterfaceWidgetBackground())
+        }
+    }
+}
+
 struct ScreenshotSmallUsage: View {
     var snapshot: UsageSnapshot
     var now: Date = .now
@@ -60,7 +76,7 @@ struct ScreenshotSmallUsage: View {
             }
             HStack(alignment: .lastTextBaseline, spacing: 4) {
                 Spacer(minLength: 0)
-                Text("\(Int((quota?.remainingPercent ?? 0).rounded()))%")
+                Text(UsageText.widgetFigure(quota?.remainingPercent ?? 0))
                     .font(.system(size: hasCards ? 34 : 42, weight: .medium, design: .rounded))
                     .monospacedDigit()
                     .minimumScaleFactor(0.6)
@@ -104,7 +120,7 @@ struct ScreenshotLiveCompact: View {
                     VStack(spacing: 1) {
                         ProviderIcon(providerID: account.providerID)
                             .frame(width: 14, height: 14)
-                        Text(UsageText.remainingPercent(account.headlineRemainingPercent))
+                        Text(UsageText.widgetFigure(account.headlineRemainingPercent))
                             .font(.system(size: 9, weight: .semibold))
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)

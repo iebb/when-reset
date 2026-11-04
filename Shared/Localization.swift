@@ -138,9 +138,14 @@ enum BankedResetCopy {
 }
 
 enum UsageText {
+    /// In-app wording. Follows the remaining/used setting and keeps the word.
     static func remainingPercent(_ value: Double) -> String {
-        let percent = Int(value.rounded())
-        return String(format: String.localized("%lld%% left"), locale: AppLanguage.current.locale, percent)
+        QuotaPercentBasis.current.labeled(remainingPercent: value)
+    }
+
+    /// Widgets, the lock screen, and the Dynamic Island. The number only.
+    static func widgetFigure(_ remainingPercent: Double) -> String {
+        QuotaPercentBasis.current.figure(remainingPercent: remainingPercent)
     }
 
     static func soonestBadge() -> String {
