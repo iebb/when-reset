@@ -428,6 +428,7 @@ private enum WidgetEntryResolver {
                 metric: metric,
                 homeStyle: homeStyle,
                 displayStyle: displayStyle,
+                accountLimit: accountLimit,
                 now: now
             )
         }
@@ -444,6 +445,7 @@ private enum WidgetEntryResolver {
                     metric: metric,
                     homeStyle: homeStyle,
                     displayStyle: displayStyle,
+                    accountLimit: accountLimit,
                     now: now
                 )
             }
@@ -488,6 +490,7 @@ private enum WidgetEntryResolver {
         metric: WidgetMetricEntity?,
         homeStyle: HomeWidgetDisplayStyle,
         displayStyle: LockScreenDisplayStyle,
+        accountLimit: SmallWidgetAccountLimit,
         now: Date
     ) -> UsageEntry {
         let fallbackID = UUID(uuidString: "00000000-0000-4000-8000-000000000000") ?? UUID()
