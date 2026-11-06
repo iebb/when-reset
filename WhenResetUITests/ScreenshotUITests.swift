@@ -75,6 +75,15 @@ final class ScreenshotUITests: XCTestCase {
                 name: "\(prefix)-\(appearance)-live-activity"
             )
         }
+        for appearance in language == "en" ? ["light"] : ["light", "dark"] {
+            shot(
+                language: language,
+                appearance: appearance,
+                interfaceStyle: "liquidGlass",
+                screen: "resetCard",
+                name: "\(prefix)-\(appearance)-reset-card-confirm"
+            )
+        }
     }
 
     private func shot(
@@ -251,6 +260,27 @@ final class ScreenshotUITests: XCTestCase {
             )
             XCTAssertFalse(app.staticTexts["估算价值"].exists)
             XCTAssertFalse(app.staticTexts["Estimated value"].exists)
+        case "resetCard":
+            let button = app.descendants(matching: .any)["use-reset-card"]
+            var cardSwipes = 0
+            while !button.isHittable && cardSwipes < 8 {
+                app.swipeUp()
+                cardSwipes += 1
+            }
+            XCTAssertTrue(button.waitForExistence(timeout: 8))
+            button.tap()
+            let fiveHour = language == "zh-Hans" ? "5 小时额度" : "5-hour quota"
+            let weekly = language == "zh-Hans" ? "每周额度" : "Weekly quota"
+            XCTAssertTrue(app.buttons[fiveHour].waitForExistence(timeout: 6))
+            XCTAssertTrue(app.buttons[weekly].exists)
+            let choices = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            choices.name = "\(name)-choices"
+            choices.lifetime = .keepAlways
+            add(choices)
+            app.buttons[fiveHour].tap()
+            let confirm = app.descendants(matching: .any)["use-reset-card-confirm"]
+            XCTAssertTrue(confirm.waitForExistence(timeout: 6))
+            XCTAssertTrue(confirm.label.contains("0"))
         case "usageDanger":
             let exhausted = language == "zh-Hans" ? "剩余 0%" : "0% left"
             var swipes = 0

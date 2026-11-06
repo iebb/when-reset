@@ -748,6 +748,12 @@ struct ResetCredit: Identifiable, Codable, Hashable, Sendable {
     var expiresAt: Date?
     var status: String?
     var grantedAt: Date? = nil
+    /// Provider inventory id used to redeem the card. Nil when the provider has no redeem call.
+    var providerRecordID: String? = nil
+    /// Provider reset window, such as `FIVE_HOUR` or `WEEK`.
+    var resetWindow: String? = nil
+    /// Provider grant scope sent back when redeeming, such as `GLOBAL`.
+    var grantType: String? = nil
 
     var isAvailable: Bool {
         status == nil || status?.localizedCaseInsensitiveCompare("available") == .orderedSame

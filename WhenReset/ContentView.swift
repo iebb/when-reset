@@ -619,6 +619,15 @@ struct UsageCard: View {
                     LimitRow(window: window)
                 }
             }
+            let canUseResetCard = snapshot.accountProviderID == .zai || snapshot.accountProviderID == .zhipu
+            let hasRedeemableCard = ZAIProvider.soonestUse(
+                in: snapshot.resetCredits, resetType: ZAIProvider.fiveHourResetType
+            ) != nil || ZAIProvider.soonestUse(
+                in: snapshot.resetCredits, resetType: ZAIProvider.weekResetType
+            ) != nil
+            if canUseResetCard, hasRedeemableCard {
+                ResetCardUseButton(snapshot: snapshot)
+            }
             UsageFooter(snapshot: snapshot)
         }
     }

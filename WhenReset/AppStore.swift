@@ -2590,6 +2590,27 @@ final class AppStore {
         return succeeded
     }
 
+    /// Redeems one 智谱 / Z.AI reset card the user already confirmed, then refreshes that account.
+    /// Returns a message when the provider rejects the card. Nothing calls this on its own.
+    func useZAIResetCard(_ account: MonitoredAccount, use: ZAIResetUse) async -> String? {
+        guard account.providerID == .zai || account.providerID == .zhipu else {
+            return String.localized("Could not use the reset card.")
+        }
+        do {
+            let credentials = try KeychainStore.load(for: account.id)
+            guard let rawHost = credentials.serviceHost,
+                  let quotaURL = URL(string: rawHost),
+                  ZAIProvider.resetUseURL(quotaURL: quotaURL) != nil else {
+                return String.localized("Refresh this account, then try the reset card again.")
+            }
+            try await zaiProvider.redeem(use, apiKey: credentials.accessToken, quotaURL: quotaURL)
+            _ = await refresh(account, source: .manual)
+            return nil
+        } catch {
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
     @discardableResult
     func refresh(_ account: MonitoredAccount,
                  source: UsageRefreshSource = .manual,

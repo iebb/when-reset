@@ -456,4 +456,105 @@ private struct DetailRow: View {
         return .subheadline.weight(.semibold)
     }
 }
+
+/// Manual 智谱 / Z.AI reset-card redeem. The button never fires the request;
+/// the confirmation alert is the only path that does.
+struct ResetCardUseButton: View {
+    @Environment(AppStore.self) private var store
+    let snapshot: UsageSnapshot
+    @State private var choosing = false
+    @State private var pending: ZAIResetUse?
+    @State private var errorText: String?
+    @State private var working = false
+
+    private var fiveHour: ZAIResetUse? {
+        ZAIProvider.soonestUse(in: snapshot.resetCredits, resetType: ZAIProvider.fiveHourResetType)
+    }
+
+    private var weekly: ZAIResetUse? {
+        ZAIProvider.soonestUse(in: snapshot.resetCredits, resetType: ZAIProvider.weekResetType)
+    }
+
+    var body: some View {
+        Button("Use a reset card", action: presentChoice)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(working)
+            .accessibilityIdentifier("use-reset-card")
+            .confirmationDialog("Use a reset card", isPresented: $choosing, titleVisibility: .visible) {
+                if fiveHour != nil {
+                    Button("5-hour quota") { pending = fiveHour }
+                }
+                if weekly != nil {
+                    Button("Weekly quota") { pending = weekly }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Choose which quota this reset card restores.")
+            }
+            .alert(
+                "Use a reset card",
+                isPresented: Binding(
+                    get: { pending != nil },
+                    set: { if !$0 { pending = nil } }
+                ),
+                presenting: pending
+            ) { use in
+                Button("Use this card") {
+                    let chosen = use
+                    pending = nil
+                    Task { await redeem(chosen) }
+                }
+                Button("Cancel", role: .cancel) { pending = nil }
+            } message: { use in
+                Text(Self.confirmation(for: use, credits: snapshot.resetCredits))
+                    .accessibilityIdentifier("use-reset-card-confirm")
+            }
+            .alert(
+                "Reset card",
+                isPresented: Binding(
+                    get: { errorText != nil },
+                    set: { if !$0 { errorText = nil } }
+                )
+            ) {
+                Button("OK", role: .cancel) { errorText = nil }
+            } message: {
+                Text(errorText ?? "")
+                    .accessibilityIdentifier("use-reset-card-error")
+            }
+    }
+
+    private func presentChoice() {
+        let choices = [fiveHour, weekly].compactMap { $0 }
+        if choices.count <= 1 {
+            pending = choices.first
+        } else {
+            choosing = true
+        }
+    }
+
+    private func redeem(_ use: ZAIResetUse) async {
+        working = true
+        defer { working = false }
+        guard let account = store.accounts.first(where: { $0.id == snapshot.accountID }) else {
+            errorText = String(localized: "Could not use the reset card.")
+            return
+        }
+        errorText = await store.useZAIResetCard(account, use: use)
+    }
+
+    static func confirmation(for use: ZAIResetUse, credits: [ResetCredit]) -> String {
+        let remaining = max(0, credits.filter {
+            $0.resetWindow == use.resetType && $0.isAvailable
+        }.count - 1)
+        let window = use.resetType == ZAIProvider.fiveHourResetType
+            ? String(localized: "5-hour quota")
+            : String(localized: "Weekly quota")
+        return String(
+            format: String(localized: "This resets the %@. %d reset cards of this kind will remain."),
+            window,
+            remaining
+        )
+    }
+}
 #endif

@@ -35,6 +35,7 @@ enum ZAIProviderError: LocalizedError {
     case noResettableQuota
     case authorizationFailed(String)
     case server(Int, String)
+    case resetRejected(String)
 
     var errorDescription: String? {
         switch self {
@@ -48,6 +49,8 @@ enum ZAIProviderError: LocalizedError {
             Self.authorizationMessage(host: host)
         case let .server(code, message):
             "智谱 GLM request failed (HTTP \(code)): \(message)"
+        case let .resetRejected(message):
+            message
         }
     }
 
@@ -61,6 +64,12 @@ enum ZAIProviderError: LocalizedError {
             "Neither api.z.ai nor open.bigmodel.cn accepted this Coding Plan key. Check that it belongs to an active 智谱 GLM / Z.AI Coding Plan."
         }
     }
+}
+
+struct ZAIResetUse: Equatable, Sendable {
+    var resetType: String
+    var recordID: String
+    var grantType: String
 }
 
 struct ZAIUsageResult: Sendable {
@@ -238,11 +247,105 @@ struct ZAIProvider {
                 credits.append(ResetCredit(
                     id: "zai-reset-\(key)-\(record)",
                     expiresAt: expiry,
-                    status: "available"
+                    status: "available",
+                    providerRecordID: record,
+                    resetWindow: Self.resetType(forInventoryKey: key),
+                    grantType: string(row["grantType"]) ?? string(row["grant_type"]) ?? "GLOBAL"
                 ))
             }
         }
         return credits.sorted { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
+    }
+
+    static let fiveHourResetType = "FIVE_HOUR"
+    static let weekResetType = "WEEK"
+
+    static func resetType(forInventoryKey key: String) -> String? {
+        switch key {
+        case "fiveHourResets": fiveHourResetType
+        case "weekResets", "weeklyResets": weekResetType
+        default: nil
+        }
+    }
+
+    /// Same host as the quota call that already succeeded. The key is not sent
+    /// to any other host. This is the console call
+    /// `POST /api/biz/customer-package-reset/use`.
+    static func resetUseURL(quotaURL: URL) -> URL? {
+        guard let host = quotaURL.host?.lowercased(),
+              host == globalHost || host == mainlandHost else { return nil }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = "/api/biz/customer-package-reset/use"
+        return components.url
+    }
+
+    /// The soonest unused card of one window. The caller confirms before this is sent.
+    static func soonestUse(in credits: [ResetCredit], resetType: String, now: Date = .now) -> ZAIResetUse? {
+        let matches = credits.filter { credit in
+            credit.resetWindow == resetType
+                && credit.isAvailable
+                && credit.providerRecordID?.isEmpty == false
+                && (credit.expiresAt.map { $0 > now } ?? true)
+        }
+        guard let credit = matches.min(by: {
+            ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture)
+        }), let recordID = credit.providerRecordID else { return nil }
+        let grant = credit.grantType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let grantType = grant.flatMap { $0.isEmpty ? nil : $0 } ?? "GLOBAL"
+        return ZAIResetUse(resetType: resetType, recordID: recordID, grantType: grantType)
+    }
+
+    static func useBody(_ use: ZAIResetUse) -> [String: Any] {
+        let record: Any = Int(use.recordID).map { $0 as Any } ?? use.recordID
+        return [
+            "targetType": "PERSONAL",
+            "resetType": use.resetType,
+            "recordId": record,
+            "grantType": use.grantType,
+            "requestId": "",
+        ]
+    }
+
+    /// A use call succeeds on HTTP 200 with `success != false` and `code` 200 or 0.
+    /// The list envelope's `data` object is not required.
+    static func useAccepted(_ data: Data) -> Bool {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        if (root["success"] as? Bool) == false { return false }
+        if let code = integer(root["code"]), code != 200, code != 0 { return false }
+        return true
+    }
+
+    static func useRequest(_ use: ZAIResetUse, apiKey: String, quotaURL: URL) throws -> URLRequest {
+        let key = try normalizedKey(apiKey)
+        guard let url = resetUseURL(quotaURL: quotaURL) else {
+            throw ZAIProviderError.resetRejected(String.localized("Could not use the reset card."))
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+        request.httpBody = try JSONSerialization.data(withJSONObject: useBody(use))
+        return request
+    }
+
+    func redeem(_ use: ZAIResetUse, apiKey: String, quotaURL: URL) async throws {
+        let request = try Self.useRequest(use, apiKey: apiKey, quotaURL: quotaURL)
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        let host = request.url?.host ?? "both"
+        switch status {
+        case 200..<300:
+            if Self.useAccepted(data) { return }
+            throw ZAIProviderError.resetRejected(Self.safeServerMessage(data))
+        case 401, 403:
+            throw ZAIProviderError.authorizationFailed(host)
+        default:
+            throw ZAIProviderError.server(status, Self.safeServerMessage(data))
+        }
     }
 
     private func load(account: MonitoredAccount, credentials: AccountCredentials) async throws -> ZAIUsageResult {
@@ -269,7 +372,7 @@ struct ZAIProvider {
                 case .authorizationFailed, .invalidResponse:
                     mostRecentRetryableError = error
                     if urls.count == 1 { throw error }
-                case .invalidAPIKey, .noResettableQuota, .server:
+                case .invalidAPIKey, .noResettableQuota, .server, .resetRejected:
                     throw error
                 }
             }

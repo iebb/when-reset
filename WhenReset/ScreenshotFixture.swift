@@ -180,13 +180,19 @@ enum ScreenshotFixture {
                         id: "banked-\(index)-a",
                         expiresAt: now.addingTimeInterval(20 * 3_600),
                         status: "available",
-                        grantedAt: now.addingTimeInterval(-3 * 3_600)
+                        grantedAt: now.addingTimeInterval(-3 * 3_600),
+                        providerRecordID: "3",
+                        resetWindow: "FIVE_HOUR",
+                        grantType: "GLOBAL"
                     ),
                     ResetCredit(
                         id: "banked-\(index)-b",
                         expiresAt: now.addingTimeInterval(40 * 3_600),
                         status: "available",
-                        grantedAt: now.addingTimeInterval(-2 * 3_600)
+                        grantedAt: now.addingTimeInterval(-2 * 3_600),
+                        providerRecordID: "9",
+                        resetWindow: "WEEK",
+                        grantType: "GLOBAL"
                     )
                 ]
             } else if sample.5 {

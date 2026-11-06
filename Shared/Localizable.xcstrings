@@ -7659,6 +7659,54 @@
         "zh-Hans": { "stringUnit": { "state": "translated", "value": "重置卡" } }
       }
     },
+    "Use a reset card": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Use a reset card" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "使用重置卡" } }
+      }
+    },
+    "Use this card": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Use this card" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "使用这张卡" } }
+      }
+    },
+    "5-hour quota": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "5-hour quota" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "5 小时额度" } }
+      }
+    },
+    "Weekly quota": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Weekly quota" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "每周额度" } }
+      }
+    },
+    "Choose which quota this reset card restores.": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Choose which quota this reset card restores." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "选择这张重置卡要恢复的额度。" } }
+      }
+    },
+    "This resets the %@. %d reset cards of this kind will remain.": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "This resets the %@. %d reset cards of this kind will remain." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "将重置 %@。使用后还剩 %d 张。" } }
+      }
+    },
+    "Could not use the reset card.": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Could not use the reset card." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "无法使用重置卡。" } }
+      }
+    },
+    "Refresh this account, then try the reset card again.": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Refresh this account, then try the reset card again." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "请先刷新这个账号，再使用重置卡。" } }
+      }
+    },
     "1 available": {
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "1 available" } },
