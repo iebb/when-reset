@@ -52,6 +52,29 @@ final class ScreenshotUITests: XCTestCase {
                 )
             }
         }
+        for appearance in ["light", "dark"] {
+            shot(
+                language: language,
+                appearance: appearance,
+                interfaceStyle: "liquidGlass",
+                screen: "settingsRoot",
+                name: "\(prefix)-\(appearance)-settings-root"
+            )
+            shot(
+                language: language,
+                appearance: appearance,
+                interfaceStyle: "screenTime",
+                screen: "settings",
+                name: "\(prefix)-\(appearance)-style"
+            )
+            shot(
+                language: language,
+                appearance: appearance,
+                interfaceStyle: "liquidGlass",
+                screen: "liveActivity",
+                name: "\(prefix)-\(appearance)-live-activity"
+            )
+        }
     }
 
     private func shot(
@@ -133,9 +156,6 @@ final class ScreenshotUITests: XCTestCase {
             let appearanceRow = app.staticTexts["Appearance"]
             let chineseAppearanceRow = app.staticTexts["外观"]
             XCTAssertTrue(appearanceRow.waitForExistence(timeout: 12) || chineseAppearanceRow.waitForExistence(timeout: 4))
-            let token = app.staticTexts["Token activity"]
-            let chineseToken = app.staticTexts["Token 活动"]
-            XCTAssertTrue(token.exists || chineseToken.waitForExistence(timeout: 4))
             let about = app.staticTexts["About"]
             let chineseAbout = app.staticTexts["关于"]
             var swipes = 0
@@ -144,11 +164,24 @@ final class ScreenshotUITests: XCTestCase {
                 swipes += 1
             }
             XCTAssertTrue(about.exists || chineseAbout.exists)
+            XCTAssertFalse(app.staticTexts["Self-hosted Worker"].exists)
+            XCTAssertFalse(app.staticTexts["自托管服务"].exists)
             swipes = 0
             while !appearanceRow.exists && !chineseAppearanceRow.exists && swipes < 4 {
                 app.swipeDown()
                 swipes += 1
             }
+        case "liveActivity":
+            openSettingsModule(app, english: "Live Activity", chinese: "实时活动")
+            let percent = app.staticTexts["Show percentage remaining"]
+            let chinesePercent = app.staticTexts["显示剩余百分比"]
+            let cards = app.staticTexts["Show banked resets"]
+            let chineseCards = app.staticTexts["显示重置卡"]
+            XCTAssertTrue(percent.waitForExistence(timeout: 8) || chinesePercent.waitForExistence(timeout: 4))
+            XCTAssertTrue(cards.exists || chineseCards.waitForExistence(timeout: 4))
+            XCTAssertFalse(app.staticTexts["Kong Yi"].exists)
+            XCTAssertFalse(app.staticTexts["sharkchili.cai@gmail.com"].exists)
+            XCTAssertFalse(app.switches["Kong Yi"].exists)
         case "about":
             openIdentifier(app, "settings-module-about")
             XCTAssertTrue(app.descendants(matching: .any)["about-check-updates"].waitForExistence(timeout: 12))
@@ -176,11 +209,12 @@ final class ScreenshotUITests: XCTestCase {
             openTokenActivity(app)
             XCTAssertTrue(app.descendants(matching: .any)["token-activity-cumulative"].waitForExistence(timeout: 12))
         case "tokenActivityEmpty":
-            openTokenActivity(app)
-            XCTAssertTrue(app.descendants(matching: .any)["token-activity-empty"].waitForExistence(timeout: 12))
-            let empty = app.staticTexts["No local transcripts"]
-            let chineseEmpty = app.staticTexts["没有本地记录"]
-            XCTAssertTrue(empty.exists || chineseEmpty.exists)
+            let token = app.staticTexts["Token activity"]
+            let chineseToken = app.staticTexts["Token 活动"]
+            XCTAssertTrue(app.staticTexts["Appearance"].waitForExistence(timeout: 12)
+                || app.staticTexts["外观"].waitForExistence(timeout: 4))
+            XCTAssertFalse(token.exists)
+            XCTAssertFalse(chineseToken.exists)
         case "tokenActivityExpanded":
             openTokenActivity(app)
             let missingCache = app.staticTexts["—"]
@@ -314,7 +348,7 @@ final class ScreenshotUITests: XCTestCase {
         case "classic":
             return chinese ? "经典" : "Classic"
         case "screenTime":
-            return chinese ? "屏幕使用时间" : "Screen Time"
+            return chinese ? "方块进度条" : "Block bars"
         default:
             return chinese ? "液态玻璃" : "Liquid Glass"
         }

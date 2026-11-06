@@ -662,13 +662,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Classic is a plain grouped list. Screen Time uses a rounded percent and block bars. Liquid Glass is one glass card."
+            "value": "Classic is a plain grouped list. Block bars uses a larger rounded percent and square bars. Liquid Glass is one glass card."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "经典是普通分组列表。屏幕使用时间用圆体百分比和方块进度条。液态玻璃是一张玻璃卡片。"
+            "value": "经典是普通分组列表。方块进度条用更大的圆体百分比和方形进度条。液态玻璃是一张玻璃卡片。"
           }
         }
       }
@@ -1206,13 +1206,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Screen Time"
+            "value": "Block bars"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "屏幕使用时间"
+            "value": "方块进度条"
           }
         }
       }

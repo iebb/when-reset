@@ -24,32 +24,22 @@ struct LiveActivitySettingsView: View {
             Section("Content") {
                 Toggle("Show percentage remaining", isOn: $settings.showRemainingPercentage)
                 Toggle("Show banked resets", isOn: $settings.showBankedResets)
-                ForEach(store.accounts) { account in
-                    Toggle(account.resolvedDisplayName, isOn: liveActivityInclusion(account.id))
-                }
             }
             .blinkySettingsSection()
         }
         .blinkySettingsCanvas()
         .navigationTitle("Live Activity")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { settings = store.liveActivitySettings }
-        .onChange(of: settings) { _, newValue in
-            store.setLiveActivitySettings(newValue)
+        .onAppear {
+            var current = store.liveActivitySettings
+            // Inclusion follows the Usage list. Drop any saved per-account list.
+            current.includedAccountIDs = nil
+            settings = current
         }
-    }
-
-    private func liveActivityInclusion(_ id: UUID) -> Binding<Bool> {
-        Binding {
-            settings.includes(id)
-        } set: { included in
-            var ids = settings.includedAccountIDs ?? store.accounts.map(\.id)
-            if included {
-                if !ids.contains(id) { ids.append(id) }
-            } else {
-                ids.removeAll { $0 == id }
-            }
-            settings.includedAccountIDs = ids
+        .onChange(of: settings) { _, newValue in
+            var stored = newValue
+            stored.includedAccountIDs = nil
+            store.setLiveActivitySettings(stored)
         }
     }
 

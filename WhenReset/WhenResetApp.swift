@@ -143,9 +143,11 @@ private final class MacAppRuntime {
 }
 #endif
 
-@MainActor
 enum BackgroundRefreshScheduler {
     static let identifier = UsageHistoryStore.refreshTaskIdentifier
+    /// Internal only. Not shown in Settings.
+    static let lastRunKey = "blinky.lastBackgroundRefreshAt"
+    static let lastScheduleErrorKey = "blinky.lastBackgroundScheduleError"
 
     static func scheduleNext(after interval: RefreshInterval) {
 #if os(iOS)
@@ -153,10 +155,61 @@ enum BackgroundRefreshScheduler {
         guard let delay = interval.timeInterval else { return }
         let request = BGAppRefreshTaskRequest(identifier: identifier)
         request.earliestBeginDate = .now.addingTimeInterval(delay)
-        try? BGTaskScheduler.shared.submit(request)
+        do {
+            try BGTaskScheduler.shared.submit(request)
+            UserDefaults.standard.removeObject(forKey: lastScheduleErrorKey)
+        } catch {
+            UserDefaults.standard.set(String(describing: error), forKey: lastScheduleErrorKey)
+        }
 #endif
     }
+
+    static func noteRunStarted() {
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: lastRunKey)
+    }
 }
+
+#if os(iOS)
+@MainActor
+enum BackgroundRefreshController {
+    private static var didRegister = false
+    private static var store: AppStore?
+
+    /// Must run before `application(_:didFinishLaunchingWithOptions:)` returns.
+    /// `App.init` is early enough. Do not also use `.backgroundTask`, which would register twice.
+    static func register(store: AppStore) {
+        self.store = store
+        guard !didRegister else { return }
+        didRegister = true
+        let identifier = BackgroundRefreshScheduler.identifier
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: identifier, using: nil) { task in
+            guard let refreshTask = task as? BGAppRefreshTask else {
+                task.setTaskCompleted(success: false)
+                return
+            }
+            let work = Task { @MainActor in
+                await run(refreshTask)
+            }
+            refreshTask.expirationHandler = {
+                work.cancel()
+            }
+        }
+    }
+
+    @MainActor
+    private static func run(_ task: BGAppRefreshTask) async {
+        BackgroundRefreshScheduler.noteRunStarted()
+        if let store {
+            BackgroundRefreshScheduler.scheduleNext(after: store.refreshSettings.backgroundInterval)
+            await store.synchronizeAccountsFromICloudKeychain()
+            let refreshed = await store.refreshAll(source: .background)
+            task.setTaskCompleted(success: refreshed && !Task.isCancelled)
+        } else {
+            task.setTaskCompleted(success: false)
+        }
+    }
+}
+#endif
 
 #if os(iOS)
 private struct ForegroundRefreshTaskID: Equatable {
@@ -193,6 +246,9 @@ struct WhenResetApp: App {
         let store = AppStore()
         _store = State(initialValue: store)
         RemotePushCoordinator.shared.configure(store: store)
+#if os(iOS)
+        BackgroundRefreshController.register(store: store)
+#endif
 #if os(macOS)
         MacAppRuntime.shared.configure(store: store)
 #endif
@@ -242,11 +298,6 @@ struct WhenResetApp: App {
                         Task { await store.reconcileLiveActivityAfterForegroundActivation() }
                     }
                 }
-        }
-        .backgroundTask(.appRefresh(BackgroundRefreshScheduler.identifier)) {
-            await BackgroundRefreshScheduler.scheduleNext(after: store.refreshSettings.backgroundInterval)
-            await store.synchronizeAccountsFromICloudKeychain()
-            _ = await store.refreshAll(source: .background)
         }
 #elseif os(macOS)
         Window("Blinky", id: "main") {

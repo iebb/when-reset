@@ -16,8 +16,10 @@ struct SettingsView: View {
                     moduleLink("Forecasts", systemImage: "chart.line.uptrend.xyaxis", identifier: "settings-module-forecasts") {
                         ForecastSettingsView()
                     }
-                    moduleLink("Token activity", systemImage: "square.grid.3x3", identifier: "settings-module-token-activity") {
-                        TokenActivitySettingsView()
+                    if !TokenRecordStore.shared.records.isEmpty {
+                        moduleLink("Token activity", systemImage: "square.grid.3x3", identifier: "settings-module-token-activity") {
+                            TokenActivitySettingsView()
+                        }
                     }
                     moduleLink("Language", systemImage: "globe", identifier: "settings-module-language") {
                         LanguageSettingsView()
@@ -30,9 +32,6 @@ struct SettingsView: View {
                     }
                     moduleLink("Live Activity", systemImage: "iphone", identifier: "settings-module-live-activity") {
                         LiveActivitySettingsView()
-                    }
-                    moduleLink("Self-hosted Worker", systemImage: "server.rack", identifier: "settings-module-worker") {
-                        WorkerSettingsView(onStageWorkerLink: onStageWorkerLink)
                     }
                 }
                 .blinkySettingsSection()
@@ -49,6 +48,7 @@ struct SettingsView: View {
             .navigationBarTitleDisplayMode(.large)
         }
         .blinkyScreenBackdrop(interfaceStyle)
+        .background(Color.clear.onAppear { _ = onStageWorkerLink })
     }
 
     private func moduleLink<Destination: View>(

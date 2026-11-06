@@ -35,20 +35,7 @@ struct TokenActivitySettingsView: View {
     var body: some View {
         Form {
             if records.isEmpty {
-                Section {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("No local transcripts")
-                            .font(.subheadline.weight(.semibold))
-                        Text("This iPhone has no agent transcripts to read, so there is no token chart yet.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("token-activity-empty")
-                }
-                .listRowSeparator(.hidden)
-                .blinkySettingsSection()
+                EmptyView()
             } else {
                 Section {
                     VStack(alignment: .leading, spacing: 12) {

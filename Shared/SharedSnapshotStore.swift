@@ -663,9 +663,10 @@ actor UsageHistoryStore {
         guard observedAt > state.lastObservedAt else { return }
 
         let accountName = account.resolvedDisplayName
+        let notifyingIDs = Set(snapshot.usageWindows.filter(\.showsCountdown).map(\.metricID))
         detectQuotaResets(
             previousPoints: state.metricObservations,
-            currentPoints: points,
+            currentPoints: points.filter { notifyingIDs.contains($0.metricID) },
             account: account,
             sourceIdentity: sourceIdentity,
             observedAt: observedAt,
@@ -850,14 +851,20 @@ actor UsageHistoryStore {
                 continue
             }
 
+            let resetDelta = current.resetsAt.timeIntervalSince(previous.resetsAt)
+            let remainingDelta = current.remainingPercent - previous.remainingPercent
+            // A manual refresh that did not move the window or the percent is not a reset.
+            // A full bar (100%) with the same reset time is the same window, not a recharge.
+            if abs(resetDelta) < 2 * 60, abs(remainingDelta) < 1 { continue }
+
             let windowDuration = TimeInterval(previous.windowMinutes ?? 120) * 60
-            let targetAdvanceThreshold = max(30 * 60, windowDuration * 0.25)
-            let resetCycleAdvanced = current.resetsAt.timeIntervalSince(previous.resetsAt)
-                >= targetAdvanceThreshold
+            let advanceThreshold = max(15 * 60, windowDuration * 0.25)
+            // The reset timestamp has to enter a new window. Percent alone, including 100%, does not.
+            guard resetDelta >= advanceThreshold else { continue }
+
             let scheduledBoundaryReached = previous.resetsAt
                 <= observedAt.addingTimeInterval(15 * 60)
-            let increase = current.remainingPercent - previous.remainingPercent
-            if scheduledBoundaryReached, resetCycleAdvanced || increase >= 5 {
+            if scheduledBoundaryReached {
                 scheduledResets.append((previous, current))
                 continue
             }
@@ -866,8 +873,7 @@ actor UsageHistoryStore {
             let isChatGPTWeekly = account.providerID == .chatGPT
                 && (current.kind == .weekly || current.windowMinutes == 10_080
                     || current.metricID == "weekly")
-            guard !isChatGPTWeekly, resetWasNotDue, increase >= 5,
-                  resetCycleAdvanced || current.remainingPercent >= 95 else { continue }
+            guard !isChatGPTWeekly, resetWasNotDue, remainingDelta >= 5 else { continue }
             probableEarlyResets.append((previous, current))
         }
 
@@ -881,7 +887,7 @@ actor UsageHistoryStore {
                 )
             }
             let cycleIDs = scheduledResets.map {
-                "\($0.current.metricID):\(cycleBucket($0.previous.resetsAt))"
+                "\($0.current.metricID):\(resetIdentity($0.current.resetsAt))"
             }.sorted()
             enqueue(
                 kind: .quotaReset,
@@ -902,7 +908,7 @@ actor UsageHistoryStore {
                         values.joined(separator: ", ")
                     ),
                 createdAt: observedAt,
-                deduplicationKey: "quota-reset:\(sourceIdentity):\(cycleIDs.joined(separator: ","))",
+                deduplicationKey: "quota-reset:\(account.id.uuidString.lowercased()):\(cycleIDs.joined(separator: ","))",
                 notificationsEnabled: notificationsEnabled,
                 archive: &archive
             )
@@ -919,7 +925,7 @@ actor UsageHistoryStore {
                 )
             }
             let cycleIDs = probableEarlyResets.map {
-                "\($0.current.metricID):\(cycleBucket($0.previous.resetsAt))"
+                "\($0.current.metricID):\(resetIdentity($0.current.resetsAt))"
             }.sorted()
             enqueue(
                 kind: .probableEarlyReset,
@@ -933,7 +939,7 @@ actor UsageHistoryStore {
                     changes.joined(separator: ", ")
                 ),
                 createdAt: observedAt,
-                deduplicationKey: "early-quota-reset:\(sourceIdentity):\(cycleIDs.joined(separator: ","))",
+                deduplicationKey: "early-quota-reset:\(account.id.uuidString.lowercased()):\(cycleIDs.joined(separator: ","))",
                 notificationsEnabled: notificationsEnabled,
                 archive: &archive
             )
@@ -1067,6 +1073,12 @@ actor UsageHistoryStore {
 
     private func cycleBucket(_ date: Date) -> Int64 {
         Int64((date.timeIntervalSince1970 / (5 * 60)).rounded())
+    }
+
+    /// One identity per real reset window. Minute resolution ignores sub-minute jitter
+    /// without treating every refresh as a new window.
+    private func resetIdentity(_ date: Date) -> Int64 {
+        Int64(date.timeIntervalSince1970.rounded(.down) / 60)
     }
 
     private func normalizedPlan(_ plan: String?) -> String? {

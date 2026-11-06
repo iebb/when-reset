@@ -25,7 +25,7 @@ struct ContentView: View {
         .onAppear {
             #if DEBUG
             if ScreenshotLaunch.isActive,
-               ["settings", "settingsRoot", "forecasts", "about", "notifications",
+               ["settings", "settingsRoot", "liveActivity", "forecasts", "about", "notifications",
                 "tokenActivity", "tokenActivityWeekly", "tokenActivityCumulative",
                 "tokenActivityEmpty", "tokenActivityExpanded"]
                 .contains(ScreenshotLaunch.screen) {

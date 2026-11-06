@@ -66,6 +66,7 @@ struct AppearanceSettingsView: View {
                         Text(style.title).tag(style)
                     }
                 }
+                .pickerStyle(.inline)
                 .accessibilityIdentifier("interface-style")
             } footer: {
                 Text("Classic is a plain grouped list. Screen Time uses a rounded percent and block bars. Liquid Glass is one glass card.")

@@ -2795,6 +2795,60 @@ final class UsageHistoryTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(events.first).body.contains("Premium requests 100%"))
     }
 
+    func testRepeatedZhipuRefreshDoesNotNotifyUnlessTheResetWindowMoves() async throws {
+        let store = try makeStore()
+        let start = Date(timeIntervalSince1970: 2_000_000_000)
+        let account = makeAccount(provider: .zhipu)
+        let resetAt = start.addingTimeInterval(4 * 3_600)
+        func fiveHour(_ at: Date, remaining: Double, resetsAt: Date) -> UsageSnapshot {
+            UsageSnapshot(
+                accountID: account.id,
+                providerName: "智谱",
+                accountName: "智谱",
+                accountProviderID: .zhipu,
+                plan: "Max",
+                primary: UsageWindow(
+                    title: "5h limit",
+                    usedPercent: 100 - remaining,
+                    resetsAt: resetsAt,
+                    windowMinutes: 300,
+                    kind: .fiveHour,
+                    identifier: "zai:five_hour"
+                ),
+                secondary: nil,
+                availableResetCount: 0,
+                resetCredits: [],
+                fetchedAt: at
+            )
+        }
+
+        let baseline = fiveHour(start, remaining: 80, resetsAt: resetAt)
+        _ = try await store.record(snapshot: baseline, account: account, source: .manual, now: start)
+
+        let filledAt = start.addingTimeInterval(20)
+        let filled = fiveHour(filledAt, remaining: 100, resetsAt: resetAt)
+        let filledResult = try await store.record(snapshot: filled, account: account, source: .manual, now: filledAt)
+        XCTAssertTrue(filledResult.pendingNotifications.isEmpty)
+
+        let againAt = filledAt.addingTimeInterval(15)
+        let again = fiveHour(againAt, remaining: 100, resetsAt: resetAt)
+        let againResult = try await store.record(snapshot: again, account: account, source: .manual, now: againAt)
+        XCTAssertTrue(againResult.pendingNotifications.isEmpty)
+
+        let resetObserved = againAt.addingTimeInterval(5 * 3_600)
+        let newResetAt = resetObserved.addingTimeInterval(5 * 3_600)
+        let reset = fiveHour(resetObserved, remaining: 100, resetsAt: newResetAt)
+        let resetResult = try await store.record(snapshot: reset, account: account, source: .manual, now: resetObserved)
+        let events = resetResult.pendingNotifications.filter { $0.kind == .quotaReset }
+        XCTAssertEqual(events.count, 1)
+        XCTAssertTrue(try XCTUnwrap(events.first).title.contains("5h"))
+
+        let repeatAt = resetObserved.addingTimeInterval(30)
+        let repeated = fiveHour(repeatAt, remaining: 100, resetsAt: newResetAt)
+        let repeatedResult = try await store.record(snapshot: repeated, account: account, source: .manual, now: repeatAt)
+        XCTAssertEqual(repeatedResult.pendingNotifications.filter { $0.kind == .quotaReset }.count, 1)
+    }
+
     func testShortTTLResetTargetJitterDoesNotNotify() async throws {
         let store = try makeStore()
         let start = Date(timeIntervalSince1970: 2_000_000_000)
