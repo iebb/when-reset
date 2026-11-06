@@ -471,14 +471,41 @@ private struct StyledMultiAccountRow: View {
 struct StyledLiveAccountList: View {
     var rows: [UsageActivityAccountRow]
     var onDarkSurface = false
-    var limit = 4
+    /// Lower than `LiveActivityAccounts.maximum` only for an accessibility size.
+    var limit = LiveActivityAccounts.maximum
+    /// One or two accounts keep the roomy row. The lock screen switches at three;
+    /// the expanded island switches at two so the region stays short.
+    var denseFrom = 3
     var now: Date? = nil
     @Environment(\.interfaceStyle) private var interfaceStyle
 
+    private var visible: [UsageActivityAccountRow] {
+        Array(LiveActivityAccounts.visible(rows).prefix(max(0, limit)))
+    }
+
+    private var dense: Bool { visible.count >= denseFrom }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: interfaceStyle == .screenTime ? 10 : 8) {
-            ForEach(rows.prefix(limit)) { account in
-                StyledLiveAccountRow(account: account, onDarkSurface: onDarkSurface, now: now)
+        VStack(alignment: .leading, spacing: dense ? 3 : (interfaceStyle == .screenTime ? 8 : 6)) {
+            if dense, let summary = ResetCardSurface.aggregate(
+                visible.map { ($0.resetCardCount, $0.resetCardExpiresAt) }
+            ) {
+                ResetCardAccountRow(
+                    count: summary.count,
+                    expiresAt: summary.expiresAt,
+                    now: now,
+                    onDarkSurface: onDarkSurface
+                )
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            ForEach(visible) { account in
+                StyledLiveAccountRow(
+                    account: account,
+                    onDarkSurface: onDarkSurface,
+                    now: now,
+                    dense: dense
+                )
+                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -488,55 +515,112 @@ struct StyledLiveAccountRow: View {
     var account: UsageActivityAccountRow
     var onDarkSurface = false
     var now: Date? = nil
+    var dense = false
     @Environment(\.interfaceStyle) private var interfaceStyle
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        switch interfaceStyle {
-        case .classic:
-            stack
-        case .screenTime:
-            stack
-        case .liquidGlass:
-            if onDarkSurface {
-                stack
-            } else {
-                stack
-                    .padding(8)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
-                    }
+        if dense {
+            denseStack
+        } else {
+            switch interfaceStyle {
+            case .classic, .screenTime:
+                roomyStack
+            case .liquidGlass:
+                if onDarkSurface {
+                    roomyStack
+                } else {
+                    roomyStack
+                        .padding(8)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
+                        }
+                }
             }
         }
     }
 
-    private var stack: some View {
-        VStack(alignment: .leading, spacing: 3) {
+    /// One text line and a 3pt bar. The card count is a badge, not a second
+    /// line, so four or five accounts cannot collapse onto each other.
+    private var denseStack: some View {
+        VStack(alignment: .leading, spacing: 1) {
+            HStack(alignment: .center, spacing: 4) {
+                ProviderIcon(providerID: account.providerID, symbolName: account.symbolName)
+                    .frame(width: 12, height: 12)
+                Text(account.accountName)
+                    .font(.caption2.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                if account.isSoonestReset {
+                    Text(UsageText.soonestBadge())
+                        .font(.system(size: 9, weight: .bold))
+                        .lineLimit(1)
+                        .fixedSize()
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(.orange.opacity(onDarkSurface ? 0.35 : 0.85), in: .capsule)
+                        .layoutPriority(1)
+                }
+                Spacer(minLength: 4)
+                if let reset = account.headlineResetsAt {
+                    LiveAccountCountdown(expiry: reset, now: now)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(onDarkSurface ? Color.white.opacity(0.72) : Color.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .layoutPriority(1)
+                }
+                Text(UsageText.widgetFigure(account.headlineRemainingPercent))
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(tint)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .layoutPriority(2)
+                if account.resetCardCount > 0 {
+                    ResetCardCountBadge(count: account.resetCardCount)
+                        .layoutPriority(2)
+                }
+            }
+            LiveCompactMeter(remainingFraction: account.headlineRemainingPercent / 100, onDarkSurface: onDarkSurface)
+        }
+        .foregroundStyle(onDarkSurface ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+    }
+
+    private var roomyStack: some View {
+        VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
                 ProviderIcon(providerID: account.providerID, symbolName: account.symbolName)
                     .frame(width: 14, height: 14)
                 Text(account.accountName)
                     .font(.caption.weight(.semibold))
                     .lineLimit(1)
+                    .truncationMode(.tail)
                 if account.isSoonestReset {
                     Text(UsageText.soonestBadge())
                         .font(.caption2.weight(.bold))
+                        .lineLimit(1)
+                        .fixedSize()
                         .padding(.horizontal, 4)
                         .background(.orange.opacity(onDarkSurface ? 0.35 : 0.85), in: .capsule)
+                        .layoutPriority(1)
                 }
                 Spacer(minLength: 4)
                 if let reset = account.headlineResetsAt {
-                    Text(CountdownDisplay.compactString(until: reset))
+                    LiveAccountCountdown(expiry: reset, now: now)
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(onDarkSurface ? Color.white.opacity(0.72) : Color.secondary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                        .layoutPriority(1)
                 }
                 Text(UsageText.widgetFigure(account.headlineRemainingPercent))
                     .font((interfaceStyle == .screenTime ? Font.subheadline.weight(.bold) : Font.caption).monospacedDigit())
                     .foregroundStyle(interfaceStyle == .screenTime ? AnyShapeStyle(tint) : AnyShapeStyle(.primary))
                     .lineLimit(1)
+                    .fixedSize()
+                    .layoutPriority(2)
             }
             UsageMeter(
                 remainingFraction: account.headlineRemainingPercent / 100,
@@ -553,6 +637,8 @@ struct StyledLiveAccountRow: View {
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .fixedSize()
+                        .layoutPriority(1)
                 }
             }
             if account.resetCardCount > 0 {
@@ -572,6 +658,74 @@ struct StyledLiveAccountRow: View {
             remainingFraction: account.headlineRemainingPercent / 100,
             colorScheme: onDarkSurface ? .dark : colorScheme
         )
+    }
+}
+
+/// Equal-width percent chips for the compact island.
+///
+/// The chip is only as wide as the percent, so the account nearest the camera
+/// sits against the cutout instead of behind a pad of empty black.
+struct LiveCompactCluster: View {
+    var accounts: [UsageActivityAccountRow]
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(accounts) { account in
+                VStack(spacing: 0) {
+                    ProviderIcon(providerID: account.providerID, symbolName: account.symbolName)
+                        .frame(width: 13, height: 13)
+                    Text(UsageText.widgetFigure(account.headlineRemainingPercent))
+                        .font(.system(size: 9, weight: .semibold))
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.65)
+                }
+                .frame(width: 24)
+                .accessibilityElement(children: .combine)
+            }
+        }
+        .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
+private struct LiveAccountCountdown: View {
+    var expiry: Date
+    var now: Date?
+
+    var body: some View {
+        if let now {
+            Text(CountdownDisplay.compactString(until: expiry, from: now))
+        } else {
+            TimelineView(.periodic(from: .now, by: 60)) { context in
+                Text(CountdownDisplay.compactString(until: expiry, from: context.date))
+            }
+        }
+    }
+}
+
+private struct LiveCompactMeter: View {
+    var remainingFraction: Double
+    var onDarkSurface: Bool
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.quotaPercentBasis) private var basis
+
+    var body: some View {
+        let remaining = min(1, max(0, remainingFraction))
+        let fill = basis.fillFraction(remainingFraction: remaining)
+        let tint = UsageMeterTint.color(
+            remainingFraction: remaining,
+            colorScheme: onDarkSurface ? .dark : colorScheme
+        )
+        Capsule()
+            .fill(Color.primary.opacity(0.16))
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(tint)
+                    .scaleEffect(x: max(fill, fill > 0 ? 0.02 : 0), y: 1, anchor: .leading)
+            }
+            .frame(height: 3)
+            .frame(maxWidth: .infinity)
+            .accessibilityHidden(true)
     }
 }
 #endif

@@ -13,6 +13,21 @@ enum ResetCardSurface {
         var expiresAt: Date?
     }
 
+    /// Sum of every account that still holds cards, and the soonest expiry
+    /// among them. The lock screen and the island use this as one summary
+    /// line so each account does not also spend a full row on the same fact.
+    struct Aggregate: Equatable, Sendable {
+        var count: Int
+        var expiresAt: Date?
+    }
+
+    static func aggregate(_ entries: [(Int, Date?)]) -> Aggregate? {
+        let holding = entries.filter { $0.0 > 0 }
+        let count = holding.reduce(0) { $0 + $1.0 }
+        guard count > 0 else { return nil }
+        return Aggregate(count: count, expiresAt: holding.compactMap(\.1).min())
+    }
+
     /// `included` is the account's show-reset-cards switch. Widgets pass snapshots
     /// that were already filtered; Live Activity passes the switch explicitly.
     static func fact(snapshot: UsageSnapshot, now: Date, included: Bool = true) -> Fact? {

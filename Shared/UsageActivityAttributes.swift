@@ -268,4 +268,43 @@ struct UsageActivityAttributes: ActivityAttributes {
     var accountName: String
     var providerName: String
 }
+
+/// How many account rows a Live Activity keeps, in the stored custom order.
+///
+/// The compact island used to keep three. A provider linked after those three
+/// (智谱 lands at the end of a new provider group) never reached the camera.
+/// Six rows still fit ActivityKit's 4KB content state when the view is the
+/// short row, and the order is not re-sorted by remaining quota or expiry.
+enum LiveActivityAccounts {
+    static let maximum = 6
+
+    static func visible(_ rows: [UsageActivityAccountRow]) -> [UsageActivityAccountRow] {
+        Array(rows.prefix(maximum))
+    }
+
+    struct CompactSides: Equatable {
+        var leading: [UsageActivityAccountRow]
+        var trailing: [UsageActivityAccountRow]
+    }
+
+    /// Split the custom order across the camera. The extra account, when the
+    /// count is odd, stays on the leading side so a trailing card badge does
+    /// not make one side a long cluster.
+    static func compactSides(of rows: [UsageActivityAccountRow]) -> CompactSides {
+        let shown = visible(rows)
+        guard shown.count > 1 else {
+            return CompactSides(leading: shown, trailing: [])
+        }
+        let leadingCount = (shown.count + 1) / 2
+        return CompactSides(
+            leading: Array(shown.prefix(leadingCount)),
+            trailing: Array(shown.dropFirst(leadingCount))
+        )
+    }
+
+    /// "重置卡 N 张" fits beside a single account. Two or more use "卡×N".
+    static func usesShortResetMark(_ rows: [UsageActivityAccountRow]) -> Bool {
+        visible(rows).count >= 2
+    }
+}
 #endif

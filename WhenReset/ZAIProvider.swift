@@ -179,6 +179,7 @@ struct ZAIProvider {
             ?? string(payload["packageName"])
             ?? string(payload["level"]).map { $0.capitalized }
             ?? account.plan
+        let credits = resetCredits(in: payload, now: now)
 
         return UsageSnapshot(
             accountID: account.id,
@@ -189,11 +190,59 @@ struct ZAIProvider {
             plan: plan,
             primary: fiveHour,
             secondary: weekly,
-            availableResetCount: 0,
-            resetCredits: [],
+            availableResetCount: credits.count,
+            resetCredits: credits,
             fetchedAt: now,
             extraWindows: additional.isEmpty ? nil : additional
         )
+    }
+
+    /// Reset cards are not part of `quota/limit`. They live on
+    /// `customer-package-reset/list`. A quota document that does not carry
+    /// `fiveHourResets` / `weekResets` produces no cards — callers must not
+    /// invent a count. This parser accepts either document.
+    static func parseResetInventory(data: Data, now: Date = .now) -> [ResetCredit]? {
+        guard envelopeAccepted(data),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let payload = root["data"] as? [String: Any],
+              ["fiveHourResets", "weekResets", "weeklyResets"].contains(where: { payload[$0] != nil })
+        else { return nil }
+        return resetCredits(in: payload, now: now)
+    }
+
+    /// Same host as the quota call that already succeeded. The key is not sent
+    /// to any other host.
+    static func resetListURL(quotaURL: URL) -> URL? {
+        guard let host = quotaURL.host?.lowercased(),
+              host == globalHost || host == mainlandHost else { return nil }
+        var components = URLComponents()
+        components.scheme = "https"
+        components.host = host
+        components.path = "/api/biz/customer-package-reset/list"
+        components.queryItems = [URLQueryItem(name: "targetType", value: "PERSONAL")]
+        return components.url
+    }
+
+    static func resetCredits(in payload: [String: Any], now: Date) -> [ResetCredit] {
+        var credits: [ResetCredit] = []
+        for key in ["fiveHourResets", "weekResets", "weeklyResets"] {
+            guard let rows = payload[key] as? [[String: Any]] else { continue }
+            for (index, row) in rows.enumerated() {
+                if let flag = row["available"] as? Bool, !flag { continue }
+                if let flag = row["available"] as? NSNumber, flag.intValue == 0 { continue }
+                let expiry = resetCardDate(row["expireTime"] ?? row["expiresAt"] ?? row["expire_time"])
+                if let expiry, expiry <= now { continue }
+                let record = string(row["recordId"])
+                    ?? integer(row["recordId"]).map(String.init)
+                    ?? "\(index)"
+                credits.append(ResetCredit(
+                    id: "zai-reset-\(key)-\(record)",
+                    expiresAt: expiry,
+                    status: "available"
+                ))
+            }
+        }
+        return credits.sorted { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
     }
 
     private func load(account: MonitoredAccount, credentials: AccountCredentials) async throws -> ZAIUsageResult {
@@ -205,7 +254,11 @@ struct ZAIProvider {
         for url in urls {
             do {
                 let data = try await quotaData(apiKey: apiKey, url: url)
-                let snapshot = try Self.parseUsage(account: account, data: data)
+                var snapshot = try Self.parseUsage(account: account, data: data)
+                if let inventory = await resetInventory(apiKey: apiKey, quotaURL: url, now: snapshot.fetchedAt) {
+                    snapshot.resetCredits = inventory
+                    snapshot.availableResetCount = inventory.count
+                }
                 var pinned = credentials
                 pinned.accessToken = apiKey
                 pinned.serviceRegion = ZAIStorefront(provider: account.providerID, region: region).region.rawValue
@@ -223,6 +276,14 @@ struct ZAIProvider {
         }
 
         throw mostRecentRetryableError ?? ZAIProviderError.authorizationFailed("both")
+    }
+
+    /// Best-effort. A missing or rejected inventory leaves the quota snapshot's
+    /// own cards (usually none) in place and does not fail the usage refresh.
+    private func resetInventory(apiKey: String, quotaURL: URL, now: Date) async -> [ResetCredit]? {
+        guard let url = Self.resetListURL(quotaURL: quotaURL),
+              let data = try? await quotaData(apiKey: apiKey, url: url) else { return nil }
+        return Self.parseResetInventory(data: data, now: now)
     }
 
     private func quotaData(apiKey: String, url: URL) async throws -> Data {
@@ -343,6 +404,22 @@ struct ZAIProvider {
         case 6: number == 1 ? "Weekly limit" : "\(number)-week limit"
         default: nil
         }
+    }
+
+    /// Inventory timestamps are `yyyy-MM-dd HH:mm:ss` in Asia/Shanghai.
+    /// Epoch seconds and milliseconds are accepted too.
+    private static func resetCardDate(_ value: Any?) -> Date? {
+        if let timestamp = number(value), timestamp > 0 {
+            return Date(timeIntervalSince1970: timestamp > 10_000_000_000 ? timestamp / 1_000 : timestamp)
+        }
+        guard let raw = string(value) else { return nil }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "Asia/Shanghai")
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let parsed = formatter.date(from: raw) { return parsed }
+        return ISO8601DateFormatter().date(from: raw)
     }
 
     private static func resetDate(_ value: Any?) -> Date? {

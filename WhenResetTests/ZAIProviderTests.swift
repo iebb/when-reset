@@ -59,6 +59,82 @@ final class ZAIProviderTests: XCTestCase {
         XCTAssertEqual(snapshot.extraWindows?.first?.displayTitle, "Monthly MCP limit")
         XCTAssertEqual(snapshot.extraWindows?.first?.metricID, "zai:mcp:5:1")
         XCTAssertEqual(snapshot.extraWindows?.first?.usedPercent, 40)
+        XCTAssertEqual(snapshot.availableResetCount, 0)
+        XCTAssertTrue(snapshot.resetCredits.isEmpty)
+    }
+
+    func testQuotaDocumentDoesNotInventResetCards() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let data = Data(#"""
+        {
+          "code": 200,
+          "success": true,
+          "data": {
+            "level": "max",
+            "limits": [{
+              "type": "TOKENS_LIMIT",
+              "unit": 3,
+              "number": 5,
+              "percentage": 11,
+              "nextResetTime": 1800000000000
+            }]
+          }
+        }
+        """#.utf8)
+        let account = MonitoredAccount(id: UUID(), providerID: .zhipu, displayName: "智谱",
+                                       workspaceID: "zhipu-test", plan: nil, addedAt: now)
+        let snapshot = try ZAIProvider.parseUsage(account: account, data: data, now: now)
+        XCTAssertEqual(snapshot.availableResetCount, 0)
+        XCTAssertNil(ZAIProvider.parseResetInventory(data: data, now: now))
+    }
+
+    func testResetInventoryParsesAvailableCardsAndDropsSpentOrExpiredOnes() throws {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let data = Data(#"""
+        {
+          "code": 200,
+          "success": true,
+          "data": {
+            "customerId": 41,
+            "targetType": "PERSONAL",
+            "fiveHourResets": [
+              { "recordId": 1, "expireTime": "2023-10-18 23:59:59", "available": false },
+              { "recordId": 2, "expireTime": "2023-11-07 23:59:59", "available": true },
+              { "recordId": 3, "expireTime": "2026-11-07 15:59:59", "available": true }
+            ],
+            "weekResets": [
+              { "recordId": 9, "expireTime": "2026-12-01 08:00:00", "available": true }
+            ]
+          }
+        }
+        """#.utf8)
+        let credits = try XCTUnwrap(ZAIProvider.parseResetInventory(data: data, now: now))
+        XCTAssertEqual(credits.map(\.id), [
+            "zai-reset-fiveHourResets-3",
+            "zai-reset-weekResets-9",
+        ])
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        let soonest = try XCTUnwrap(credits[0].expiresAt)
+        XCTAssertEqual(calendar.component(.year, from: soonest), 2026)
+        XCTAssertEqual(calendar.component(.month, from: soonest), 11)
+        XCTAssertEqual(calendar.component(.day, from: soonest), 7)
+        XCTAssertEqual(calendar.component(.hour, from: soonest), 15)
+        XCTAssertEqual(calendar.component(.minute, from: soonest), 59)
+
+        let resetURL = try XCTUnwrap(ZAIProvider.resetListURL(quotaURL: ZAIProvider.mainlandQuotaURL))
+        let parts = try XCTUnwrap(URLComponents(url: resetURL, resolvingAgainstBaseURL: false))
+        XCTAssertEqual(resetURL.host, "open.bigmodel.cn")
+        XCTAssertEqual(resetURL.path, "/api/biz/customer-package-reset/list")
+        XCTAssertEqual(parts.queryItems, [URLQueryItem(name: "targetType", value: "PERSONAL")])
+        XCTAssertEqual(
+            ZAIProvider.resetListURL(quotaURL: ZAIProvider.globalQuotaURL)?.host,
+            "api.z.ai"
+        )
+        XCTAssertNil(ZAIProvider.resetListURL(quotaURL: URL(string: "https://evil.example/quota")!))
+        XCTAssertTrue(ProviderID.zhipu.supportsBankedResets)
+        XCTAssertTrue(ProviderID.zai.supportsBankedResets)
+        XCTAssertFalse(ProviderID.kimi.supportsBankedResets)
     }
 
     func testCreditLimitRowsBecomeFiveHourAndWeeklyWindows() throws {

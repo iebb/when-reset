@@ -9,13 +9,28 @@ final class ResetCardSurfaceTests: XCTestCase {
         super.tearDown()
     }
 
-    func testSquareWidgetKeepsCustomOrderAndCapsAtFour() {
+    func testSquareWidgetKeepsCustomOrderAndCapsAtFive() {
         let ordered = (0..<6).map { make(count: $0 == 0 || $0 == 3 ? 1 : 0, credits: [], name: "A\($0)") }
+        XCTAssertEqual(SmallSquareAccounts.maximum, 5)
         XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 4).map(\.accountName), ["A0", "A1", "A2", "A3"])
+        XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 5).map(\.accountName), ["A0", "A1", "A2", "A3", "A4"])
         XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 2).map(\.accountName), ["A0", "A1"])
         XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 1).map(\.accountName), ["A0"])
-        XCTAssertEqual(SmallSquareAccounts.visible(Array(ordered.prefix(2)), limit: 4).map(\.accountName), ["A0", "A1"])
-        XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 99).count, 4)
+        XCTAssertEqual(SmallSquareAccounts.visible(Array(ordered.prefix(2)), limit: 5).map(\.accountName), ["A0", "A1"])
+        XCTAssertEqual(SmallSquareAccounts.visible(ordered, limit: 99).count, 5)
+    }
+
+    func testAggregateSumsCardsAndKeepsTheSoonestExpiry() {
+        let soon = now.addingTimeInterval(2 * 3_600)
+        let later = now.addingTimeInterval(20 * 3_600)
+        let summary = ResetCardSurface.aggregate([
+            (2, later),
+            (0, soon),
+            (1, soon),
+        ])
+        XCTAssertEqual(summary?.count, 3)
+        XCTAssertEqual(summary?.expiresAt, soon)
+        XCTAssertNil(ResetCardSurface.aggregate([(0, soon)]))
     }
 
     func testPercentBasisDefaultsToRemainingAndInvertsTheNumberAndFill() {
@@ -193,6 +208,75 @@ final class ResetCardSurfaceTests: XCTestCase {
     }
 
 #if os(iOS)
+    func testCompactIslandKeepsANewlyAddedProviderInCustomOrder() {
+        let rows = (0..<7).map { index in
+            UsageActivityAccountRow(
+                id: "account-\(index)",
+                accountName: "A\(index)",
+                providerID: index == 5 ? .zhipu : .chatGPT,
+                symbolName: nil,
+                headlineTitle: "5h limit",
+                headlineRemainingPercent: Double(10 * index),
+                resetCardCount: index == 5 ? 2 : 0
+            )
+        }
+        let visible = LiveActivityAccounts.visible(rows)
+        XCTAssertEqual(visible.map(\.accountName), ["A0", "A1", "A2", "A3", "A4", "A5"])
+        XCTAssertEqual(visible.map(\.providerID).filter { $0 == .zhipu }.count, 1)
+        XCTAssertFalse(visible.contains { $0.accountName == "A6" })
+
+        let sides = LiveActivityAccounts.compactSides(of: rows)
+        XCTAssertEqual(sides.leading.map(\.accountName), ["A0", "A1", "A2"])
+        XCTAssertEqual(sides.trailing.map(\.accountName), ["A3", "A4", "A5"])
+        XCTAssertEqual(sides.trailing.last?.providerID, .zhipu)
+        XCTAssertTrue(LiveActivityAccounts.usesShortResetMark(rows))
+        XCTAssertFalse(LiveActivityAccounts.usesShortResetMark(Array(rows.prefix(1))))
+
+        let four = LiveActivityAccounts.compactSides(of: Array(rows.prefix(4)))
+        XCTAssertEqual(four.leading.map(\.accountName), ["A0", "A1"])
+        XCTAssertEqual(four.trailing.map(\.accountName), ["A2", "A3"])
+    }
+
+    func testSixAccountLiveActivityPayloadStaysUnderTheActivityKitLimit() throws {
+        let rows = (0..<6).map { index in
+            UsageActivityAccountRow(
+                id: "account-\(index)",
+                accountName: index == 5 ? "智谱" : "Account \(index)",
+                providerID: index == 5 ? .zhipu : .chatGPT,
+                symbolName: nil,
+                headlineTitle: "5h limit",
+                headlineRemainingPercent: Double(10 * index),
+                secondaryTitle: "Weekly limit",
+                secondaryRemainingPercent: 40,
+                headlineResetsAt: now.addingTimeInterval(Double(index + 1) * 3_600),
+                resetCardCount: index == 5 ? 2 : (index == 0 ? 1 : 0),
+                resetCardExpiresAt: now.addingTimeInterval(20 * 3_600)
+            )
+        }
+        let targets = (0..<4).map { index in
+            UsageActivityTarget(
+                id: "target-\(index)",
+                kind: .quota,
+                accountName: "Account \(index)",
+                accountSymbolName: nil,
+                providerID: .chatGPT,
+                title: "5h limit",
+                remainingPercent: Double(10 * index),
+                expiresAt: now.addingTimeInterval(Double(index + 1) * 3_600)
+            )
+        }
+        let state = UsageActivityAttributes.ContentState(
+            targets: targets,
+            accounts: LiveActivityAccounts.visible(rows),
+            updatedAt: now
+        )
+        let data = try JSONEncoder().encode(state)
+        XCTAssertEqual(state.accounts.count, 6)
+        XCTAssertEqual(state.accounts.last?.providerID, .zhipu)
+        XCTAssertEqual(state.accounts.last?.resetCardCount, 2)
+        XCTAssertLessThan(data.count, 4_096)
+    }
+
     func testLegacyAccountRowDecodesWithoutResetCards() throws {
         struct LegacyRow: Encodable {
             var id = "account"

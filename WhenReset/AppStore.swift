@@ -4250,7 +4250,6 @@ final class AppStore {
 
     private func liveActivityAccountRows(at date: Date = .now) -> [UsageActivityAccountRow] {
         var rows: [UsageActivityAccountRow] = []
-        var soonest: (id: String, date: Date)?
         for account in accounts where liveActivitySettings.includes(account.id) {
             guard let snapshot = snapshots[account.id] else { continue }
             let accountSettings = settings(for: account)
@@ -4259,9 +4258,6 @@ final class AppStore {
             guard let headline = presented.headlineWindow(pinnedMetricID: pinned) else { continue }
             let secondary = presented.secondaryLimit(after: headline)
             let reset = headline.showsCountdown && headline.resetsAt > date ? headline.resetsAt : nil
-            if let reset, soonest == nil || reset < soonest!.date {
-                soonest = (account.id.uuidString, reset)
-            }
             let showsResetCards = liveActivitySettings.showBankedResets
                 && accountSettings.showBankedResetsInLiveActivity
             let resetCards = ResetCardSurface.fact(
@@ -4284,9 +4280,17 @@ final class AppStore {
                 resetCardExpiresAt: resetCards?.expiresAt
             ))
         }
-        return rows.map { row in
+        // Custom order, then the cap. A newly linked provider is inserted at
+        // the end of its group, so a cap of three hid it. Soonest is judged
+        // only among the rows that will actually be on screen.
+        let visible = LiveActivityAccounts.visible(rows)
+        let soonestID = visible.compactMap { row -> (String, Date)? in
+            guard let reset = row.headlineResetsAt else { return nil }
+            return (row.id, reset)
+        }.min { lhs, rhs in lhs.1 < rhs.1 }?.0
+        return visible.map { row in
             var copy = row
-            copy.isSoonestReset = row.id == soonest?.id
+            copy.isSoonestReset = row.id == soonestID
             return copy
         }
     }

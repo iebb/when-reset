@@ -91,7 +91,7 @@ struct UsageWidgetConfigurationIntent: WidgetConfigurationIntent {
     @Parameter(title: "Appearance", default: .automatic)
     var appearance: HomeWidgetDisplayStyle
     /// How many accounts the square widget shows, from the custom order.
-    /// Automatic uses every account, up to four.
+    /// Automatic uses every account, up to five.
     @Parameter(title: "Square accounts", default: .automatic)
     var accountLimit: SmallWidgetAccountLimit
 
@@ -1989,7 +1989,9 @@ struct UsageLiveActivity: Widget {
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
-                    if let account = context.state.accounts.first {
+                    let account = context.state.accounts.first { $0.isSoonestReset }
+                        ?? context.state.accounts.first
+                    if let account {
                         ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
                             .frame(width: 20, height: 20)
                     } else if let target = context.state.targets.first {
@@ -1997,7 +1999,9 @@ struct UsageLiveActivity: Widget {
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
-                    if let reset = context.state.accounts.first?.headlineResetsAt {
+                    let reset = context.state.accounts.first { $0.isSoonestReset }?.headlineResetsAt
+                        ?? context.state.accounts.compactMap(\.headlineResetsAt).min()
+                    if let reset {
                         LiveActivityCountdown(expiry: reset)
                             .font(.headline).foregroundStyle(.white)
                     } else if let target = context.state.targets.first {
@@ -2007,13 +2011,11 @@ struct UsageLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     if !context.state.accounts.isEmpty {
-                        VStack(alignment: .leading, spacing: 6) {
-                            // Three rows leave room for a reset-card line. Four
-                            // quota rows already filled this region.
-                            ForEach(context.state.accounts.prefix(3)) { account in
-                                LiveAccountBar(account: account, onDarkSurface: true)
-                            }
-                        }
+                        StyledLiveAccountList(
+                            rows: context.state.accounts,
+                            onDarkSurface: true,
+                            denseFrom: 2
+                        )
                         .blinkyUsageChrome(colorScheme: .dark)
                     } else if let target = context.state.targets.first {
                         VStack(alignment: .leading, spacing: 7) {
@@ -2030,13 +2032,15 @@ struct UsageLiveActivity: Widget {
                 }
             } compactLeading: {
                 if !context.state.accounts.isEmpty {
-                    LiveAccountStrip(accounts: context.state.accounts)
+                    LiveCompactCluster(
+                        accounts: LiveActivityAccounts.compactSides(of: context.state.accounts).leading
+                    )
+                    .foregroundStyle(.white)
                 } else if let target = context.state.targets.first { LiveProviderStack(target: target) }
             } compactTrailing: {
-                if let cards = context.state.accounts.first(where: { $0.resetCardCount > 0 }) {
-                    ResetCardCompactMark(count: cards.resetCardCount)
-                        .foregroundStyle(.white)
-                } else if context.state.accounts.isEmpty, let target = context.state.targets.first {
+                if !context.state.accounts.isEmpty {
+                    LiveCompactTrailing(accounts: context.state.accounts)
+                } else if let target = context.state.targets.first {
                     LiveActivityCountdown(expiry: target.expiresAt)
                         .font(.system(size: 12, weight: .bold, design: .rounded))
                         .minimumScaleFactor(0.78)
@@ -2189,12 +2193,13 @@ private struct LiveLockView: View {
 
     var body: some View {
         if !state.accounts.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(state.accounts.prefix(dynamicTypeSize.isAccessibilitySize ? 2 : 4)) { account in
-                    LiveAccountBar(account: account)
-                }
-            }
-            .padding(.horizontal, 12).padding(.vertical, 10)
+            StyledLiveAccountList(
+                rows: state.accounts,
+                limit: dynamicTypeSize.isAccessibilitySize ? 4 : LiveActivityAccounts.maximum,
+                denseFrom: dynamicTypeSize.isAccessibilitySize ? 1 : 3
+            )
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         } else {
         let ordered = UsageActivityTarget.ordered(state.targets)
         VStack(spacing: 8) {
@@ -2220,23 +2225,30 @@ private struct LiveLockView: View {
     }
 }
 
-private struct LiveAccountStrip: View {
+private struct LiveCompactTrailing: View {
     let accounts: [UsageActivityAccountRow]
 
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(accounts.prefix(3)) { account in
-                VStack(spacing: 1) {
-                    ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
-                        .frame(width: 12, height: 12)
-                    Text(UsageText.widgetFigure(account.headlineRemainingPercent))
-                        .font(.system(size: 8, weight: .semibold))
+        let visible = LiveActivityAccounts.visible(accounts)
+        let trailing = LiveActivityAccounts.compactSides(of: visible).trailing
+        let summary = ResetCardSurface.aggregate(visible.map { ($0.resetCardCount, $0.resetCardExpiresAt) })
+        HStack(spacing: 2) {
+            LiveCompactCluster(accounts: trailing)
+            if let summary {
+                if LiveActivityAccounts.usesShortResetMark(visible) {
+                    Text(ResetCardSurface.compactBadge(count: summary.count))
+                        .font(.system(size: 11, weight: .semibold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.6)
+                        .minimumScaleFactor(0.7)
+                        .fixedSize()
+                        .accessibilityLabel(ResetCardSurface.name(count: summary.count))
+                } else {
+                    ResetCardCompactMark(count: summary.count)
                 }
             }
         }
         .foregroundStyle(.white)
+        .fixedSize(horizontal: true, vertical: true)
     }
 }
 
@@ -2251,90 +2263,6 @@ private struct LiveActivityBackground: ViewModifier {
         case .system:
             content
         }
-    }
-}
-
-private struct LiveAccountBar: View {
-    let account: UsageActivityAccountRow
-    var onDarkSurface = false
-    @Environment(\.colorScheme) private var colorScheme
-
-    var body: some View {
-        switch InterfaceStyle.current {
-        case .classic:
-            stack
-        case .screenTime:
-            stack
-        case .liquidGlass:
-            if onDarkSurface {
-                stack
-            } else {
-                stack
-                    .padding(8)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .strokeBorder(Color.white.opacity(0.45), lineWidth: 0.5)
-                    }
-            }
-        }
-    }
-
-    private var stack: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 6) {
-                ProviderMark(providerID: account.providerID, symbolName: account.symbolName)
-                    .frame(width: 14, height: 14)
-                Text(account.accountName).font(.caption.weight(.semibold)).lineLimit(1)
-                if account.isSoonestReset {
-                    Text(UsageText.soonestBadge())
-                        .font(.caption2.weight(.bold))
-                        .padding(.horizontal, 4)
-                        .background(.orange.opacity(onDarkSurface ? 0.35 : 0.85), in: .capsule)
-                }
-                Spacer(minLength: 4)
-                if let reset = account.headlineResetsAt {
-                    LiveActivityCountdown(expiry: reset)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                Text(UsageText.widgetFigure(account.headlineRemainingPercent))
-                    .font(.caption.weight(.semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(tint)
-            }
-            UsageMeter(remainingFraction: account.headlineRemainingPercent / 100)
-            if let secondary = account.secondaryTitle, let percent = account.secondaryRemainingPercent {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(secondary)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(UsageText.widgetFigure(percent))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            // Minimal stays the provider mark. Compact shows the full name.
-            // This expanded / Lock Screen row adds the expiry beside it.
-            if account.resetCardCount > 0 {
-                ResetCardAccountRow(
-                    count: account.resetCardCount,
-                    expiresAt: account.resetCardExpiresAt,
-                    onDarkSurface: onDarkSurface
-                )
-            }
-        }
-        .foregroundStyle(onDarkSurface ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
-    }
-
-    private var tint: Color {
-        UsageMeterTint.color(
-            remainingFraction: account.headlineRemainingPercent / 100,
-            colorScheme: onDarkSurface ? .dark : colorScheme
-        )
     }
 }
 

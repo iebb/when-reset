@@ -47,7 +47,14 @@ enum ProviderID: String, Codable, CaseIterable, Sendable {
         }
     }
 
-    var supportsBankedResets: Bool { self == .chatGPT }
+    /// ChatGPT banked resets, plus 智谱 / z.ai quota reset cards from the
+    /// customer-package-reset inventory. Other providers do not publish cards.
+    var supportsBankedResets: Bool {
+        switch self {
+        case .chatGPT, .zai, .zhipu: true
+        default: false
+        }
+    }
 
     /// Browser sessions, experimental OAuth credentials, and user-selected URLs remain on-device.
     var supportsOffDeviceMonitoring: Bool {

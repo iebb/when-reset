@@ -174,7 +174,22 @@ enum ScreenshotFixture {
             accounts.append(account)
             let weeklyReportsReset = sample.0 != .zhipu
             var credits: [ResetCredit] = []
-            if sample.5 {
+            if sample.0 == .zhipu {
+                credits = [
+                    ResetCredit(
+                        id: "banked-\(index)-a",
+                        expiresAt: now.addingTimeInterval(20 * 3_600),
+                        status: "available",
+                        grantedAt: now.addingTimeInterval(-3 * 3_600)
+                    ),
+                    ResetCredit(
+                        id: "banked-\(index)-b",
+                        expiresAt: now.addingTimeInterval(40 * 3_600),
+                        status: "available",
+                        grantedAt: now.addingTimeInterval(-2 * 3_600)
+                    )
+                ]
+            } else if sample.5 {
                 credits = [
                     ResetCredit(
                         id: "banked-\(index)",

@@ -84,7 +84,7 @@ final class ScreenshotRenderTests: XCTestCase {
                 size: CGSize(width: 360, height: 320)
             )
             attach(
-                ScreenshotLiveLock(rows: rows, now: now, onDarkSurface: true, limit: 3)
+                ScreenshotLiveLock(rows: rows, now: now, onDarkSurface: true, denseFrom: 2)
                     .screenshotChrome(language: language, scheme: .dark, interfaceStyle: style),
                 name: "\(prefix)-island-\(style.rawValue)",
                 scale: 2,
@@ -106,7 +106,7 @@ final class ScreenshotRenderTests: XCTestCase {
             size: CGSize(width: 280, height: 48)
         )
         guard language == .chineseSimplified else { return }
-        for count in 1...4 {
+        for count in 1...SmallSquareAccounts.maximum {
             attach(
                 ScreenshotSmallSquare(snapshots: Array(snapshots.prefix(count)), now: now)
                     .screenshotChrome(language: language, scheme: scheme, interfaceStyle: .classic),
@@ -115,6 +115,21 @@ final class ScreenshotRenderTests: XCTestCase {
                 size: CGSize(width: 170, height: 170)
             )
         }
+        let zhipu = snapshots.filter { $0.accountProviderID == .zhipu }
+        attach(
+            ScreenshotSmallSquare(snapshots: Array(snapshots.prefix(3)) + zhipu, now: now)
+                .screenshotChrome(language: language, scheme: scheme, interfaceStyle: .classic),
+            name: "\(prefix)-widget-small-zhipu",
+            scale: 2,
+            size: CGSize(width: 170, height: 170)
+        )
+        attach(
+            ScreenshotLiveLock(rows: rows, now: now)
+                .screenshotChrome(language: language, scheme: scheme, interfaceStyle: .classic),
+            name: "\(prefix)-lock-banner",
+            scale: 2,
+            size: CGSize(width: 360, height: 200)
+        )
         QuotaPercentBasis.choose(.used)
         for count in 1...4 {
             attach(
@@ -147,7 +162,7 @@ final class ScreenshotRenderTests: XCTestCase {
             size: CGSize(width: 280, height: 48)
         )
         attach(
-            ScreenshotLiveLock(rows: rows, now: now, onDarkSurface: true, limit: 3)
+            ScreenshotLiveLock(rows: rows, now: now, onDarkSurface: true, denseFrom: 2)
                 .screenshotChrome(language: language, scheme: .dark, interfaceStyle: .classic),
             name: "\(prefix)-island-used",
             scale: 2,
