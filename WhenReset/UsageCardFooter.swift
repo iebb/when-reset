@@ -116,14 +116,18 @@ struct UsageFooter: View {
                         lightSeparator
                     }
                     if let resetDetail {
-                        DetailRow(
-                            label: String.localized("Reset cards"),
-                            value: resetDetail.countText,
-                            secondary: resetDetail.lines,
-                            valueColor: .primary,
-                            showsWarningMark: false,
-                            identifier: "usage-footer-reset-cards"
-                        )
+                        if ResetCardUseButton.isAvailable(for: snapshot) {
+                            ResetCardUseButton(snapshot: snapshot, detail: resetDetail)
+                        } else {
+                            DetailRow(
+                                label: String.localized("Reset cards"),
+                                value: resetDetail.countText,
+                                secondary: resetDetail.lines,
+                                valueColor: .primary,
+                                showsWarningMark: false,
+                                identifier: "usage-footer-reset-cards"
+                            )
+                        }
                     }
                     if let lines = codexLines, let prediction {
                         predictionRow(lines: lines, value: prediction)
@@ -385,6 +389,7 @@ private struct DetailRow: View {
     var valueColor: Color
     var showsWarningMark: Bool
     var identifier: String?
+    var markSystemImage: String? = nil
 
     @Environment(\.interfaceStyle) private var interfaceStyle
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
@@ -420,12 +425,20 @@ private struct DetailRow: View {
     }
 
     private var labelText: some View {
-        Text(label)
-            .font(.subheadline)
-            .foregroundStyle(.primary)
-            .lineLimit(1)
-            .layoutPriority(1)
-            .modifier(DetailLabelIdentifier(identifier: identifier))
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.subheadline)
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+            if let markSystemImage {
+                Image(systemName: markSystemImage)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
+            }
+        }
+        .layoutPriority(1)
+        .modifier(DetailLabelIdentifier(identifier: identifier))
     }
 
     private func valueStack(alignment: HorizontalAlignment) -> some View {
@@ -457,104 +470,187 @@ private struct DetailRow: View {
     }
 }
 
-/// Manual 智谱 / Z.AI reset-card redeem. The button never fires the request;
+/// Manual 智谱 / Z.AI / Codex reset-card redeem, drawn as the expanded
+/// "Reset cards" row with a warning mark. The row never fires the request;
 /// the confirmation alert is the only path that does.
 struct ResetCardUseButton: View {
     @Environment(AppStore.self) private var store
     let snapshot: UsageSnapshot
+    let detail: ResetCardCopy.Detail
     @State private var choosing = false
-    @State private var pending: ZAIResetUse?
+    @State private var pending: Pending?
     @State private var errorText: String?
     @State private var working = false
 
-    private var fiveHour: ZAIResetUse? {
-        ZAIProvider.soonestUse(in: snapshot.resetCredits, resetType: ZAIProvider.fiveHourResetType)
+    enum Pending: Equatable {
+        case zai(ZAIResetUse)
+        case chatGPT(ResetCredit)
     }
 
-    private var weekly: ZAIResetUse? {
-        ZAIProvider.soonestUse(in: snapshot.resetCredits, resetType: ZAIProvider.weekResetType)
+    private struct Choice: Identifiable {
+        let id: String
+        let title: String
+        let expiresAt: Date?
+        let pending: Pending
     }
 
-    var body: some View {
-        Button("Use a reset card", action: presentChoice)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(working)
-            .accessibilityIdentifier("use-reset-card")
-            .confirmationDialog("Use a reset card", isPresented: $choosing, titleVisibility: .visible) {
-                if fiveHour != nil {
-                    Button("5-hour quota") { pending = fiveHour }
-                }
-                if weekly != nil {
-                    Button("Weekly quota") { pending = weekly }
-                }
-                Button("Cancel", role: .cancel) {}
-            } message: {
-                Text("Choose which quota this reset card restores.")
-            }
-            .alert(
-                "Use a reset card",
-                isPresented: Binding(
-                    get: { pending != nil },
-                    set: { if !$0 { pending = nil } }
-                ),
-                presenting: pending
-            ) { use in
-                Button("Use this card") {
-                    let chosen = use
-                    pending = nil
-                    Task { await redeem(chosen) }
-                }
-                Button("Cancel", role: .cancel) { pending = nil }
-            } message: { use in
-                Text(Self.confirmation(for: use, credits: snapshot.resetCredits))
-                    .accessibilityIdentifier("use-reset-card-confirm")
-            }
-            .alert(
-                "Reset card",
-                isPresented: Binding(
-                    get: { errorText != nil },
-                    set: { if !$0 { errorText = nil } }
-                )
-            ) {
-                Button("OK", role: .cancel) { errorText = nil }
-            } message: {
-                Text(errorText ?? "")
-                    .accessibilityIdentifier("use-reset-card-error")
-            }
+    private var isZhipuFamily: Bool {
+        snapshot.accountProviderID == .zai || snapshot.accountProviderID == .zhipu
     }
 
-    private func presentChoice() {
-        let choices = [fiveHour, weekly].compactMap { $0 }
-        if choices.count <= 1 {
-            pending = choices.first
-        } else {
-            choosing = true
+    /// Codex cards are only spendable through the inventory id. A generated
+    /// fallback id means the response named no id, and this build does not
+    /// invent one.
+    private var chatGPTCredits: [ResetCredit] {
+        snapshot.availableResetCredits.filter { Self.isSpendableChatGPTCredit($0, now: .now) }
+    }
+
+    /// One entry per kind that still has a card, soonest expiry first.
+    private var choices: [Choice] {
+        if snapshot.accountProviderID == .chatGPT, let credit = chatGPTCredits.first {
+            return [Choice(id: "codex", title: String.localized("Use a reset card"),
+                           expiresAt: credit.expiresAt, pending: .chatGPT(credit))]
+        }
+        guard isZhipuFamily else { return [] }
+        let kinds: [(id: String, type: String, title: String)] = [
+            ("five", ZAIProvider.fiveHourResetType, String.localized("5-hour quota")),
+            ("week", ZAIProvider.weekResetType, String.localized("Weekly quota")),
+        ]
+        return kinds.compactMap { kind in
+            guard let use = ZAIProvider.soonestUse(in: snapshot.resetCredits, resetType: kind.type),
+                  let credit = soonestCredit(kind.type) else { return nil }
+            return Choice(id: kind.id, title: kind.title, expiresAt: credit.expiresAt,
+                          pending: .zai(use))
+        }
+        .sorted { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
+    }
+
+    private func soonestCredit(_ resetType: String) -> ResetCredit? {
+        snapshot.availableResetCredits.filter { credit in
+            credit.resetWindow == resetType
+                && credit.providerRecordID?.isEmpty == false
+                && (credit.expiresAt ?? .distantFuture) > Date.now
+        }
+        .min { ($0.expiresAt ?? .distantFuture) < ($1.expiresAt ?? .distantFuture) }
+    }
+
+    /// The expanded Reset cards row turns into the chooser only where a card
+    /// can actually be spent.
+    static func isAvailable(for snapshot: UsageSnapshot, now: Date = .now) -> Bool {
+        switch snapshot.accountProviderID {
+        case .chatGPT:
+            return snapshot.availableResetCredits.contains { isSpendableChatGPTCredit($0, now: now) }
+        case .zai, .zhipu:
+            return ZAIProvider.soonestUse(in: snapshot.resetCredits, resetType: ZAIProvider.fiveHourResetType) != nil
+                || ZAIProvider.soonestUse(in: snapshot.resetCredits, resetType: ZAIProvider.weekResetType) != nil
+        default:
+            return false
         }
     }
 
-    private func redeem(_ use: ZAIResetUse) async {
+    private static func isSpendableChatGPTCredit(_ credit: ResetCredit, now: Date) -> Bool {
+        !credit.id.hasPrefix("generated:") && (credit.expiresAt ?? .distantFuture) > now
+    }
+
+    var body: some View {
+        Button {
+            let options = choices
+            guard !options.isEmpty else { return }
+            if options.count == 1 {
+                pending = options[0].pending
+            } else {
+                choosing = true
+            }
+        } label: {
+            DetailRow(
+                label: String.localized("Reset cards"),
+                value: detail.countText,
+                secondary: detail.lines,
+                valueColor: .primary,
+                showsWarningMark: false,
+                identifier: "usage-footer-reset-cards",
+                markSystemImage: "exclamationmark.circle"
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(working)
+        .accessibilityIdentifier("use-reset-card")
+        .confirmationDialog("Use a reset card", isPresented: $choosing, titleVisibility: .visible) {
+            ForEach(choices) { choice in
+                Button(choice.title) { pending = choice.pending }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Choose which quota this reset card restores.")
+        }
+        .alert(
+            "Use a reset card",
+            isPresented: Binding(
+                get: { pending != nil },
+                set: { if !$0 { pending = nil } }
+            ),
+            presenting: pending
+        ) { use in
+            Button("Use this card") {
+                let chosen = use
+                pending = nil
+                Task { await redeem(chosen) }
+            }
+            Button("Cancel", role: .cancel) { pending = nil }
+        } message: { use in
+            Text(Self.confirmation(for: use, credits: snapshot.resetCredits))
+                .accessibilityIdentifier("use-reset-card-confirm")
+        }
+        .alert(
+            "Reset card",
+            isPresented: Binding(
+                get: { errorText != nil },
+                set: { if !$0 { errorText = nil } }
+            )
+        ) {
+            Button("OK", role: .cancel) { errorText = nil }
+        } message: {
+            Text(errorText ?? "")
+                .accessibilityIdentifier("use-reset-card-error")
+        }
+    }
+
+    private func redeem(_ use: Pending) async {
         working = true
         defer { working = false }
         guard let account = store.accounts.first(where: { $0.id == snapshot.accountID }) else {
             errorText = String(localized: "Could not use the reset card.")
             return
         }
-        errorText = await store.useZAIResetCard(account, use: use)
+        switch use {
+        case .zai(let zaiUse):
+            errorText = await store.useZAIResetCard(account, use: zaiUse)
+        case .chatGPT(let credit):
+            errorText = await store.useChatGPTResetCard(account, credit: credit)
+        }
     }
 
-    static func confirmation(for use: ZAIResetUse, credits: [ResetCredit]) -> String {
-        let remaining = max(0, credits.filter {
-            $0.resetWindow == use.resetType && $0.isAvailable
-        }.count - 1)
-        let window = use.resetType == ZAIProvider.fiveHourResetType
-            ? String(localized: "5-hour quota")
-            : String(localized: "Weekly quota")
-        return String(
-            format: String(localized: "This resets the %@. %d reset cards of this kind will remain."),
-            window,
-            remaining
-        )
+    static func confirmation(for use: Pending, credits: [ResetCredit]) -> String {
+        switch use {
+        case .zai(let zaiUse):
+            let remaining = max(0, credits.filter {
+                $0.resetWindow == zaiUse.resetType && $0.isAvailable
+            }.count - 1)
+            let window = zaiUse.resetType == ZAIProvider.fiveHourResetType
+                ? String(localized: "5-hour quota")
+                : String(localized: "Weekly quota")
+            return String(
+                format: String(localized: "This resets the %@. %d reset cards of this kind will remain."),
+                window,
+                remaining
+            )
+        case .chatGPT:
+            let remaining = max(0, credits.filter(\.isAvailable).count - 1)
+            return String(
+                format: String(localized: "This resets your usage limits. %d reset cards will remain."),
+                remaining
+            )
+        }
     }
 }
 #endif

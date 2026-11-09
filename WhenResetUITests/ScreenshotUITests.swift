@@ -261,9 +261,23 @@ final class ScreenshotUITests: XCTestCase {
             XCTAssertFalse(app.staticTexts["估算价值"].exists)
             XCTAssertFalse(app.staticTexts["Estimated value"].exists)
         case "resetCard":
+            let disclosures = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "identifier == %@", "forecasts-disclosure"))
             let button = app.descendants(matching: .any)["use-reset-card"]
+            // The use control lives in the expanded Reset cards row, so the
+            // card's disclosure is opened first.
+            var expandAttempts = 0
+            while !button.exists && expandAttempts < max(disclosures.count, 1) + 2 {
+                let item = disclosures.element(boundBy: min(expandAttempts, max(disclosures.count - 1, 0)))
+                if item.isHittable {
+                    item.tap()
+                } else {
+                    app.swipeUp()
+                }
+                expandAttempts += 1
+            }
             var cardSwipes = 0
-            while !button.isHittable && cardSwipes < 8 {
+            while button.exists && !button.isHittable && cardSwipes < 8 {
                 app.swipeUp()
                 cardSwipes += 1
             }

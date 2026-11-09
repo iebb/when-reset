@@ -241,12 +241,29 @@ extension View {
     /// Locale, bar style, and color scheme as stored in settings.
     /// Widget and Live Activity roots use this because they are not inside the app scene.
     /// Pass `.dark` for surfaces that stay on a black background, such as the Dynamic Island.
+    ///
+    /// A stored light or dark choice is applied as the `colorScheme` environment,
+    /// not `preferredColorScheme`: WidgetKit ignores `preferredColorScheme`, so
+    /// widgets and Live Activities kept following the system theme. Nil leaves
+    /// the system appearance alone.
     func blinkyUsageChrome(colorScheme: ColorScheme? = AppAppearance.current.colorScheme) -> some View {
-        environment(\.locale, AppLanguage.current.locale)
-            .        environment(\.usageBarStyle, UsageBarStyle.current)
+        modifier(StoredColorSchemeOverride(scheme: colorScheme))
+            .environment(\.locale, AppLanguage.current.locale)
+            .environment(\.usageBarStyle, UsageBarStyle.current)
             .environment(\.interfaceStyle, InterfaceStyle.current)
             .environment(\.quotaPercentBasis, QuotaPercentBasis.current)
-            .preferredColorScheme(colorScheme)
+    }
+}
+
+private struct StoredColorSchemeOverride: ViewModifier {
+    var scheme: ColorScheme?
+
+    func body(content: Content) -> some View {
+        if let scheme {
+            content.environment(\.colorScheme, scheme)
+        } else {
+            content
+        }
     }
 }
 

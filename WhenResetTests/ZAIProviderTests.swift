@@ -294,7 +294,7 @@ final class ZAIProviderTests: XCTestCase {
         )
         XCTAssertNil(ZAIProvider.resetUseURL(quotaURL: URL(string: "https://evil.example/quota")!))
         XCTAssertEqual(
-            ResetCardUseButton.confirmation(for: use, credits: credits),
+            ResetCardUseButton.confirmation(for: .zai(use), credits: credits),
             String(format: String(localized: "This resets the %@. %d reset cards of this kind will remain."),
                    String(localized: "5-hour quota"), 1)
         )

@@ -180,15 +180,6 @@ struct AccountSettingsView: View {
             }
             if !account.isDemo {
                 Section {
-                    Toggle("Notify About Detected Resets", isOn: $settings.notifyAboutResets)
-                    Toggle("Notify at Scheduled Reset Time",
-                           isOn: $settings.notifyAtScheduledReset)
-                } header: {
-                    Text("Notifications")
-                } footer: {
-                    Text("Detected quota resets and new banked resets use this switch. Unexpected or early resets, and alerts at the scheduled time, also need the matching switch in Settings → Notifications.")
-                }
-                Section {
                     if currentAccount.isRemoteOnly {
                         Label("Remote Worker only", systemImage: "lock.icloud.fill")
                     } else {

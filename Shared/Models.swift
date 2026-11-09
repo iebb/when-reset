@@ -470,11 +470,20 @@ struct GlobalLiveActivitySettings: Codable, Hashable, Sendable {
 }
 
 struct GlobalNotificationSettings: Codable, Hashable, Sendable {
+    /// A window started a new period on schedule, like a refilled 5-hour quota.
+    var notifyAboutQuotaResets = false
+    /// The quota moved back up before the reset was due, or a weekly window
+    /// recovered early.
     var notifyAboutUnexpectedResets = true
+    /// A new banked reset card appeared in the inventory.
+    var notifyAboutNewBankedResets = true
     var notifyAtScheduledReset = false
 
-    init(notifyAboutUnexpectedResets: Bool = true, notifyAtScheduledReset: Bool = false) {
+    init(notifyAboutUnexpectedResets: Bool = true, notifyAboutQuotaResets: Bool = false,
+         notifyAboutNewBankedResets: Bool = true, notifyAtScheduledReset: Bool = false) {
         self.notifyAboutUnexpectedResets = notifyAboutUnexpectedResets
+        self.notifyAboutQuotaResets = notifyAboutQuotaResets
+        self.notifyAboutNewBankedResets = notifyAboutNewBankedResets
         self.notifyAtScheduledReset = notifyAtScheduledReset
     }
 
@@ -484,6 +493,14 @@ struct GlobalNotificationSettings: Codable, Hashable, Sendable {
             Bool.self,
             forKey: .notifyAboutUnexpectedResets
         ) ?? true
+        notifyAboutQuotaResets = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .notifyAboutQuotaResets
+        ) ?? false
+        notifyAboutNewBankedResets = try values.decodeIfPresent(
+            Bool.self,
+            forKey: .notifyAboutNewBankedResets
+        ) ?? true
         notifyAtScheduledReset = try values.decodeIfPresent(
             Bool.self,
             forKey: .notifyAtScheduledReset
@@ -492,11 +509,23 @@ struct GlobalNotificationSettings: Codable, Hashable, Sendable {
 
     func allows(_ eventKind: UsageNotificationEvent.Kind) -> Bool {
         switch eventKind {
+        case .quotaReset:
+            notifyAboutQuotaResets
         case .probableEarlyReset, .probableEarlyWeeklyReset:
             notifyAboutUnexpectedResets
-        case .quotaReset, .newBankedReset:
-            true
+        case .newBankedReset:
+            notifyAboutNewBankedResets
         }
+    }
+
+    var wantsAnyAlert: Bool {
+        notifyAboutUnexpectedResets || notifyAboutQuotaResets
+            || notifyAboutNewBankedResets || notifyAtScheduledReset
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case notifyAboutUnexpectedResets, notifyAboutQuotaResets
+        case notifyAboutNewBankedResets, notifyAtScheduledReset
     }
 }
 
@@ -551,6 +580,26 @@ struct MonitoredAccount: Identifiable, Codable, Hashable, Sendable {
         if let custom, !custom.isEmpty { return custom }
         let remote = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         return remote.isEmpty ? providerID.displayName : remote
+    }
+
+    /// The usage card's title. A Kimi Code card keeps the provider name; the
+    /// signed-in profile or email stays in the account settings and widgets,
+    /// not on the card. A custom name the user typed still wins.
+    var usageCardTitle: String {
+        let custom = customDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let custom, !custom.isEmpty { return custom }
+        if providerID == .kimi { return providerDisplayName }
+        return resolvedDisplayName
+    }
+
+    /// The usage card's subtitle. Kimi Code shows the plan alone there, so the
+    /// provider name is not written twice on one card.
+    func usageCardSubtitle(plan: String?) -> String {
+        let custom = customDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if providerID == .kimi, (custom?.isEmpty ?? true) {
+            return ProviderID.kimi.planDisplayName(plan) ?? providerDisplayName
+        }
+        return providerSectionTitle(plan: plan)
     }
 
     mutating func mergeProviderDetails(_ details: ProviderAccountDetails) {

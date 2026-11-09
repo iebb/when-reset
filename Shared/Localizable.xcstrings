@@ -3537,6 +3537,22 @@
         }
       }
     },
+    "Quota resets": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quota resets"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "额度重置"
+          }
+        }
+      }
+    },
     "Quotas come from an internal Code Assist API that may change. Blinky never sends prompts or model requests.": {
       "localizations": {
         "en": {
@@ -6705,6 +6721,22 @@
         }
       }
     },
+    "The same switches cover every account. Quota reset alerts say a window started a new period, like a refilled 5-hour quota, and they are off by default. Unexpected or early resets cover an early quota change and an early weekly reset. Scheduled reset times alert when that time arrives.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The same switches cover every account. Quota reset alerts say a window started a new period, like a refilled 5-hour quota, and they are off by default. Unexpected or early resets cover an early quota change and an early weekly reset. Scheduled reset times alert when that time arrives."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这些开关对所有账号生效。额度重置通知表示某个窗口进入新周期（例如 5 小时额度已恢复），默认关闭。意外或提前的重置包括额度提前变化和每周额度提前重置。计划中的重置时间会在到达时提醒。"
+          }
+        }
+      }
+    },
     "Detected quota resets and new banked resets use each account’s Notify About Detected Resets switch. Turning off unexpected resets does not turn those alerts off.": {
       "localizations": {
         "en": {
@@ -6893,6 +6925,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "有新的重置卡"
+          }
+        }
+      }
+    },
+    "New reset card notices": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New reset card notices"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新重置卡通知"
           }
         }
       }
@@ -7693,6 +7741,12 @@
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "This resets the %@. %d reset cards of this kind will remain." } },
         "zh-Hans": { "stringUnit": { "state": "translated", "value": "将重置 %@。使用后还剩 %d 张。" } }
+      }
+    },
+    "This resets your usage limits. %d reset cards will remain.": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "This resets your usage limits. %d reset cards will remain." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "将重置用量限额。使用后还剩 %d 张。" } }
       }
     },
     "Could not use the reset card.": {

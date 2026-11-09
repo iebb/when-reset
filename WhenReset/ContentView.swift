@@ -426,11 +426,11 @@ private struct AccountReorderRow: View {
             ProviderIcon(providerID: account.providerID, symbolName: account.customSymbolName)
                 .frame(width: 28, height: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(account.resolvedDisplayName)
+                Text(account.usageCardTitle)
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(account.providerSectionTitle(plan: snapshot?.plan ?? account.plan))
+                Text(account.usageCardSubtitle(plan: snapshot?.plan ?? account.plan))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -465,11 +465,11 @@ private struct ProviderSectionHeader: View {
             ProviderIcon(providerID: account.providerID, symbolName: account.customSymbolName)
                 .frame(width: iconSide, height: iconSide)
             VStack(alignment: .leading, spacing: 1) {
-                Text(account.resolvedDisplayName)
+                Text(account.usageCardTitle)
                     .font(nameFont)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                Text(account.providerSectionTitle(plan: plan))
+                Text(account.usageCardSubtitle(plan: plan))
                     .font(interfaceStyle == .screenTime ? .caption2 : .caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -618,15 +618,6 @@ struct UsageCard: View {
                 ForEach(Array(snapshot.usageWindows.enumerated()), id: \.offset) { _, window in
                     LimitRow(window: window)
                 }
-            }
-            let canUseResetCard = snapshot.accountProviderID == .zai || snapshot.accountProviderID == .zhipu
-            let hasRedeemableCard = ZAIProvider.soonestUse(
-                in: snapshot.resetCredits, resetType: ZAIProvider.fiveHourResetType
-            ) != nil || ZAIProvider.soonestUse(
-                in: snapshot.resetCredits, resetType: ZAIProvider.weekResetType
-            ) != nil
-            if canUseResetCard, hasRedeemableCard {
-                ResetCardUseButton(snapshot: snapshot)
             }
             UsageFooter(snapshot: snapshot)
         }

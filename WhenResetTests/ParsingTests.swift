@@ -441,13 +441,22 @@ final class ParsingTests: XCTestCase {
         )
 
         XCTAssertTrue(decoded.notifyAboutUnexpectedResets)
+        XCTAssertFalse(decoded.notifyAboutQuotaResets)
+        XCTAssertTrue(decoded.notifyAboutNewBankedResets)
         XCTAssertFalse(decoded.notifyAtScheduledReset)
         XCTAssertTrue(decoded.allows(.probableEarlyReset))
         XCTAssertTrue(decoded.allows(.probableEarlyWeeklyReset))
+        XCTAssertTrue(decoded.allows(.newBankedReset))
+        // A scheduled 5-hour refill stays quiet unless the switch is turned on.
+        XCTAssertFalse(decoded.allows(.quotaReset))
     }
 
-    func testGlobalNotificationSettingsOnlyGateUnexpectedResetAlerts() throws {
-        let settings = GlobalNotificationSettings(notifyAboutUnexpectedResets: false)
+    func testGlobalNotificationSettingsGateEachEventKind() throws {
+        let settings = GlobalNotificationSettings(
+            notifyAboutUnexpectedResets: false,
+            notifyAboutQuotaResets: true,
+            notifyAboutNewBankedResets: false
+        )
         let decoded = try JSONDecoder().decode(
             GlobalNotificationSettings.self,
             from: JSONEncoder().encode(settings)
@@ -455,8 +464,8 @@ final class ParsingTests: XCTestCase {
 
         XCTAssertFalse(decoded.allows(.probableEarlyReset))
         XCTAssertFalse(decoded.allows(.probableEarlyWeeklyReset))
+        XCTAssertFalse(decoded.allows(.newBankedReset))
         XCTAssertTrue(decoded.allows(.quotaReset))
-        XCTAssertTrue(decoded.allows(.newBankedReset))
     }
 
     func testGlobalScheduledResetNotificationSettingRoundTripsEnabled() throws {
@@ -469,7 +478,7 @@ final class ParsingTests: XCTestCase {
         XCTAssertTrue(decoded.notifyAtScheduledReset)
     }
 
-    func testScheduledResetNotificationPlannerRequiresGlobalAndAccountOptIn() {
+    func testScheduledResetNotificationPlannerRequiresGlobalOptIn() {
         let now = Date(timeIntervalSince1970: 2_000_000_000)
         let account = MonitoredAccount(
             id: UUID(), providerID: .claude, displayName: "Claude Work",
@@ -488,17 +497,12 @@ final class ParsingTests: XCTestCase {
         let snapshots = [account.id: snapshot]
 
         XCTAssertTrue(ScheduledResetNotificationPlanner.targets(
-            accounts: [account], snapshots: snapshots, monitorSettings: [:],
-            globalSettings: .init(), now: now
-        ).isEmpty)
-        XCTAssertTrue(ScheduledResetNotificationPlanner.targets(
             accounts: [account], snapshots: snapshots,
-            monitorSettings: [account.id: .init(notifyAtScheduledReset: false)],
-            globalSettings: .init(notifyAtScheduledReset: true), now: now
+            globalSettings: .init(), now: now
         ).isEmpty)
 
         let targets = ScheduledResetNotificationPlanner.targets(
-            accounts: [account], snapshots: snapshots, monitorSettings: [:],
+            accounts: [account], snapshots: snapshots,
             globalSettings: .init(notifyAtScheduledReset: true), now: now
         )
         XCTAssertEqual(targets.count, 1)
@@ -538,7 +542,7 @@ final class ParsingTests: XCTestCase {
         )
 
         let targets = ScheduledResetNotificationPlanner.targets(
-            accounts: [account], snapshots: [account.id: snapshot], monitorSettings: [:],
+            accounts: [account], snapshots: [account.id: snapshot],
             globalSettings: .init(notifyAtScheduledReset: true), now: now
         )
         XCTAssertEqual(targets.map(\.metricID), [sooner.metricID, later.metricID])

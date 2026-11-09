@@ -356,8 +356,6 @@ private struct MacAccountDetailView: View {
     private var accountPreferences: some View {
         GroupBox("Account preferences") {
             VStack(alignment: .leading, spacing: 12) {
-                Toggle("Notify about detected resets", isOn: accountSetting(\.notifyAboutResets))
-                Toggle("Notify at scheduled reset time", isOn: accountSetting(\.notifyAtScheduledReset))
                 if currentAccount.providerID.supportsBankedResets {
                     Toggle("Show banked resets", isOn: accountSetting(\.showBankedResets))
                 }
@@ -1743,6 +1741,8 @@ struct MacSettingsView: View {
 
             Section("Notifications") {
                 Toggle("Unexpected or early resets", isOn: notificationSetting(\.notifyAboutUnexpectedResets))
+                Toggle("Quota resets", isOn: notificationSetting(\.notifyAboutQuotaResets))
+                Toggle("New reset card notices", isOn: notificationSetting(\.notifyAboutNewBankedResets))
                 Toggle("Scheduled reset times", isOn: notificationSetting(\.notifyAtScheduledReset))
             }
 

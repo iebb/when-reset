@@ -31,10 +31,6 @@ struct NotificationSettingsView: View {
         NotificationPermissionPresentation(authorization)
     }
 
-    private var configurableAccounts: [MonitoredAccount] {
-        store.accounts.filter { !$0.isDemo }
-    }
-
     var body: some View {
         Form {
             Section {
@@ -60,37 +56,20 @@ struct NotificationSettingsView: View {
             .blinkySettingsSection()
 
             Section {
+                Toggle("Quota resets",
+                       isOn: $notificationSettings.notifyAboutQuotaResets)
                 Toggle("Unexpected or early resets",
                        isOn: $notificationSettings.notifyAboutUnexpectedResets)
+                Toggle("New reset card notices",
+                       isOn: $notificationSettings.notifyAboutNewBankedResets)
                 Toggle("Scheduled reset times",
                        isOn: $notificationSettings.notifyAtScheduledReset)
             } header: {
                 Text("Notifications")
             } footer: {
-                Text("Unexpected or early resets include an early quota change and an early weekly reset. Scheduled reset times alert when that time arrives. Each account also needs its own switch on.")
+                Text("The same switches cover every account. Quota reset alerts say a window started a new period, like a refilled 5-hour quota, and they are off by default. Unexpected or early resets cover an early quota change and an early weekly reset. Scheduled reset times alert when that time arrives.")
             }
             .blinkySettingsSection()
-
-            Section {
-                Text("Detected quota resets and new banked resets use each account’s Notify About Detected Resets switch. Turning off unexpected resets does not turn those alerts off.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("Detected resets")
-            }
-            .blinkySettingsSection()
-
-            ForEach(configurableAccounts) { account in
-                Section {
-                    Toggle("Notify About Detected Resets",
-                           isOn: accountSetting(account, \.notifyAboutResets))
-                    Toggle("Notify at Scheduled Reset Time",
-                           isOn: accountSetting(account, \.notifyAtScheduledReset))
-                } header: {
-                    Text(account.resolvedDisplayName)
-                }
-                .blinkySettingsSection()
-            }
         }
         .blinkySettingsCanvas()
         .navigationTitle("Notifications")

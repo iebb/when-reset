@@ -203,6 +203,56 @@ struct ChatGPTProvider {
         return try parse(account: account, usage: usageData, credits: creditData)
     }
 
+    /// What the Codex consume call named.
+    ///
+    /// `unreported` covers a reply that named none of the known codes. It is
+    /// not a guess that the card was spent.
+    enum ResetCreditConsumeOutcome: Equatable, Sendable {
+        case reset
+        case alreadyRedeemed
+        case unreported(String)
+    }
+
+    /// Spends one banked reset credit. The Codex app redeems through
+    /// `POST /wham/rate-limit-reset-credits/consume`, the same host and
+    /// account headers the usage reads already use.
+    func consumeResetCredit(_ credit: ResetCredit, account: MonitoredAccount,
+                            credentials: AccountCredentials) async throws -> ResetCreditConsumeOutcome {
+        var request = URLRequest(
+            url: URL(string: "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")!,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: 30
+        )
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(credentials.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(account.workspaceID, forHTTPHeaderField: "ChatGPT-Account-ID")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("WhenReset/1.0", forHTTPHeaderField: "User-Agent")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "credit_id": credit.id,
+            "redeem_request_id": UUID().uuidString,
+        ])
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(status) else {
+            throw ProviderError.server(status, String(data: data, encoding: .utf8) ?? "")
+        }
+        let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+        return Self.consumeOutcome(in: object)
+    }
+
+    static func consumeOutcome(in object: [String: Any]) -> ResetCreditConsumeOutcome {
+        let named = (object["code"] as? String)
+            ?? (object["outcome"] as? String)
+            ?? (object["status"] as? String)
+        switch named?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "reset": return .reset
+        case "already_redeemed", "alreadyredeemed": return .alreadyRedeemed
+        default: return .unreported(named ?? "")
+        }
+    }
+
     private func authenticatedGet(_ url: String, account: MonitoredAccount, token: String) async throws -> Data {
         var request = URLRequest(url: URL(string: url)!)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
